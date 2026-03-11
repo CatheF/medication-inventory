@@ -39,3 +39,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local database (SQLite remnant from pre-Supabase)
+/data/
+
+# uploaded photos (local dev only — use cloud storage in production)
+/public/uploads/

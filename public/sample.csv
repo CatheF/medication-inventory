@@ -1,0 +1,11 @@
+name,barcode,stock,threshold,unit,vendor_url,notes
+Ibuprofen 200mg,012345678901,500,50,tablets,https://example.com/ibuprofen,Store below 25°C
+Acetaminophen 500mg,012345678902,300,30,tablets,,
+Cetirizine 10mg,012345678903,150,20,tablets,,Antihistamine
+Diphenhydramine 25mg,012345678904,200,25,capsules,,
+Loratadine 10mg,012345678905,100,15,tablets,,Non-drowsy antihistamine
+Normal Saline 0.9% 500mL,012345678906,40,10,bags,https://example.com/saline,Refrigerate after opening
+Hydrogen Peroxide 3%,012345678907,25,5,bottles,,Topical antiseptic
+Bandages Assorted,012345678908,500,100,pieces,,
+Nitrile Gloves M,012345678909,1000,200,pairs,,Latex-free
+Alcohol Swabs,012345678910,800,100,swabs,,70% isopropyl
