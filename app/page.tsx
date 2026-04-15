@@ -31,7 +31,7 @@ export default function Dashboard() {
           : "/api/medications";
       const res = await fetch(url);
       const data = await res.json();
-      setMedications(data);
+      setMedications(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
     } finally {

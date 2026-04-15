@@ -60,12 +60,19 @@ export async function POST(request: NextRequest) {
       if (error.code === "23505") {
         return NextResponse.json({ error: "Barcode already exists" }, { status: 409 });
       }
-      throw error;
+      console.error("[POST /api/medications] Supabase error:", error);
+      return NextResponse.json(
+        { error: "Failed to create medication", detail: error.message, code: error.code },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json(data, { status: 201 });
   } catch (error) {
-    console.error(error);
-    return NextResponse.json({ error: "Failed to create medication" }, { status: 500 });
+    console.error("[POST /api/medications] Unexpected error:", error);
+    return NextResponse.json(
+      { error: "Failed to create medication", detail: String(error) },
+      { status: 500 }
+    );
   }
 }

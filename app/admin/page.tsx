@@ -43,7 +43,8 @@ export default function AdminPage() {
   const loadMedications = useCallback(async () => {
     try {
       const res = await fetch("/api/medications");
-      setMedications(await res.json());
+      const data = await res.json();
+      setMedications(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
     }
@@ -435,6 +436,7 @@ export default function AdminPage() {
           border-radius: 0.5rem;
           font-size: 0.875rem;
           outline: none;
+          color: #111827;
         }
         .input:focus {
           ring: 2px solid #3b82f6;
