@@ -9,9 +9,15 @@ if (!supabaseUrl || !supabaseKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseKey);
 
-export type Medication = {
+export type Category = {
   id: number;
   name: string;
+  created_at: string;
+};
+
+export type Medication = {
+  id: number;
+  name: string | null;
   barcode: string;
   photo_url: string | null;
   stock: number;
@@ -19,6 +25,8 @@ export type Medication = {
   vendor_url: string | null;
   unit: string;
   notes: string | null;
+  category_id: number | null;
+  is_unnamed: boolean;
   created_at: string;
   updated_at: string;
 };

@@ -24,3 +24,22 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Inputs always use dark text; placeholders stay mid-gray.
+   Prevents the dark-mode foreground color (#ededed) from
+   making typed text invisible on light backgrounds. */
+input:not([type="file"]),
+textarea,
+select {
+  color: #111827;
+}
+
+::placeholder {
+  color: #9ca3af;
+  opacity: 1;
+}
+
+@keyframes kiosk-shrink {
+  from { width: 100%; }
+  to { width: 0%; }
+}

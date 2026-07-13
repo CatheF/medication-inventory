@@ -1,13 +1,20 @@
 -- =============================================================
 -- MedInventory — Supabase Schema
 -- Paste this entire file into the Supabase SQL Editor and run it.
+-- For EXISTING databases, skip to the migration block at the bottom.
 -- =============================================================
 
 -- ── Tables ────────────────────────────────────────────────────
 
+CREATE TABLE IF NOT EXISTS categories (
+  id         BIGSERIAL PRIMARY KEY,
+  name       TEXT UNIQUE NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS medications (
   id          BIGSERIAL PRIMARY KEY,
-  name        TEXT NOT NULL,
+  name        TEXT,
   barcode     TEXT UNIQUE NOT NULL,
   photo_url   TEXT,
   stock       INTEGER NOT NULL DEFAULT 0,
@@ -15,6 +22,8 @@ CREATE TABLE IF NOT EXISTS medications (
   vendor_url  TEXT,
   unit        TEXT NOT NULL DEFAULT 'units',
   notes       TEXT,
+  category_id BIGINT REFERENCES categories(id) ON DELETE SET NULL,
+  is_unnamed  BOOLEAN NOT NULL DEFAULT false,
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -31,6 +40,8 @@ CREATE TABLE IF NOT EXISTS transactions (
 -- ── Indexes ───────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_medications_barcode         ON medications (barcode);
+CREATE INDEX IF NOT EXISTS idx_medications_category        ON medications (category_id);
+CREATE INDEX IF NOT EXISTS idx_medications_unnamed         ON medications (is_unnamed) WHERE is_unnamed = true;
 CREATE INDEX IF NOT EXISTS idx_transactions_medication_id  ON transactions (medication_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_created_at     ON transactions (created_at);
 
@@ -95,3 +106,18 @@ BEGIN
   SELECT * FROM medications WHERE id = p_medication_id;
 END;
 $$;
+
+-- =============================================================
+-- MIGRATION — run this block if upgrading an existing database
+-- that was created before categories and is_unnamed were added.
+-- =============================================================
+--
+-- ALTER TABLE medications
+--   ADD COLUMN IF NOT EXISTS category_id BIGINT REFERENCES categories(id) ON DELETE SET NULL,
+--   ADD COLUMN IF NOT EXISTS is_unnamed   BOOLEAN NOT NULL DEFAULT false;
+--
+-- CREATE INDEX IF NOT EXISTS idx_medications_category ON medications (category_id);
+-- CREATE INDEX IF NOT EXISTS idx_medications_unnamed  ON medications (is_unnamed) WHERE is_unnamed = true;
+--
+-- -- Allow medications to be saved without a name (barcode is the only required field):
+-- ALTER TABLE medications ALTER COLUMN name DROP NOT NULL;

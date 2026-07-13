@@ -3,9 +3,11 @@
 import { useEffect, useState, useCallback } from "react";
 import Image from "next/image";
 
+type Category = { id: number; name: string };
+
 type Medication = {
   id: number;
-  name: string;
+  name: string | null;
   barcode: string;
   photo_url: string | null;
   stock: number;
@@ -13,32 +15,48 @@ type Medication = {
   unit: string;
   vendor_url: string | null;
   notes: string | null;
+  category_id: number | null;
+  is_unnamed: boolean;
 };
 
-type FormData = Omit<Medication, "id">;
+type FormData = {
+  name: string;
+  barcode: string;
+  photo_url: string | null;
+  stock: string;
+  threshold: string;
+  unit: string;
+  vendor_url: string;
+  notes: string;
+  category_id: number | null;
+};
 
 const EMPTY_FORM: FormData = {
   name: "",
   barcode: "",
   photo_url: null,
-  stock: 0,
-  threshold: 10,
+  stock: "",
+  threshold: "",
   unit: "units",
   vendor_url: "",
   notes: "",
+  category_id: null,
 };
 
 export default function AdminPage() {
   const [medications, setMedications] = useState<Medication[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [editing, setEditing] = useState<Medication | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<FormData>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [photoUploading, setPhotoUploading] = useState(false);
-  const [csvStatus, setCsvStatus] = useState<string | null>(null);
-  const [csvUploading, setCsvUploading] = useState(false);
   const [search, setSearch] = useState("");
+  // New category creation inline
+  const [showNewCatInput, setShowNewCatInput] = useState(false);
+  const [newCatName, setNewCatName] = useState("");
+  const [creatingCat, setCreatingCat] = useState(false);
 
   const loadMedications = useCallback(async () => {
     try {
@@ -50,32 +68,75 @@ export default function AdminPage() {
     }
   }, []);
 
+  const loadCategories = useCallback(async () => {
+    try {
+      const res = await fetch("/api/categories");
+      const data = await res.json();
+      setCategories(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
   useEffect(() => {
     loadMedications();
-  }, [loadMedications]);
+    loadCategories();
+  }, [loadMedications, loadCategories]);
+
+  const unnamedMeds = medications.filter((m) => m.is_unnamed);
 
   const openNew = () => {
     setEditing(null);
     setForm(EMPTY_FORM);
     setShowForm(true);
     setStatus(null);
+    setShowNewCatInput(false);
+    setNewCatName("");
   };
 
   const openEdit = (med: Medication) => {
     setEditing(med);
     setForm({
-      name: med.name,
+      name: med.name ?? "",
       barcode: med.barcode,
       photo_url: med.photo_url,
-      stock: med.stock,
-      threshold: med.threshold,
+      stock: String(med.stock),
+      threshold: String(med.threshold),
       unit: med.unit,
       vendor_url: med.vendor_url || "",
       notes: med.notes || "",
+      category_id: med.category_id,
     });
     setShowForm(true);
     setStatus(null);
+    setShowNewCatInput(false);
+    setNewCatName("");
     window.scrollTo({ top: 0, behavior: "smooth" });
+  };
+
+  const handleCreateCategory = async () => {
+    if (!newCatName.trim()) return;
+    setCreatingCat(true);
+    try {
+      const res = await fetch("/api/categories", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: newCatName.trim() }),
+      });
+      const cat = await res.json();
+      if (!res.ok && res.status !== 200) {
+        setStatus({ type: "error", text: "Failed to create category" });
+        return;
+      }
+      await loadCategories();
+      setForm((f) => ({ ...f, category_id: cat.id }));
+      setShowNewCatInput(false);
+      setNewCatName("");
+    } catch {
+      setStatus({ type: "error", text: "Failed to create category" });
+    } finally {
+      setCreatingCat(false);
+    }
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -108,13 +169,17 @@ export default function AdminPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...form,
+          stock: form.stock === "" ? 0 : Number(form.stock),
+          threshold: form.threshold === "" ? 0 : Number(form.threshold),
           vendor_url: form.vendor_url || null,
           notes: form.notes || null,
+          category_id: form.category_id,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        setStatus({ type: "error", text: data.error || "Save failed" });
+        const detail = data.detail ? ` — ${data.detail}` : data.code ? ` (${data.code})` : "";
+        setStatus({ type: "error", text: (data.error || "Save failed") + detail });
         return;
       }
       setStatus({ type: "success", text: editing ? "Medication updated." : "Medication added." });
@@ -129,7 +194,7 @@ export default function AdminPage() {
   };
 
   const handleDelete = async (med: Medication) => {
-    if (!confirm(`Delete "${med.name}"? This also deletes all its transaction history.`)) return;
+    if (!confirm(`Delete "${med.name || med.barcode}"? This also deletes all its transaction history.`)) return;
     try {
       await fetch(`/api/medications/${med.id}`, { method: "DELETE" });
       loadMedications();
@@ -142,38 +207,9 @@ export default function AdminPage() {
     }
   };
 
-  const handleCsvImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setCsvUploading(true);
-    setCsvStatus(null);
-    try {
-      const text = await file.text();
-      const res = await fetch("/api/import", {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: text,
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setCsvStatus(`Error: ${data.error}`);
-        return;
-      }
-      setCsvStatus(
-        `Import complete: ${data.inserted} added, ${data.updated} updated, ${data.skipped} skipped.`
-      );
-      loadMedications();
-    } catch {
-      setCsvStatus("Import failed");
-    } finally {
-      setCsvUploading(false);
-      e.target.value = "";
-    }
-  };
-
   const displayed = medications.filter(
     (m) =>
-      m.name.toLowerCase().includes(search.toLowerCase()) ||
+      (m.name ?? "").toLowerCase().includes(search.toLowerCase()) ||
       m.barcode.includes(search)
   );
 
@@ -182,7 +218,7 @@ export default function AdminPage() {
       <div className="flex items-center justify-between mb-5">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Admin</h1>
-          <p className="text-sm text-gray-500">Manage medications and bulk import data.</p>
+          <p className="text-sm text-gray-500">Manage medications.</p>
         </div>
         <button
           onClick={openNew}
@@ -191,6 +227,43 @@ export default function AdminPage() {
           + Add Medication
         </button>
       </div>
+
+      {/* Unnamed items review section */}
+      {unnamedMeds.length > 0 && (
+        <div className="mb-5 bg-amber-50 border border-amber-300 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="text-amber-600 text-lg">⚠</span>
+            <h2 className="font-semibold text-amber-800">
+              {unnamedMeds.length} unnamed item{unnamedMeds.length !== 1 ? "s" : ""} need review
+            </h2>
+            <span className="text-xs text-amber-600">
+              — scanned barcodes not yet in the system
+            </span>
+          </div>
+          <div className="space-y-2">
+            {unnamedMeds.map((med) => (
+              <div
+                key={med.id}
+                className="flex items-center justify-between bg-white rounded-lg border border-amber-200 px-3 py-2"
+              >
+                <div>
+                  <p className="text-xs text-gray-500 font-mono">{med.barcode}</p>
+                  <p className="text-sm text-gray-700">{med.name || <span className="text-gray-400 italic">no name</span>}</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-gray-400">{med.stock} {med.unit}</span>
+                  <button
+                    onClick={() => openEdit(med)}
+                    className="px-3 py-1 text-xs bg-amber-600 text-white rounded hover:bg-amber-700"
+                  >
+                    Complete
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Status */}
       {status && (
@@ -209,13 +282,29 @@ export default function AdminPage() {
       {showForm && (
         <div className="bg-white border border-gray-200 rounded-xl p-6 mb-6 shadow-sm">
           <h2 className="text-lg font-semibold mb-4">
-            {editing ? `Edit: ${editing.name}` : "New Medication"}
+            {editing
+              ? editing.is_unnamed
+                ? `Complete unnamed item: ${editing.barcode}`
+                : `Edit: ${editing.name || editing.barcode}`
+              : "New Medication"}
           </h2>
-          <form onSubmit={handleSave} className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {editing?.is_unnamed && (
+            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
+              This barcode was auto-created from a scan. Fill in the details below to complete the record.
+            </div>
+          )}
+          <form
+            onSubmit={handleSave}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "TEXTAREA") {
+                e.preventDefault();
+              }
+            }}
+            className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+          >
             <div className="sm:col-span-2">
-              <label className="label">Name *</label>
+              <label className="label">Name</label>
               <input
-                required
                 type="text"
                 value={form.name}
                 onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
@@ -250,10 +339,12 @@ export default function AdminPage() {
             <div>
               <label className="label">Current Stock</label>
               <input
-                type="number"
-                min={0}
+                type="text"
+                inputMode="numeric"
                 value={form.stock}
-                onChange={(e) => setForm((f) => ({ ...f, stock: Number(e.target.value) }))}
+                placeholder="0"
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setForm((f) => ({ ...f, stock: e.target.value.replace(/[^0-9]/g, "") }))}
                 className="input"
               />
             </div>
@@ -261,12 +352,79 @@ export default function AdminPage() {
             <div>
               <label className="label">Low-Stock Threshold</label>
               <input
-                type="number"
-                min={0}
+                type="text"
+                inputMode="numeric"
                 value={form.threshold}
-                onChange={(e) => setForm((f) => ({ ...f, threshold: Number(e.target.value) }))}
+                placeholder="0"
+                onFocus={(e) => e.target.select()}
+                onChange={(e) => setForm((f) => ({ ...f, threshold: e.target.value.replace(/[^0-9]/g, "") }))}
                 className="input"
               />
+            </div>
+
+            {/* Category picker */}
+            <div className="sm:col-span-2">
+              <label className="label">Category</label>
+              {!showNewCatInput ? (
+                <div className="flex gap-2">
+                  <select
+                    value={form.category_id ?? ""}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      if (val === "__new__") {
+                        setShowNewCatInput(true);
+                        setForm((f) => ({ ...f, category_id: null }));
+                      } else {
+                        setForm((f) => ({ ...f, category_id: val === "" ? null : Number(val) }));
+                      }
+                    }}
+                    className="input flex-1"
+                  >
+                    <option value="">— No category —</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                    <option value="__new__">+ Create new category…</option>
+                  </select>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <input
+                    autoFocus
+                    type="text"
+                    value={newCatName}
+                    onChange={(e) => setNewCatName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") { e.preventDefault(); handleCreateCategory(); }
+                      if (e.key === "Escape") { setShowNewCatInput(false); setNewCatName(""); }
+                    }}
+                    placeholder="New category name…"
+                    className="input flex-1"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleCreateCategory}
+                    disabled={creatingCat || !newCatName.trim()}
+                    className="px-4 py-2 bg-blue-700 text-white rounded-lg text-sm font-medium hover:bg-blue-800 disabled:opacity-50"
+                  >
+                    {creatingCat ? "Saving…" : "Save"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setShowNewCatInput(false); setNewCatName(""); }}
+                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+              {form.category_id && (
+                <p className="text-xs text-gray-500 mt-1">
+                  Category: {categories.find((c) => c.id === form.category_id)?.name}
+                </p>
+              )}
             </div>
 
             <div className="sm:col-span-2">
@@ -331,36 +489,6 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* CSV Import */}
-      <div className="bg-white border border-gray-200 rounded-xl p-5 mb-6">
-        <h2 className="text-base font-semibold mb-1">Bulk CSV Import</h2>
-        <p className="text-sm text-gray-500 mb-3">
-          Upload a CSV with columns: <code className="bg-gray-100 px-1 rounded text-xs">name, barcode, stock, threshold, unit, vendor_url, notes</code>. Existing barcodes will be updated.
-        </p>
-        <div className="flex items-center gap-3">
-          <input
-            type="file"
-            accept=".csv,text/csv"
-            onChange={handleCsvImport}
-            disabled={csvUploading}
-            className="block text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 disabled:opacity-50"
-          />
-          {csvUploading && <span className="text-sm text-gray-500">Importing...</span>}
-        </div>
-        {csvStatus && (
-          <p className={`mt-2 text-sm ${csvStatus.startsWith("Error") ? "text-red-600" : "text-green-700"}`}>
-            {csvStatus}
-          </p>
-        )}
-        <a
-          href="/sample.csv"
-          download
-          className="inline-block mt-2 text-xs text-blue-600 hover:underline"
-        >
-          Download sample CSV template
-        </a>
-      </div>
-
       {/* Medication list */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
         <div className="p-4 border-b border-gray-100 flex items-center justify-between">
@@ -372,7 +500,7 @@ export default function AdminPage() {
             placeholder="Search..."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-400"
+            className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-400 text-gray-900"
           />
         </div>
 
@@ -386,17 +514,33 @@ export default function AdminPage() {
               <div key={med.id} className="flex items-center gap-3 p-4 hover:bg-gray-50">
                 <div className="relative w-10 h-10 rounded-lg overflow-hidden border border-gray-200 flex-shrink-0 bg-gray-50">
                   {med.photo_url ? (
-                    <Image src={med.photo_url} alt={med.name} fill className="object-cover" unoptimized />
+                    <Image src={med.photo_url} alt={med.name ?? med.barcode} fill className="object-cover" unoptimized />
                   ) : (
                     <span className="flex items-center justify-center h-full text-xs text-gray-400">Rx</span>
                   )}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="font-medium text-sm text-gray-900 truncate">{med.name}</p>
+                  <div className="flex items-center gap-2">
+                    <p className="font-medium text-sm text-gray-900 truncate">{med.name || med.barcode}</p>
+                    {med.is_unnamed && (
+                      <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded shrink-0">
+                        needs review
+                      </span>
+                    )}
+                    {med.category_id && (
+                      <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded shrink-0">
+                        {categories.find((c) => c.id === med.category_id)?.name}
+                      </span>
+                    )}
+                  </div>
                   <p className="text-xs text-gray-400 font-mono">{med.barcode}</p>
                 </div>
                 <div className="text-right flex-shrink-0">
-                  <p className={`text-sm font-semibold ${med.stock <= med.threshold ? "text-amber-600" : "text-gray-900"}`}>
+                  <p
+                    className={`text-sm font-semibold ${
+                      med.stock <= med.threshold ? "text-amber-600" : "text-gray-900"
+                    }`}
+                  >
                     {med.stock} {med.unit}
                   </p>
                   <p className="text-xs text-gray-400">threshold: {med.threshold}</p>
