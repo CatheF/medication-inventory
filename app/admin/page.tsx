@@ -147,11 +147,12 @@ export default function AdminPage() {
       const fd = new FormData();
       fd.append("file", file);
       const res = await fetch("/api/upload", { method: "POST", body: fd });
-      if (!res.ok) throw new Error("Upload failed");
-      const { url } = await res.json();
-      setForm((f) => ({ ...f, photo_url: url }));
-    } catch {
-      setStatus({ type: "error", text: "Photo upload failed" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Upload failed");
+      setForm((f) => ({ ...f, photo_url: data.url }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Photo upload failed";
+      setStatus({ type: "error", text: `Photo upload failed: ${msg}` });
     } finally {
       setPhotoUploading(false);
     }
