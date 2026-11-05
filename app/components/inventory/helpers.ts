@@ -24,6 +24,19 @@ export function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many;
 }
 
+/**
+ * One press, one action. Enter on a button "clicks" it on keydown, and a key that is HELD sends a keydown with `repeat` set
+ * every few dozen milliseconds, each of which would click again. That is harmless for a button that stays as it is, but not
+ * for one that changes what is on screen: a disclosure flips open and shut on every repeat, and a button that moves keyboard
+ * focus as it acts (Undo -> Dismiss, a category chip -> the "Category" button) hands the key to the NEXT button, whose
+ * handler then runs too. Cancelling the repeats (preventDefault on keydown also cancels the click) makes a held Enter press
+ * once; a new press is a new keydown and works as usual. (ActiveFilterChips does the same for its own buttons.)
+ * Use as `onKeyDown={ignoreHeldEnter}` on a button, or on a wrapper around several.
+ */
+export function ignoreHeldEnter(event: { key: string; repeat: boolean; preventDefault(): void }): void {
+  if (event.repeat && event.key === "Enter") event.preventDefault();
+}
+
 /** Comparison key for a category id, written exactly like the view logic does it: trimmed, lower-cased, blank = null. */
 export function idKey(value: unknown): string | null {
   if (value === null || value === undefined) return null;

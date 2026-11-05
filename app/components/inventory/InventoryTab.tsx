@@ -31,6 +31,7 @@ import {
   categoryLabelFor,
   describeActiveFilters,
   idKey,
+  ignoreHeldEnter,
   orderCategories,
   plural,
   rememberedName,
@@ -357,6 +358,7 @@ export function InventoryTab({
               type="button"
               data-testid="show-low-stock"
               aria-pressed={effectiveView.stock === "low"}
+              onKeyDown={ignoreHeldEnter}
               onClick={() => update({ stock: effectiveView.stock === "low" ? "all" : "low" })}
               className={`inline-flex min-h-10 items-center gap-1.5 rounded-md border px-3 text-sm font-semibold text-amber-900 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-amber-700 ${
                 effectiveView.stock === "low"

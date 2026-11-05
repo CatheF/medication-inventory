@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import Link from "next/link";
+import type { IScannerControls } from "@zxing/browser";
 import type { Category, Medication } from "@/lib/db";
 import { normalizeCategory, normalizeMedication } from "@/lib/normalize";
 import { InventoryTab, type InventoryStatus } from "./components/inventory/InventoryTab";
@@ -135,6 +136,13 @@ export default function MainPage() {
   // The stream getUserMedia handed out. The <video> element (and its srcObject) is gone as soon as the Scan tab is left,
   // so the tracks that keep the camera (and its LED) on can only be reached through this ref.
   const streamRef = useRef<MediaStream | null>(null);
+  // The decode loop of @zxing/browser. It is a timer loop of its own (it copies the <video> into a canvas twice a second) and
+  // goes on after the stream has ended, for as long as the page lives, until stop() is called on the controls it handed back.
+  const decoderRef = useRef<IScannerControls | null>(null);
+  // Which Start Camera press is the current one. Everything that ends the camera moves it on, so a start that was overtaken (the
+  // tab was left, or a scan came in, while it still waited for the permission, the video or the decoder) can tell, and cleans up
+  // after itself instead of starting a decode loop that nothing would ever stop.
+  const cameraRunRef = useRef(0);
   const tabButtonRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
   // True only while a request for a scan or a transaction is in flight: a second scan then waits for the first.
   const scanLockRef = useRef(false);
@@ -235,9 +243,12 @@ export default function MainPage() {
   }, [applyInventory]);
 
   // ── Camera ──────────────────────────────────────────────────────
-  // Ends the camera itself: every track of the stream we started (kept in streamRef) and of whatever the <video> still
-  // shows. It touches no state, so it is safe to call from an effect or a cleanup.
+  // Ends the camera itself: the decode loop, then every track of the stream we started (kept in streamRef) and of whatever
+  // the <video> still shows. It touches no state, so it is safe to call from an effect or a cleanup.
   const releaseStream = useCallback(() => {
+    cameraRunRef.current += 1; // retires any Start Camera that is still on its way (see startCamera)
+    decoderRef.current?.stop();
+    decoderRef.current = null;
     const video = videoRef.current;
     const streams = new Set<MediaStream>();
     if (streamRef.current) streams.add(streamRef.current);
@@ -270,6 +281,9 @@ export default function MainPage() {
   const startCamera = useCallback(async () => {
     setCameraError(null);
     resetScan();
+    // This press's number, taken once the stream has arrived (-1 until then). From then on `run !== cameraRunRef.current` means
+    // the camera was ended or started again meanwhile, and whatever is left of this start must go.
+    let run = -1;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
       if (!videoRef.current) {
@@ -277,20 +291,29 @@ export default function MainPage() {
         stream.getTracks().forEach((track) => track.stop());
         return;
       }
-      // A second Start Camera pressed while the first request was pending: the older stream must not keep running.
+      // A second Start Camera pressed while the first request was pending: the older stream and decode loop must not keep running.
       releaseStream();
+      run = cameraRunRef.current;
       streamRef.current = stream;
       videoRef.current.srcObject = stream;
       await videoRef.current.play();
+      if (run !== cameraRunRef.current) return; // ended while the video was starting: its stream is released already
       setScanning(true);
       const { BrowserMultiFormatReader } = await import("@zxing/browser");
+      const video = videoRef.current;
+      if (run !== cameraRunRef.current || !video) return;
       const reader = new BrowserMultiFormatReader();
       try {
-        await reader.decodeFromVideoElement(videoRef.current, (result) => {
-          if (result) processBarcodeRef.current(result.getText());
+        const controls = await reader.decodeFromVideoElement(video, (result) => {
+          if (result && run === cameraRunRef.current) processBarcodeRef.current(result.getText());
         });
+        if (run === cameraRunRef.current) decoderRef.current = controls;
+        else controls.stop(); // ended while the decoder was starting: this loop has no owner any more
       } catch { /* expected when stream stops */ }
     } catch (err: unknown) {
+      // Once the stream had arrived, an error of a start that was overtaken (its play() aborted by the release, say) is a
+      // consequence of that, not news. Before that (permission denied, no camera) the error is always shown.
+      if (run !== -1 && run !== cameraRunRef.current) return;
       const msg = err instanceof Error ? err.message : "Unknown error";
       setCameraError(msg.includes("Permission") ? "Camera permission denied. Use manual entry below." : msg);
     }
@@ -437,6 +460,8 @@ export default function MainPage() {
   useEffect(() => {
     let buffer = "";
     let timer: ReturnType<typeof setTimeout> | null = null;
+    // True from a Space that was held back as part of a scan (below) until its key-up.
+    let spaceHeldBack = false;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       // Text boxes, text areas, editable elements and the <select> of the Inventory tab's Sort control (it uses typed
@@ -459,15 +484,32 @@ export default function MainPage() {
         return;
       }
       if (e.key.length === 1) {
+        // A space INSIDE a barcode ("AB 123") belongs to the scan too. Left alone it would press whatever has keyboard focus:
+        // a checkbox the mouse ticked gets unticked, "Add all" adds a whole group, and with nothing focused the page scrolls.
+        // Buttons and checkboxes press on the key-UP of a Space (Firefox even when the key-down was cancelled), so that is held
+        // back as well (handleKeyUp). Only once something other than spaces is buffered, i.e. while a scan is under way: a
+        // person's own Space (tick a checkbox, press a button) arrives with nothing buffered and works as usual, also twice in a row.
+        if (e.key === " " && /\S/.test(buffer)) {
+          e.preventDefault();
+          spaceHeldBack = true;
+        }
         buffer += e.key;
         if (timer) clearTimeout(timer);
-        timer = setTimeout(() => { buffer = ""; timer = null; }, 500);
+        timer = setTimeout(() => { buffer = ""; spaceHeldBack = false; timer = null; }, 500);
       }
     };
 
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== " " || !spaceHeldBack) return;
+      spaceHeldBack = false;
+      e.preventDefault();
+    };
+
     document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("keyup", handleKeyUp);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("keyup", handleKeyUp);
       if (timer) clearTimeout(timer);
     };
   }, []); // stable — always uses ref

@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Notice } from "../Notice";
-import { plural } from "./helpers";
+import { ignoreHeldEnter, plural } from "./helpers";
 import { useBarClearance } from "./useBarClearance";
 
 /** The result of the latest "Add all" (or of its Undo): what to say, and whether Undo still applies. */
@@ -48,6 +48,12 @@ const SMALL_BUTTON =
  * the screen reader already knows. With rows it is the visible bar; with a message but no rows (after Undo emptied the sheet)
  * it is the visible bar without the sheet line, so "Undid adding 3 items." can still be read. `order-bar` marks the bar
  * only while the sheet has rows (`bulk-bar` marks the message-only bar).
+ *
+ * ONE PRESS, ONE ACTION. The bar moves keyboard focus as its buttons act (Undo -> Dismiss, Dismiss -> "Review order sheet",
+ * Clear -> "Keep items" and back), because the button that was pressed goes away or changes. A HELD Enter repeats keydown, so
+ * without a guard every repeat would press the button focus has just moved to: Undo would also Dismiss its own message, and
+ * Clear / Keep items would open and close the question for as long as the key is down. Repeats of Enter are ignored on every
+ * control of the bar (ignoreHeldEnter); a new press works as usual.
  */
 export function OrderBar({ count, hidden, missing, storage, fullMessage, onClear, bulk, onUndo, onDismissBulk }: OrderBarProps) {
   const [confirming, setConfirming] = useState(false);
@@ -109,6 +115,7 @@ export function OrderBar({ count, hidden, missing, storage, fullMessage, onClear
           : "sr-only"
       }
       onKeyDown={(event) => {
+        ignoreHeldEnter(event);
         if (event.key === "Escape" && confirming) cancel();
       }}
     >

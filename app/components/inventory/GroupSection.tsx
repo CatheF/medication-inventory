@@ -3,7 +3,7 @@
 import type { ReactNode } from "react";
 import { BulkAddButton } from "./BulkAddButton";
 import { CheckIcon, ChevronIcon } from "./Icons";
-import { plural } from "./helpers";
+import { ignoreHeldEnter, plural } from "./helpers";
 
 type GroupSectionProps = {
   /** Group key: the category id, or "unknown" / "uncategorized". Used for the heading's and the buttons' test ids. */
@@ -37,6 +37,7 @@ export function GroupSection({ groupKey, title, count, onSheetCount, open, onTog
             type="button"
             aria-expanded={open}
             aria-controls={listId}
+            onKeyDown={ignoreHeldEnter}
             onClick={onToggle}
             className={`flex min-h-13 w-full flex-wrap items-center gap-x-2.5 gap-y-1 px-4 py-2 text-left text-[17px] font-bold text-gray-900 hover:bg-gray-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-blue-700 ${open ? "rounded-tl-xl" : "rounded-l-xl"}`}
           >

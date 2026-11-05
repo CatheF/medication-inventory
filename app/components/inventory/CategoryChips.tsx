@@ -10,7 +10,7 @@ import {
   type CategoryFilter,
 } from "@/lib/inventory-view";
 import { CheckIcon, ChevronIcon, WarnIcon } from "./Icons";
-import { idKey, type CategoryOption } from "./helpers";
+import { idKey, ignoreHeldEnter, type CategoryOption } from "./helpers";
 
 type CategoryChipsProps = {
   categories: readonly CategoryOption[];
@@ -77,6 +77,7 @@ function Chip({
  *   - The button is a disclosure: aria-expanded and aria-controls (the panel).
  *   - Choosing a chip applies it, closes the panel and puts focus on the button (the chip that had it is gone).
  *   - Escape closes the panel and puts focus back on the button.
+ *   - A held Enter presses ONE control (a chip, or the button), not each one focus lands on in turn (ignoreHeldEnter).
  * The applied filter stays visible as a removable chip under the toolbar (ActiveFilterChips), whether the panel is open or not.
  */
 export function CategoryChips({ categories, counts, selected, onSelect, labelledBy }: CategoryChipsProps) {
@@ -99,6 +100,9 @@ export function CategoryChips({ categories, counts, selected, onSelect, labelled
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    // One press, one action: a held Enter would press the chip (which closes the panel and moves focus to the button), then the
+    // button (which opens the panel again), and so on. The button flips the panel on every repeat as well.
+    ignoreHeldEnter(event);
     if (event.key !== "Escape" || !open) return;
     event.preventDefault();
     event.stopPropagation();

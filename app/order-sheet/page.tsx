@@ -211,14 +211,13 @@ export default function OrderSheetPage() {
     flashTimer.current = window.setTimeout(() => setFlashId(null), FLASH_MS);
   }, []);
 
-  // "Find an item here" on the empty-sheet card: puts the keyboard in the "Add an item" search box and brings it into view
-  // (on a phone the card is taller than the screen, so the box would otherwise stay below the fold). Same motion rule as focusRow.
+  // "Find an item here" on the empty-sheet card: puts the keyboard in the "Add an item" search box. A plain focus() is the whole
+  // job, on purpose: the browser scrolls the box into view only when it is not fully on screen (on a phone the card is taller
+  // than the screen, so the box can start below the fold) and leaves the page where it is otherwise. A forced, centred, smooth
+  // scroll moved the page under a pointer or finger that had not moved, so a quick second tap landed on another control ("Add all
+  // low-stock items", the link to the Inventory tab) or on plain content, which took the focus out of the box again.
   const findItemHere = () => {
-    const input = searchRef.current;
-    if (!input) return;
-    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    input.focus({ preventScroll: true });
-    input.scrollIntoView({ block: "center", behavior: reduceMotion ? "auto" : "smooth" });
+    searchRef.current?.focus();
   };
 
   const handleAdd = (item: Medication) => {

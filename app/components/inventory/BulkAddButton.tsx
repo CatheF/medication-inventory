@@ -1,7 +1,7 @@
 "use client";
 
 import { CheckIcon, PlusIcon } from "./Icons";
-import { plural } from "./helpers";
+import { ignoreHeldEnter, plural } from "./helpers";
 
 type BulkAddButtonProps = {
   /** "group": the button in a category header. "flat": the one button of the ungrouped list. */
@@ -31,6 +31,9 @@ const DONE = `${BASE} cursor-default border-transparent bg-transparent text-gree
  * swapped for text drops keyboard focus to the page start). The status state is aria-disabled and leaves the Tab order
  * (tabIndex -1), so it neither does anything nor traps focus; it can still be read and still holds focus once.
  *
+ * A held Enter presses it once (ignoreHeldEnter): when the sheet is nearly full, a second press would only replace the "Added 2 of 5"
+ * message (and its Undo) with "Added 0 of 3".
+ *
  * The visible text is short ("Add all 5", flat list: "Add all 27 shown"); the accessible name spells out what it acts on and
  * contains the visible text ("Add all 5 items shown in Antibiotics to the order sheet", "Add all 27 shown to the order sheet"),
  * so a person who speaks the label to a voice control finds it (WCAG 2.5.3).
@@ -44,6 +47,7 @@ export function BulkAddButton({ scope, groupKey, title, shown, pending, onAdd }:
         type="button"
         data-testid={group ? `group-add-all-${groupKey}` : "flat-add-all"}
         aria-label={group ? `Add all ${pending} ${items} shown in ${title} to the order sheet` : `Add all ${pending} shown to the order sheet`}
+        onKeyDown={ignoreHeldEnter}
         onClick={onAdd}
         className={ADD}
       >
