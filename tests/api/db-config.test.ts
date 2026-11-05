@@ -10,7 +10,7 @@
 //   * the key is NEXT_PUBLIC_SUPABASE_ANON_KEY, or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY when the first is not set;
 //   * when the URL or the key is missing the app refuses to start with a message that names the missing settings,
 //     creates no half-configured client, and never prints a URL or key value.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const createClientSpy = vi.hoisted(() => vi.fn());
 vi.mock("@supabase/supabase-js", () => ({ createClient: createClientSpy }));
@@ -51,6 +51,10 @@ beforeEach(() => {
   vi.unstubAllEnvs();
   createClientSpy.mockReset();
   createClientSpy.mockReturnValue({ synthetic: "client" });
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs(); // leave the environment as it was found, whatever runs next in this process
 });
 
 describe("lib/db.ts reads the public Supabase settings", () => {

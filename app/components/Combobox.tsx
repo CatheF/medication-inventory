@@ -151,7 +151,8 @@ function armRepeatClickGuard(): void {
     if (disarmRepeatClickGuard === disarm) disarmRepeatClickGuard = null;
   };
   function onPointerEvent(event: Event): void {
-    const step = repeatClickGuard(armed, event.type, event instanceof MouseEvent ? event.detail : 0);
+    // (globalThis.MouseEvent: the DOM class; the name MouseEvent above is React's event type)
+    const step = repeatClickGuard(armed, event.type, event instanceof globalThis.MouseEvent ? event.detail : 0);
     if (step.swallow) {
       event.stopImmediatePropagation();
       event.preventDefault();
