@@ -64,6 +64,37 @@ describe.each(ID_SHAPES)("assigning a category when an item is CREATED, on the $
     expect(String(storedMedication(fake, created.id as number).category_id)).toBe(antibiotics.id);
   });
 
+  // The Admin page's create form sends EVERY field at once. A defect that only shows when category, supplier number and the
+  // other fields travel together (one of them dropped or reset to a default) is invisible to tests that set one at a time.
+  const FULL_NEW_ITEM = {
+    name: "Fully populated new item",
+    barcode: "0000888000111",
+    photo_url: "https://example.invalid/new-photo.png",
+    unit: "boxes",
+    stock: 41,
+    threshold: 17,
+    vendor_url: "https://example.invalid/new-vendor",
+    notes: "Keep cool.\nSecond line.",
+    supplier_order_number: "00-NEW/7",
+  } as const;
+
+  it.each([
+    ["with a category", (categories: readonly Category[]) => categories[4].id],
+    ["with no category (Uncategorized)", () => null],
+  ])("keeps EVERY field of a new item that has all of them filled in %s: the create answer, the list, the item, the barcode lookup and the stored row all agree", async (_label, pickCategory) => {
+    const sent = { ...FULL_NEW_ITEM, category_id: pickCategory(categories) };
+    const res = await api.createItem(sent);
+    expect(res.status).toBe(201);
+    const created = await bodyRecord(res);
+    const listed = (await bodyList(await api.listItems())).find((m) => m.id === created.id);
+    expect(listed, "the new item is in the list").toBeDefined();
+    const views = [created, await bodyRecord(await api.getItem(created.id as number)), await bodyRecord(await api.lookup(sent.barcode)), listed];
+    for (const view of views) expect(view).toMatchObject({ ...sent, is_unnamed: false });
+    const stored = storedMedication(fake, created.id as number);
+    expect(stored).toMatchObject({ ...FULL_NEW_ITEM, is_unnamed: false });
+    expect(stored.category_id === null ? null : String(stored.category_id)).toBe(sent.category_id);
+  });
+
   it("keeps a category that was created a moment earlier through the category API (the admin page's inline 'new category' flow)", async () => {
     const newCategory = await bodyRecord(await api.createCategory("Splints & Braces"));
     expect(typeof newCategory.id).toBe("string");

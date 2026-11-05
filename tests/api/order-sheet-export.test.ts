@@ -576,8 +576,10 @@ describe("the network guard used by the export tests really notices an outbound 
 // value is 1000; this project's real value is not confirmed). The inventory LIST copes with a cap (medications-list.test.ts).
 // The export reads the items it needs 200 ids at a time and treats every id missing from an answer as "deleted", so with a
 // cap BELOW 200 it reports items that exist as "no longer in the inventory" (422) and the sheet cannot be exported at all.
-// The cases whose cap is below the 200-id read size fail on the application as it is today (see the handoff report: the
-// defect is in readMedications, app/api/order-sheet/xlsx/route.ts). The control cases pin the boundary where it works.
+// The cases whose cap is below the 200-id read size FAILED on the application as first built (readMedications trusted the
+// first answer); they pass now that readMedications asks again for the ids that did not come back. The cases with a very
+// small cap need many rounds, so a "fix" that retries only once would still fail them. The control cases pin the boundary
+// where it always worked.
 describe.each(ID_SHAPES)("export when the database returns at most N rows per read, on the $label", ({ options, shape }) => {
   function seedItems(maxRows: number, count: number): { fake: FakeSupabase; items: Medication[] } {
     const fake = installFake({ ...options, maxRows });
@@ -595,9 +597,11 @@ describe.each(ID_SHAPES)("export when the database returns at most N rows per re
   }
 
   it.each([
-    ["100", 100, 150],
-    ["199 (one below the 200-id read size)", 199, 200],
-  ])("exports every item on the sheet when the database returns at most %s rows per read (never 'no longer in the inventory' for items that exist)", async (_label, maxRows, count) => {
+    ["100 rows", 100, 150],
+    ["199 rows (one below the 200-id read size)", 199, 200],
+    ["40 rows (four reads are needed for 150 items)", 40, 150],
+    ["1 row (one read per item)", 1, 25],
+  ])("exports every item on the sheet when the database returns at most %s per read (never 'no longer in the inventory' for items that exist)", async (_label, maxRows, count) => {
     const { fake, items } = seedItems(maxRows, count);
     const res = await api.exportXlsx(sheetBody(items.map((item) => ({ id: item.id }))));
     await expectFileWithEveryItem(res, items);
@@ -616,10 +620,10 @@ describe.each(ID_SHAPES)("export when the database returns at most N rows per re
   });
 
   it.each([
-    ["200 (the read size itself)", 200, 450],
-    ["1000 (Supabase's usual cap)", 1000, 450],
-    ["100, with exactly 100 items on the sheet", 100, 100],
-  ])("exports every item when the database returns at most %s rows per read", async (_label, maxRows, count) => {
+    ["200 rows (the read size itself)", 200, 450],
+    ["1000 rows (Supabase's usual cap)", 1000, 450],
+    ["100 rows, with exactly 100 items on the sheet", 100, 100],
+  ])("exports every item when the database returns at most %s per read", async (_label, maxRows, count) => {
     const { fake, items } = seedItems(maxRows, count);
     const res = await api.exportXlsx(sheetBody(items.map((item) => ({ id: item.id }))));
     await expectFileWithEveryItem(res, items);
