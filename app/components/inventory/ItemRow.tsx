@@ -4,7 +4,7 @@ import { memo } from "react";
 import type { Medication } from "@/lib/db";
 import { ItemThumb } from "../ItemThumb";
 import { BarcodeGlyph, CheckIcon, CircleXIcon, ExternalLinkIcon, TagIcon, WarnIcon } from "./Icons";
-import { displayName, safeHttpUrl, stockStatus, type CategoryKind, type StockStatus } from "./helpers";
+import { displayName, rememberedName, safeHttpUrl, stockStatus, type CategoryKind, type StockStatus } from "./helpers";
 
 type ItemRowProps = {
   item: Medication;
@@ -12,7 +12,8 @@ type ItemRowProps = {
   categoryTitle: string;
   /** True when the item is on the order sheet. */
   checked: boolean;
-  onToggle: (id: number) => void;
+  /** Ticks or unticks the item. The name is what the sheet row remembers when the row is added (see rememberedName). */
+  onToggle: (id: number, name: string) => void;
 };
 
 const PILL: Record<StockStatus, { label: string; className: string }> = {
@@ -141,7 +142,7 @@ function ItemRowImpl({ item, categoryKind, categoryTitle, checked, onToggle }: I
             type="checkbox"
             data-testid={`order-checkbox-${item.id}`}
             checked={checked}
-            onChange={() => onToggle(item.id)}
+            onChange={() => onToggle(item.id, rememberedName(item))}
             aria-labelledby={`${checkLabelId} ${nameId}`}
             className="h-5 w-5 shrink-0 cursor-pointer accent-blue-700 focus:outline-none"
           />

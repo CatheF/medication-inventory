@@ -1,25 +1,59 @@
+"use client";
+
 import type { EmptyKind } from "@/lib/inventory-view";
-import { InboxIcon, SearchIcon } from "./Icons";
+import { EmptyStateCard, type EmptyAction, type EmptyIcon } from "../EmptyStateCard";
+
+type EmptyStateProps = {
+  kind: EmptyKind;
+  title: string;
+  detail: string;
+  /** no-match: puts search, stock level and category back to "everything" (sort and grouping stay). */
+  onClearFilters: () => void;
+  /** category-empty: drops the category filter (and only that: nothing else is on). */
+  onShowAll: () => void;
+  /** no-items: switches to the Scan tab. */
+  onScan: () => void;
+};
+
+type Plan = { icon: EmptyIcon; primary: EmptyAction; secondary?: EmptyAction };
 
 /**
- * The three different "nothing to show" cases, kept visibly apart:
- *   no-items        the inventory itself is empty
- *   category-empty  the chosen category (or Uncategorized) holds no items
- *   no-match        the search / stock / category filters match nothing
- * The text comes from describeEmpty() in lib/inventory-view.ts.
+ * The three different "nothing to show" cases, kept visibly apart, each with a picture and the next step:
+ *   no-items        the inventory itself is empty            -> "Add an item" (Admin), "Scan a barcode" (Scan tab)
+ *   category-empty  the chosen category holds no items       -> "Show all items", "Add items in Admin"
+ *   no-match        the search / stock / category filters match nothing -> "Clear filters"
+ * The words come from describeEmpty() in lib/inventory-view.ts. The card is static: the summary line above the list is
+ * the live region that announces that nothing matched. data-testid and data-empty-kind sit on a wrapper around the card.
  */
-export function EmptyState({ kind, title, detail }: { kind: EmptyKind; title: string; detail: string }) {
+export function EmptyState({ kind, title, detail, onClearFilters, onShowAll, onScan }: EmptyStateProps) {
+  const plan: Plan =
+    kind === "no-items"
+      ? {
+          icon: "box",
+          primary: { label: "Add an item", href: "/admin", testId: "inventory-empty-add" },
+          secondary: { label: "Scan a barcode", onClick: onScan, testId: "inventory-empty-scan" },
+        }
+      : kind === "category-empty"
+        ? {
+            icon: "folder",
+            primary: { label: "Show all items", onClick: onShowAll, testId: "inventory-empty-show-all" },
+            secondary: { label: "Add items in Admin", href: "/admin", testId: "inventory-empty-admin" },
+          }
+        : {
+            icon: "search",
+            primary: { label: "Clear filters", onClick: onClearFilters, testId: "inventory-empty-clear" },
+          };
+
   return (
-    <div
-      data-testid="inventory-empty"
-      data-empty-kind={kind}
-      className="rounded-xl border border-gray-200 bg-white px-5 py-10 text-center"
-    >
-      <div className="mx-auto mb-3 grid h-14 w-14 place-items-center rounded-full bg-gray-100 text-gray-600">
-        {kind === "no-match" ? <SearchIcon className="h-7 w-7" /> : <InboxIcon className="h-7 w-7" />}
-      </div>
-      <p className="text-lg leading-snug font-bold text-gray-900 [overflow-wrap:anywhere]">{title}</p>
-      <p className="mx-auto mt-1.5 max-w-[52ch] text-base text-gray-600 [overflow-wrap:anywhere]">{detail}</p>
+    <div data-testid="inventory-empty" data-empty-kind={kind}>
+      <EmptyStateCard
+        icon={plan.icon}
+        title={title}
+        description={detail}
+        primaryAction={plan.primary}
+        secondaryAction={plan.secondary}
+        headingLevel={3}
+      />
     </div>
   );
 }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, Ref } from "react";
 import Link from "next/link";
+import { EmptyStateCard } from "@/app/components/EmptyStateCard";
 import { Notice } from "@/app/components/Notice";
 import type { Medication } from "@/lib/db";
 import { isLowStock, sortItems } from "@/lib/inventory-view";
@@ -17,8 +18,9 @@ import { InventoryFreshness } from "./InventoryFreshness";
 import { PrintActions } from "./PrintActions";
 import { PrintSheet } from "./PrintSheet";
 import { SheetDetails } from "./SheetDetails";
+import { SheetLoadError } from "./SheetLoadError";
 import { SheetRows } from "./SheetRows";
-import { LOAD_ERROR_REASSURANCE, LOAD_ERROR_TITLE, displayName, pageStyleText, pluralize, printDocumentTitle } from "./format";
+import { displayName, pageStyleText, pluralize, printDocumentTitle } from "./format";
 import type { CategoryList } from "./format";
 import { useCategories, useMedications, useToday } from "./hooks";
 import { InfoIcon, PlusIcon, SpinnerIcon, TrashIcon, WarnIcon } from "./icons";
@@ -209,6 +211,16 @@ export default function OrderSheetPage() {
     flashTimer.current = window.setTimeout(() => setFlashId(null), FLASH_MS);
   }, []);
 
+  // "Find an item here" on the empty-sheet card: puts the keyboard in the "Add an item" search box and brings it into view
+  // (on a phone the card is taller than the screen, so the box would otherwise stay below the fold). Same motion rule as focusRow.
+  const findItemHere = () => {
+    const input = searchRef.current;
+    if (!input) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    input.focus({ preventScroll: true });
+    input.scrollIntoView({ block: "center", behavior: reduceMotion ? "auto" : "smooth" });
+  };
+
   const handleAdd = (item: Medication) => {
     const name = displayName(item);
     if (has(item.id)) {
@@ -339,22 +351,12 @@ export default function OrderSheetPage() {
         {!ready && medications.state.status !== "error" ? <SheetLoading ref={loadingRef} /> : null}
 
         {medications.state.status === "error" ? (
-          <Notice
+          <SheetLoadError
             ref={loadErrorRef}
-            tone="error"
-            title={LOAD_ERROR_TITLE}
+            message={medications.state.message}
+            savedCount={storage === "browser" ? count : 0}
             onRetry={retryLoad}
-            retryLabel="Retry"
-            data-testid="sheet-error"
-          >
-            <p>{LOAD_ERROR_REASSURANCE}</p>
-            <p className="mt-1">{medications.state.message}</p>
-            {count > 0 && storage === "browser" ? (
-              <p className="mt-1">
-                Your order sheet ({count} {pluralize(count, "item", "items")}) is still saved in this browser.
-              </p>
-            ) : null}
-          </Notice>
+          />
         ) : null}
 
         {ready ? (
@@ -369,20 +371,18 @@ export default function OrderSheetPage() {
                 </Link>
               </div>
 
+              {/* Static card (not a live region): "Sheet cleared" and "Removed … 0 items left" are announced by the status line of
+                  the search box below it, so the card itself says nothing when it appears. */}
               {count === 0 ? (
-                <div
-                  data-testid="sheet-empty"
-                  className="mt-4 rounded-lg border border-dashed border-gray-300 bg-gray-50 p-5 text-center text-gray-800"
-                >
-                  No items on the order sheet yet. Add items below, or tick “Add to order sheet” on the{" "}
-                  {/* The full stop stays with the link when the line wraps (an inline-flex link is a single unit to the line breaker). */}
-                  <span className="whitespace-nowrap">
-                    <Link href={INVENTORY_TAB_HREF} data-testid="empty-inventory-link" className={`${TEXT_LINK} inline-flex min-h-10 items-center`}>
-                      Inventory tab
-                    </Link>
-                    .
-                  </span>
-                </div>
+                <EmptyStateCard
+                  testId="sheet-empty"
+                  icon="cart"
+                  title="No items on the order sheet yet"
+                  description="Pick items on the Inventory tab, or find one here by name, barcode or supplier number."
+                  primaryAction={{ label: "Pick items on the Inventory tab", href: INVENTORY_TAB_HREF, testId: "empty-inventory-link" }}
+                  secondaryAction={{ label: "Find an item here", onClick: findItemHere, testId: "empty-find-item" }}
+                  className="mt-4"
+                />
               ) : null}
 
               <div className="mt-4">

@@ -1,5 +1,6 @@
 "use client";
 
+import type { Ref } from "react";
 import Link from "next/link";
 import type { CategoryCounts, CategoryFilter, SortKey, StockFilter, ViewState } from "@/lib/inventory-view";
 import { CategoryChips } from "./CategoryChips";
@@ -12,6 +13,8 @@ type InventoryToolbarProps = {
   categories: readonly CategoryOption[];
   counts: CategoryCounts;
   onChange: (patch: Partial<ViewState>) => void;
+  /** The search box, so the page can put keyboard focus there (after the last filter chip is removed). */
+  searchRef?: Ref<HTMLInputElement>;
 };
 
 const STOCK_OPTIONS: ReadonlyArray<{ value: StockFilter; label: string }> = [
@@ -38,7 +41,7 @@ function isSortKey(value: string): value is SortKey {
  * Category chips, the "Group by category" switch, search, stock level, sort and "+ Add".
  * Every control has a visible label; every control is at least 44px tall.
  */
-export function InventoryToolbar({ view, categories, counts, onChange }: InventoryToolbarProps) {
+export function InventoryToolbar({ view, categories, counts, onChange, searchRef }: InventoryToolbarProps) {
   return (
     <div className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
@@ -83,6 +86,7 @@ export function InventoryToolbar({ view, categories, counts, onChange }: Invento
           <div className="relative">
             <SearchIcon className="pointer-events-none absolute top-1/2 left-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-500" />
             <input
+              ref={searchRef}
               id="inventory-search"
               data-testid="search-input"
               type="search"

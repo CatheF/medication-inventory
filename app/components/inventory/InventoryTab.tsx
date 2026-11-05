@@ -3,10 +3,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import Link from "next/link";
 import type { Category, Medication } from "@/lib/db";
-import { DEFAULT_VIEW, describeEmpty, isLowStock, selectView, type ViewState } from "@/lib/inventory-view";
+import {
+  DEFAULT_VIEW,
+  describeEmpty,
+  isLowStock,
+  isUnknownCategoryFilter,
+  selectView,
+  type ViewState,
+} from "@/lib/inventory-view";
+import { addRows, removeRow } from "@/lib/order-sheet/draft";
 import { ORDER_SHEET_LIMITS } from "@/lib/order-sheet/types";
 import { useOrderDraft } from "@/lib/order-sheet/use-order-draft";
+import { ActiveFilterChips, type ActiveFilter } from "../ActiveFilterChips";
 import { Notice } from "../Notice";
+import { BulkAddButton } from "./BulkAddButton";
 import { EmptyState } from "./EmptyState";
 import { GroupSection } from "./GroupSection";
 import { CheckIcon, InfoIcon } from "./Icons";
@@ -17,7 +27,15 @@ import { LoadErrorNotice } from "./LoadErrorNotice";
 import { OrderBar } from "./OrderBar";
 import { RetryButton } from "./RetryButton";
 import { StatCard } from "./StatCard";
-import { categoryLabelFor, orderCategories, plural } from "./helpers";
+import {
+  categoryLabelFor,
+  describeActiveFilters,
+  idKey,
+  orderCategories,
+  plural,
+  rememberedName,
+  type ActiveFilterSpec,
+} from "./helpers";
 
 export type InventoryStatus = "loading" | "error" | "ready";
 
@@ -42,7 +60,12 @@ export type InventoryTabProps = {
   onViewChange: Dispatch<SetStateAction<ViewState>>;
   /** Loads the items and the categories again. */
   onRetry: () => void;
+  /** Shows the Scan tab (the "Scan a barcode" button of the empty inventory). */
+  onScan: () => void;
 };
+
+/** The message after "Add all" or its Undo. `addedIds` are exactly the rows THAT action put on the sheet (Undo takes only those off). */
+type BulkState = { text: string; canUndo: boolean; addedIds: readonly number[] };
 
 const UNKNOWN_GROUP_NOTE =
   "These items point to a category that is not in the category list, so no category name can be shown for them.";
@@ -58,8 +81,8 @@ const LINK_BUTTON =
 
 /**
  * The Inventory tab: summary numbers and alerts, category chips with counts, search / stock / sort / grouping,
- * and the items as compact rows (grouped by category or as one flat list). It never shows an API error as an empty
- * inventory and never hides an item: what the filters leave out is counted and stated.
+ * the filters that are on as removable chips, and the items as compact rows (grouped by category or as one flat list).
+ * It never shows an API error as an empty inventory and never hides an item: what the filters leave out is counted and stated.
  */
 export function InventoryTab({
   status,
@@ -72,21 +95,18 @@ export function InventoryTab({
   view,
   onViewChange,
   onRetry,
+  onScan,
 }: InventoryTabProps) {
   const sheet = useOrderDraft();
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
   const [fullMessage, setFullMessage] = useState<string | null>(null);
-
-  // Groups a person folds stay folded while they sort and browse, but a new search, stock level or category opens them
-  // again: a match inside a folded group would be counted in the summary and yet not be on screen.
-  const filterKey = `${view.search}\u0000${view.stock}\u0000${view.category.kind}\u0000${view.category.kind === "category" ? view.category.id : ""}`;
-  const [foldedForFilter, setFoldedForFilter] = useState(filterKey);
-  if (foldedForFilter !== filterKey) {
-    setFoldedForFilter(filterKey);
-    setCollapsed((previous) => (previous.size === 0 ? previous : new Set()));
-  }
+  const [bulk, setBulk] = useState<BulkState | null>(null);
 
   const summaryRef = useRef<HTMLParagraphElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  // How the person last used the filter chips: "touch" (a tap), "pointer" (mouse or pen) or "keyboard" (also a screen
+  // reader's activation, which sends no pointer events). Only a tap changes what happens to focus (see removeFilter).
+  const chipInputRef = useRef<"touch" | "pointer" | "keyboard">("keyboard");
   const loadingRef = useRef<HTMLDivElement>(null);
   const errorRef = useRef<HTMLDivElement>(null);
   const pendingFocusRef = useRef(false);
@@ -97,11 +117,44 @@ export function InventoryTab({
     [categoryOptions]
   );
 
+  // A category filter that was restored from the browser's session storage can name a category that does not exist any
+  // more (deleted since, or an id from another database). It would show "Category unavailable" with no chip pressed and
+  // an empty list. Once the category list HAS loaded, such a filter is dropped: the view is All, and the stored view is
+  // corrected right after. While the categories could not be loaded nothing is known, so the stored choice is kept.
+  const staleCategoryId = useMemo(() => {
+    if (status !== "ready" || categoriesError !== null) return null;
+    const filter = view.category;
+    if (filter.kind !== "category" || isUnknownCategoryFilter(filter)) return null;
+    const key = idKey(filter.id);
+    return key !== null && titleByKey.has(key) ? null : filter.id;
+  }, [status, categoriesError, view.category, titleByKey]);
+  const effectiveView = useMemo<ViewState>(
+    () => (staleCategoryId === null ? view : { ...view, category: { kind: "all" } }),
+    [view, staleCategoryId]
+  );
+  useEffect(() => {
+    if (staleCategoryId === null) return;
+    onViewChange((previous) =>
+      previous.category.kind === "category" && previous.category.id === staleCategoryId
+        ? { ...previous, category: { kind: "all" } }
+        : previous
+    );
+  }, [staleCategoryId, onViewChange]);
+
+  // Groups a person folds stay folded while they sort and browse, but a new search, stock level or category opens them
+  // again: a match inside a folded group would be counted in the summary and yet not be on screen.
+  const filterKey = `${effectiveView.search}\u0000${effectiveView.stock}\u0000${effectiveView.category.kind}\u0000${effectiveView.category.kind === "category" ? effectiveView.category.id : ""}`;
+  const [foldedForFilter, setFoldedForFilter] = useState(filterKey);
+  if (foldedForFilter !== filterKey) {
+    setFoldedForFilter(filterKey);
+    setCollapsed((previous) => (previous.size === 0 ? previous : new Set()));
+  }
+
   // Only after BOTH requests have settled (status "ready"): while the categories are still loading every
   // categorized item would briefly read "Category unavailable".
   const model = useMemo(
-    () => (status === "ready" ? selectView(medications, categories, view) : null),
-    [status, medications, categories, view]
+    () => (status === "ready" ? selectView(medications, categories, effectiveView) : null),
+    [status, medications, categories, effectiveView]
   );
 
   const update = (patch: Partial<ViewState>) => onViewChange((previous) => ({ ...previous, ...patch }));
@@ -112,15 +165,70 @@ export function InventoryTab({
   useEffect(() => {
     sheetRef.current = sheet;
   });
-  const handleToggle = useCallback((id: number) => {
+  const handleToggle = useCallback((id: number, name: string) => {
     const current = sheetRef.current;
     if (!current.has(id) && current.count >= ORDER_SHEET_LIMITS.rows) {
       setFullMessage(`The sheet is full (${ORDER_SHEET_LIMITS.rows} items). Remove an item before adding another.`);
       return;
     }
     setFullMessage(null);
-    current.toggle(id);
+    setBulk(null); // a tick or untick by hand ends the "Added ..." message and its Undo
+    current.toggle(id, name);
   }, []);
+
+  // ── "Add all" and Undo ─────────────────────────────────────────────────────────────────────────
+  // Adds the items the list (or a group) shows that are not on the sheet yet. The draft is read INSIDE the update, so
+  // "which rows did this action add" is exact even if the sheet changed in another tab a moment ago: addRows appends,
+  // so the new rows are the ones after the old length. addRows stops at the row limit; when that cuts the action short
+  // the message says so, and Undo only takes off what was really added.
+  const handleAddAll = useCallback((items: readonly Medication[], scopeTitle: string | null) => {
+    const names = new Map(items.map((item) => [item.id, rememberedName(item)] as const));
+    let requested = 0;
+    let added: number[] = [];
+    sheetRef.current.update((draft) => {
+      const present = new Set(draft.rows.map((row) => row.id));
+      const ids = items.filter((item) => !present.has(item.id)).map((item) => item.id);
+      requested = ids.length;
+      const next = addRows(draft, ids, names);
+      added = next.rows.slice(draft.rows.length).map((row) => row.id);
+      return next;
+    });
+    if (requested === 0) return; // everything was on the sheet already (the button is drawn as a status then)
+    setFullMessage(null);
+    const count = added.length;
+    const text =
+      count < requested
+        ? `Added ${count} of ${requested}. The sheet is full (${ORDER_SHEET_LIMITS.rows} items).`
+        : scopeTitle === null
+          ? `Added ${count} ${plural(count, "item", "items")} to the order sheet.`
+          : `Added ${count} ${plural(count, "item", "items")} from ${scopeTitle} to the order sheet.`;
+    setBulk({ text, canUndo: count > 0, addedIds: added });
+  }, []);
+
+  const handleUndo = () => {
+    if (bulk === null) return;
+    const ids = new Set(bulk.addedIds);
+    let removed = 0;
+    sheetRef.current.update((draft) => {
+      let next = draft;
+      for (const row of draft.rows) if (ids.has(row.id)) next = removeRow(next, row.id);
+      removed = draft.rows.length - next.rows.length;
+      return next;
+    });
+    setFullMessage(null);
+    setBulk({
+      text: removed > 0 ? `Undid adding ${removed} ${plural(removed, "item", "items")}.` : "Nothing to undo: those items are no longer on the order sheet.",
+      canUndo: false,
+      addedIds: [],
+    });
+  };
+
+  const handleDismissBulk = () => {
+    setBulk(null);
+    // With rows on the sheet the bar stays and has already put focus on one of its own controls; without rows the bar
+    // goes away, so focus goes to the results line.
+    if (sheetRef.current.count === 0) summaryRef.current?.focus();
+  };
 
   const sheetRows = sheet.draft.rows;
   const sheetCounts = useMemo(() => {
@@ -157,6 +265,31 @@ export function InventoryTab({
     (status === "error" ? errorRef.current : summaryRef.current)?.focus();
   }, [status, refreshing, refreshError, categoriesError]);
 
+  // ── Active filter chips ────────────────────────────────────────────────────────────────────────
+  // Removing a chip puts back ONLY that filter; the other filters, the sort, the grouping and every tick stay. The chips'
+  // own focus rule covers a chip that has neighbours (focus moves to the next or previous chip). When the LAST chip goes,
+  // the chips disappear with the focused button, so focus is placed here: on the search box, which is where a person
+  // starts over. Not after a tap on a touch screen: focusing a text box there raises the on-screen keyboard over the list
+  // the person just widened, and a tap has no keyboard focus to keep.
+  const removeFilter = useCallback(
+    (key: ActiveFilterSpec["key"], isLast: boolean) => {
+      if (key === "category") onViewChange((previous) => ({ ...previous, category: { kind: "all" } }));
+      else if (key === "stock") onViewChange((previous) => ({ ...previous, stock: "all" }));
+      else onViewChange((previous) => ({ ...previous, search: "" }));
+      if (isLast && chipInputRef.current !== "touch") searchInputRef.current?.focus();
+    },
+    [onViewChange]
+  );
+  const activeFilters = useMemo<ActiveFilter[]>(() => {
+    const specs = describeActiveFilters(effectiveView, titleByKey);
+    return specs.map((spec) => ({
+      key: spec.key,
+      label: spec.label,
+      value: spec.value,
+      onRemove: () => removeFilter(spec.key, specs.length === 1),
+    }));
+  }, [effectiveView, titleByKey, removeFilter]);
+
   const ready = status === "ready";
   const lowCount = ready ? medications.filter(isLowStock).length : 0;
   const adequateCount = ready ? medications.length - lowCount : 0;
@@ -189,6 +322,15 @@ export function InventoryTab({
     summaryRef.current?.focus();
   };
 
+  // "Show all items" of an empty category: drop the category filter, nothing else (the empty-category message is only
+  // given when no search and no stock level are on). The button goes away with the message, so focus goes to the results line.
+  const showAllItems = () => {
+    update({ category: { kind: "all" } });
+    summaryRef.current?.focus();
+  };
+
+  const flatPending = model !== null && model.groups === null ? model.visible.filter((item) => !sheet.has(item.id)).length : 0;
+
   return (
     <div data-testid="inventory-tab">
       <div className={KEEP_CLEAR_OF_BAR}>
@@ -214,15 +356,15 @@ export function InventoryTab({
             <button
               type="button"
               data-testid="show-low-stock"
-              aria-pressed={view.stock === "low"}
-              onClick={() => update({ stock: view.stock === "low" ? "all" : "low" })}
+              aria-pressed={effectiveView.stock === "low"}
+              onClick={() => update({ stock: effectiveView.stock === "low" ? "all" : "low" })}
               className={`inline-flex min-h-10 items-center gap-1.5 rounded-md border px-3 text-sm font-semibold text-amber-900 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-amber-700 ${
-                view.stock === "low"
+                effectiveView.stock === "low"
                   ? "border-amber-700 bg-amber-200 hover:bg-amber-300"
                   : "border-transparent underline underline-offset-2 hover:bg-amber-100"
               }`}
             >
-              {view.stock === "low" && <CheckIcon className="h-4 w-4" />}
+              {effectiveView.stock === "low" && <CheckIcon className="h-4 w-4" />}
               Show only low stock
             </button>
           </div>
@@ -276,9 +418,29 @@ export function InventoryTab({
               </Notice>
             )}
 
-            <InventoryToolbar view={view} categories={categoryOptions} counts={model.counts} onChange={update} />
+            <InventoryToolbar
+              view={effectiveView}
+              categories={categoryOptions}
+              counts={model.counts}
+              onChange={update}
+              searchRef={searchInputRef}
+            />
 
-            <section aria-labelledby="inventory-results-heading" className="mt-5">
+            {/* The filters that are on, each one removable. Right under the toolbar and above the results line; nothing is
+                drawn while no filter is on. Not a live region: the results line below speaks the result. There is no
+                "clear all" here on purpose: the results line already has the one "Clear filters" button. */}
+            <div
+              onPointerDownCapture={(event) => {
+                chipInputRef.current = event.pointerType === "touch" ? "touch" : "pointer";
+              }}
+              onKeyDownCapture={() => {
+                chipInputRef.current = "keyboard";
+              }}
+            >
+              <ActiveFilterChips filters={activeFilters} className="mt-3" />
+            </div>
+
+            <section aria-labelledby="inventory-results-heading" className={activeFilters.length > 0 ? "mt-4" : "mt-5"}>
               <h2 id="inventory-results-heading" className="sr-only">
                 Inventory items
               </h2>
@@ -314,6 +476,14 @@ export function InventoryTab({
                     </button>
                   </div>
                 )}
+                {model.groups === null && model.visible.length > 0 && (
+                  <BulkAddButton
+                    scope="flat"
+                    shown={model.visible.length}
+                    pending={flatPending}
+                    onAdd={() => handleAddAll(model.visible, null)}
+                  />
+                )}
               </div>
 
               <p className="mt-1 mb-4 flex items-start gap-1.5 text-sm text-gray-600">
@@ -322,7 +492,12 @@ export function InventoryTab({
               </p>
 
               {model.visible.length === 0 ? (
-                <EmptyState {...describeEmpty(medications.length, view, categories)} />
+                <EmptyState
+                  {...describeEmpty(medications.length, effectiveView, categories)}
+                  onClearFilters={clearFilters}
+                  onShowAll={showAllItems}
+                  onScan={onScan}
+                />
               ) : model.groups !== null ? (
                 model.groups.map((group) => (
                   <GroupSection
@@ -333,6 +508,7 @@ export function InventoryTab({
                     onSheetCount={group.items.filter((item) => sheet.has(item.id)).length}
                     open={!collapsed.has(group.key)}
                     onToggle={() => toggleGroup(group.key)}
+                    onAddAll={() => handleAddAll(group.items, group.title)}
                     note={group.kind === "unknown" ? UNKNOWN_GROUP_NOTE : undefined}
                   >
                     {group.items.map(renderRow)}
@@ -360,20 +536,22 @@ export function InventoryTab({
         )}
       </div>
 
-      {sheet.count > 0 && (
-        <OrderBar
-          count={sheet.count}
-          hidden={sheetCounts?.hidden ?? null}
-          missing={sheetCounts?.missing ?? null}
-          storage={sheet.storage}
-          fullMessage={fullMessage}
-          onClear={() => {
-            setFullMessage(null);
-            sheet.clear();
-            summaryRef.current?.focus();
-          }}
-        />
-      )}
+      <OrderBar
+        count={sheet.count}
+        hidden={sheetCounts?.hidden ?? null}
+        missing={sheetCounts?.missing ?? null}
+        storage={sheet.storage}
+        fullMessage={fullMessage}
+        onClear={() => {
+          setFullMessage(null);
+          setBulk(null);
+          sheet.clear();
+          summaryRef.current?.focus();
+        }}
+        bulk={bulk === null ? null : { text: bulk.text, canUndo: bulk.canUndo }}
+        onUndo={handleUndo}
+        onDismissBulk={handleDismissBulk}
+      />
     </div>
   );
 }

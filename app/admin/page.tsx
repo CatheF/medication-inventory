@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, ReactNode } from "react";
+import { shouldUseCombobox, type ComboboxOption } from "@/lib/combobox";
 import type { Category, Medication } from "@/lib/db";
 import { sameId } from "@/lib/ids";
 import {
@@ -14,11 +15,16 @@ import {
   naturalCompare,
   selectView,
   sortItems,
+  type CategoryCounts,
   type CategoryFilter,
+  type EmptyKind,
   type ViewState,
 } from "@/lib/inventory-view";
 import { normalizeCategory, normalizeMedication } from "@/lib/normalize";
-import { SUPPLIER_ORDER_NUMBER_MAX_LENGTH } from "@/lib/supplier-order-number";
+import { SUPPLIER_ORDER_NUMBER_INVISIBLE_REASON, SUPPLIER_ORDER_NUMBER_MAX_LENGTH } from "@/lib/supplier-order-number";
+import { ActiveFilterChips, type ActiveFilter } from "../components/ActiveFilterChips";
+import { Combobox } from "../components/Combobox";
+import { EmptyStateCard, type EmptyAction, type EmptyIcon } from "../components/EmptyStateCard";
 import { ItemThumb } from "../components/ItemThumb";
 import { Notice } from "../components/Notice";
 
@@ -31,6 +37,11 @@ import { Notice } from "../components/Notice";
 // Nothing here claims success without proof: a save counts as saved only when the server answers 2xx AND the row it
 // sends back carries the category (and supplier order number) that was sent. A failed load is an error with a Retry
 // button, never an empty list.
+//
+// Shared patterns (app/components): the list's filters show as removable chips (ActiveFilterChips); an empty list is an
+// EmptyStateCard with the action that fits (add the first medication / clear the filters); and once there are
+// COMBOBOX_MIN_OPTIONS categories (lib/combobox.ts shouldUseCombobox) the form's Category field and the list's category
+// filter become a searchable Combobox instead of a native <select>. Both render the same option list.
 
 // ── Types ───────────────────────────────────────────────────────────────────────────────────────
 
@@ -387,14 +398,91 @@ function describedBy(...ids: Array<string | false | null | undefined>): string |
   return list.length > 0 ? list.join(" ") : undefined;
 }
 
-/**
- * The server refuses a supplier order number that holds characters nobody can see: a soft hyphen, a zero-width space, a
- * direction mark, a tab. Text pasted from a PDF often carries them. The server's message names them, but the person
- * cannot find them by looking, so the form adds what to do about it.
- */
-function mentionsInvisibleCharacters(message: string): boolean {
-  return /\b(?:invisible|control)\b/i.test(message);
+// ── Category choices ────────────────────────────────────────────────────────────────────────────
+// One list of choices feeds both ways of picking: the native <select> (a short list, best on phones) and the searchable
+// <Combobox> (a long list). They render exactly the same options, so they can never offer different things.
+
+const UNCATEGORIZED_LABEL = "— Uncategorized —";
+
+/** A category's name as people read it: a blank name shows as "Unnamed category", never as an empty row. */
+function categoryName(category: Category): string {
+  return category.name.trim() === "" ? "Unnamed category" : category.name;
 }
+
+/**
+ * The choices of the item form's Category field, in this order: Uncategorized; the item's current category when it is not
+ * in the list (it stays selected, labelled honestly, so saving another field never clears it); every category; and the
+ * "+ Create new category…" command. Values are category id strings and are never turned into numbers.
+ */
+function formCategoryOptions(categories: readonly Category[], missingId: string | null, loading: boolean): ComboboxOption[] {
+  const options: ComboboxOption[] = [{ value: "", label: UNCATEGORIZED_LABEL }];
+  if (missingId !== null) {
+    options.push({ value: missingId, label: loading ? "Current category (loading…)" : "Current category (name unavailable)" });
+  }
+  for (const category of categories) options.push({ value: category.id, label: categoryName(category) });
+  options.push({ value: NEW_CATEGORY_VALUE, label: "+ Create new category…", kind: "action" });
+  return options;
+}
+
+/** The choices of the list's category filter, each with the number of items it would show. */
+function listFilterOptions(categories: readonly Category[], counts: CategoryCounts, showUnavailable: boolean): ComboboxOption[] {
+  const options: ComboboxOption[] = [{ value: "all", label: `All categories (${counts.all})` }];
+  for (const category of categories) {
+    options.push({ value: category.id, label: `${categoryName(category)} (${counts.byId[category.id] ?? 0})` });
+  }
+  options.push({ value: "uncategorized", label: `Uncategorized (${counts.uncategorized})` });
+  if (showUnavailable) options.push({ value: UNKNOWN_CATEGORY_ID, label: `Category unavailable (${counts.unknown})` });
+  return options;
+}
+
+/** The options of a native <select>, from the same list the searchable picker gets. */
+function NativeOptions({ options }: { options: readonly ComboboxOption[] }) {
+  return (
+    <>
+      {options.map((option) => (
+        <option key={option.value} value={option.value}>
+          {option.label}
+        </option>
+      ))}
+    </>
+  );
+}
+
+// ── Active filters and empty states ─────────────────────────────────────────────────────────────
+
+/**
+ * Does the search box hold a real search? Blank text, whitespace and text made only of invisible characters do not count.
+ * The view logic itself answers (with nothing to search, so it costs nothing), so the chip and the "Showing X of Y"
+ * line can never disagree about whether a search is on.
+ */
+function isSearchActive(search: string): boolean {
+  return selectView(NO_MEDICATIONS, [], { ...DEFAULT_VIEW, search }).summary.filtersActive;
+}
+
+// Characters that render as nothing: zero-width spaces and joiners, the soft hyphen, direction marks and bidi overrides,
+// variation selectors, tag characters... Text pasted from a web page or a PDF carries them. This is the set the view logic
+// leaves out of a search (lib/inventory-view.ts keeps its copy private, and so does the Inventory tab's chip), so the chip
+// and the "Showing X of Y" line always quote the same text. Left in, a pasted bidi override would even make the chip read
+// backwards ("neforpubi") while the summary line says "ibuprofen".
+const INVISIBLE_TEXT = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+
+/**
+ * The search as the chip shows it, and as the summary line quotes it: invisible characters dropped, ends trimmed, runs of
+ * whitespace collapsed. The chip's title holds the text whole when the chip cuts it short.
+ */
+function searchChipValue(search: string): string {
+  return search.replace(INVISIBLE_TEXT, "").trim().replace(/\s+/g, " ");
+}
+
+/** What the category chip says: the category's name, "Uncategorized" or "Category unavailable"; null while the filter is off. */
+function categoryChipValue(filter: CategoryFilter, categories: readonly Category[]): string | null {
+  if (filter.kind === "all") return null;
+  if (filter.kind === "uncategorized") return "Uncategorized";
+  if (isUnknownCategoryFilter(filter)) return "Category unavailable";
+  return categoryLabel(filter.id, categories).title;
+}
+
+const EMPTY_ICON: Record<EmptyKind, EmptyIcon> = { "no-items": "box", "category-empty": "folder", "no-match": "search" };
 
 // ── Look ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -782,10 +870,15 @@ export default function AdminPage() {
   const noticeRef = useRef<HTMLDivElement>(null);
   const formHeadingRef = useRef<HTMLHeadingElement>(null);
   const listHeadingRef = useRef<HTMLHeadingElement>(null);
+  // The form's Category field is a native <select> for a short list and the searchable <Combobox> (its text input) for a
+  // long one; only one of the two is on the page at a time, so "focus the category field" asks both.
   const categorySelectRef = useRef<HTMLSelectElement>(null);
+  const categoryComboRef = useRef<HTMLInputElement>(null);
   const newCatInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  const openerRef = useRef<{ element: HTMLElement; medicationId: number | null } | null>(null);
+  // The control that opened the form, so Cancel and Save can hand the focus back to it. `testId` finds it again when React
+  // made a new element for it while the form was open: the empty list's "Add medication" is taken off the page then.
+  const openerRef = useRef<{ element: HTMLElement; medicationId: number | null; testId: string | null } | null>(null);
   const focusSeq = useRef(0);
   const [focusRequest, setFocusRequest] = useState<{ target: FocusTarget; seq: number } | null>(null);
 
@@ -810,7 +903,7 @@ export default function AdminPage() {
         element = newCatInputRef.current;
         break;
       case "category-select":
-        element = categorySelectRef.current;
+        element = categorySelectRef.current ?? categoryComboRef.current;
         break;
       case "list-heading":
         element = listHeadingRef.current;
@@ -818,12 +911,14 @@ export default function AdminPage() {
       case "opener":
       case "saved-row": {
         // Back to the control that opened the form; if that is gone (the "Complete" button of an item that is no
-        // longer unnamed), to the item's Edit button. Past that the two differ: after Cancel the list is the next best
-        // place; after a save there is nothing to go back to when the item left the filtered list (it was moved to
-        // another category), so the "Saved" message itself is the place to land.
+        // longer unnamed), to the item's Edit button, or to the new copy of a button that was re-created while the form
+        // was open. Past that the two differ: after Cancel the list is the next best place; after a save there is
+        // nothing to go back to when the item left the filtered list (it was moved to another category) or the empty
+        // card is gone, so the "Saved" message itself is the place to land.
         const opener = openerRef.current;
         if (opener?.element.isConnected) element = opener.element;
         else if (opener?.medicationId != null) element = document.getElementById(`admin-edit-${opener.medicationId}`);
+        else if (opener?.testId) element = document.querySelector<HTMLElement>(`[data-testid="${opener.testId}"]`);
         if (focusRequest.target === "saved-row") element ??= noticeRef.current;
         element ??= listHeadingRef.current ?? document.getElementById("admin-add-button");
         break;
@@ -903,7 +998,21 @@ export default function AdminPage() {
   const currentCategoryMissing = form.category_id !== null && selectedCategory === null;
   const categorySelectValue = creatingNew ? NEW_CATEGORY_VALUE : (selectedCategory?.id ?? form.category_id ?? "");
 
-  // The line under the category select. An empty list is not proof that no category exists (a table hidden by a database
+  // A long list of categories is picked with the searchable Combobox, a short one with the native <select> (best on
+  // phones). The form's Category field and the list's filter switch at the same number of categories.
+  const searchableCategories = shouldUseCombobox(categories.length);
+  const missingCategoryId = currentCategoryMissing ? form.category_id : null;
+  const categoriesLoading = cats.status === "loading";
+  const categoryOptions = useMemo(
+    () => formCategoryOptions(categories, missingCategoryId, categoriesLoading),
+    [categories, missingCategoryId, categoriesLoading]
+  );
+  const filterChoices = useMemo(
+    () => listFilterOptions(categories, view.counts, view.counts.unknown > 0 || unknownSelected),
+    [categories, view.counts, unknownSelected]
+  );
+
+  // The line under the category field. An empty list is not proof that no category exists (a table hidden by a database
   // permission also reads as empty), so it is described neutrally, never as an invitation to create one. A creation the
   // database refused (HTTP 403) is said plainly instead: the person can still save the item, without a category.
   const categoryHelp =
@@ -915,13 +1024,15 @@ export default function AdminPage() {
           ? "No categories are available yet."
           : "Used to group this item on the Inventory tab.";
 
-  // The server refused the supplier order number for invisible characters (the notice shows its text): the hint under the
-  // field says what to do. It goes with the field's red state and clears when the field is edited.
+  // The server refused the supplier order number for invisible characters: the hint under the field says what to do about
+  // it (the notice shows the server's own text). The refusal is recognised by that exact text, the shared constant the
+  // server sends it from, so rewording it in lib/supplier-order-number.ts can never silently drop the hint. The hint goes
+  // with the field's red state and clears when the field is edited.
   const supplierPasteHint =
     fieldError === "supplier_order_number" &&
     notice?.scope === "form" &&
     notice.tone === "error" &&
-    mentionsInvisibleCharacters(notice.message);
+    notice.message === SUPPLIER_ORDER_NUMBER_INVISIBLE_REASON;
 
   // ── Retry ──
   // A Retry button does not make its own message vanish while it works. The failed list or warning stays where it is,
@@ -984,7 +1095,7 @@ export default function AdminPage() {
 
   const openNew = (trigger: HTMLElement) => {
     if (saving) return; // a save is in flight: its answer belongs to the form that is open now
-    openerRef.current = { element: trigger, medicationId: null };
+    openerRef.current = { element: trigger, medicationId: null, testId: trigger.getAttribute("data-testid") };
     setEditing(null);
     setForm(EMPTY_FORM);
     resetTransient();
@@ -994,7 +1105,7 @@ export default function AdminPage() {
 
   const openEdit = (med: Medication, trigger: HTMLElement) => {
     if (saving) return; // a save is in flight: its answer belongs to the form that is open now
-    openerRef.current = { element: trigger, medicationId: med.id };
+    openerRef.current = { element: trigger, medicationId: med.id, testId: null };
     setEditing(med);
     setForm({
       name: med.name ?? "",
@@ -1201,6 +1312,22 @@ export default function AdminPage() {
   };
 
   // ── Inline category creation ──
+  // What picking a choice in the Category field does, for the native select and the searchable picker alike. "+ Create new
+  // category…" opens the inline box and keeps the item's current category: it comes back if the new one is cancelled.
+  const handleCategoryChange = (value: string) => {
+    setCatNote(null);
+    if (value === NEW_CATEGORY_VALUE) {
+      setCreatingNew(true);
+      setCatError(null);
+      requestFocus("new-category-input");
+      return;
+    }
+    setCreatingNew(false);
+    setNewCatName("");
+    setCatError(null);
+    setFormValue("category_id", value === "" ? null : value);
+  };
+
   const cancelNewCategory = () => {
     setCreatingNew(false);
     setNewCatName("");
@@ -1296,6 +1423,34 @@ export default function AdminPage() {
     searchRef.current?.focus();
   };
 
+  // The chips under the filter row: one for each filter that is on. Taking one off resets only that filter.
+  const categoryChip = categoryChipValue(categoryFilter, categories);
+  const searchText = searchChipValue(search);
+  const searchChip = searchText !== "" && isSearchActive(search) ? searchText : null;
+
+  const removeFilter = (key: "category" | "search") => {
+    if (key === "category") setCategoryFilter({ kind: "all" });
+    else setSearch("");
+    // While another chip is left, ActiveFilterChips hands the keyboard focus to its neighbour. The last chip takes the
+    // whole row with it, so then the focus goes to the search box (always there), never to <body>.
+    if (categoryChip === null || searchChip === null) searchRef.current?.focus();
+  };
+
+  const activeFilters: ActiveFilter[] = [
+    ...(categoryChip === null
+      ? []
+      : [{ key: "category", label: "Category", value: categoryChip, onRemove: () => removeFilter("category") }]),
+    ...(searchChip === null ? [] : [{ key: "search", label: "Search", value: searchChip, onRemove: () => removeFilter("search") }]),
+  ];
+
+  // "Add medication" in the empty list opens the same form as "+ Add Medication" at the top of the page. The card's own
+  // button is the control the focus returns to when the form is cancelled (it is found again by its test id, see openerRef).
+  const addFromEmptyState = () => {
+    const trigger =
+      document.querySelector<HTMLElement>('[data-testid="admin-empty-add"]') ?? document.getElementById("admin-add-button");
+    if (trigger) openNew(trigger);
+  };
+
   // ── Render ──
   const formTitle = editing
     ? editing.is_unnamed
@@ -1314,16 +1469,36 @@ export default function AdminPage() {
     </Notice>
   );
 
+  // Why the list is empty, in this page's words: nothing has been added yet, a chosen category holds nothing, or the
+  // filters match nothing. A list that could not be loaded never gets here: that is an error notice with Retry.
   const emptyState = (() => {
     if (!listReady || view.visible.length > 0) return null;
     const empty = describeEmpty(items.length, viewState, categories);
     if (empty.kind === "no-items") {
-      return { kind: empty.kind, title: "No medications yet.", detail: "Use “+ Add Medication” to create the first one." };
+      return {
+        kind: empty.kind,
+        title: "No medications yet.",
+        detail: "Add the first medication to start tracking its stock, category and supplier order number.",
+      };
     }
-    if (empty.kind === "category-empty" && empty.detail.includes("Admin page")) {
+    // A category that exists but holds nothing. The inventory view tells people to use the Admin page; this IS the Admin page.
+    const chosenCategoryExists =
+      categoryFilter.kind === "category" && !unknownSelected && categories.some((c) => sameId(c.id, categoryFilter.id));
+    if (empty.kind === "category-empty" && chosenCategoryExists) {
       return { kind: empty.kind, title: empty.title, detail: "Use Edit on an item to put it in this category." };
     }
     return empty;
+  })();
+
+  // The card's button. "Add medication" is offered only while no form is open: next to an add form that is already on the
+  // page it would be a second control with the form's own name, and pressing it would start the form over and wipe what
+  // was typed. When the filters (not the inventory) are what is empty, the button clears them; that never touches the form.
+  const emptyAction = ((): EmptyAction | undefined => {
+    if (emptyState === null) return undefined;
+    if (emptyState.kind === "no-items") {
+      return showForm ? undefined : { label: "Add medication", onClick: addFromEmptyState, testId: "admin-empty-add" };
+    }
+    return view.summary.filtersActive ? { label: "Clear filters", onClick: clearFilters, testId: "admin-empty-clear-filters" } : undefined;
   })();
 
   return (
@@ -1540,46 +1715,38 @@ export default function AdminPage() {
               <label htmlFor="admin-category" className={LABEL}>
                 Category
               </label>
-              <div className="relative sm:max-w-md">
-                <select
+              {searchableCategories ? (
+                // Many categories: a searchable list. Enter in it never submits the form; its popup is drawn above everything.
+                <Combobox
                   id="admin-category"
-                  data-testid="category-select"
-                  ref={categorySelectRef}
+                  testId="category-select"
+                  ref={categoryComboRef}
                   value={categorySelectValue}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    setCatNote(null);
-                    if (value === NEW_CATEGORY_VALUE) {
-                      // Keep the item's current category: it comes back if the new one is cancelled.
-                      setCreatingNew(true);
-                      setCatError(null);
-                      requestFocus("new-category-input");
-                      return;
-                    }
-                    setCreatingNew(false);
-                    setNewCatName("");
-                    setCatError(null);
-                    setFormValue("category_id", value === "" ? null : value);
-                  }}
+                  options={categoryOptions}
+                  onChange={handleCategoryChange}
+                  placeholder="Type to search categories"
+                  emptyText="No categories match"
                   aria-describedby={describedBy("admin-category-help", fieldError === "category_id" && "admin-notice-anchor")}
-                  aria-invalid={fieldError === "category_id" ? true : undefined}
-                  className={`${CONTROL} appearance-none pr-10`}
-                >
-                  <option value="">— Uncategorized —</option>
-                  {currentCategoryMissing && form.category_id !== null && (
-                    <option value={form.category_id}>
-                      {cats.status === "loading" ? "Current category (loading…)" : "Current category (name unavailable)"}
-                    </option>
-                  )}
-                  {categories.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name.trim() === "" ? "Unnamed category" : c.name}
-                    </option>
-                  ))}
-                  <option value={NEW_CATEGORY_VALUE}>+ Create new category…</option>
-                </select>
-                <ChevronIcon className="pointer-events-none absolute top-1/2 right-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-600" />
-              </div>
+                  aria-invalid={fieldError === "category_id"}
+                  className="sm:max-w-md"
+                />
+              ) : (
+                <div className="relative sm:max-w-md">
+                  <select
+                    id="admin-category"
+                    data-testid="category-select"
+                    ref={categorySelectRef}
+                    value={categorySelectValue}
+                    onChange={(e) => handleCategoryChange(e.target.value)}
+                    aria-describedby={describedBy("admin-category-help", fieldError === "category_id" && "admin-notice-anchor")}
+                    aria-invalid={fieldError === "category_id" ? true : undefined}
+                    className={`${CONTROL} appearance-none pr-10`}
+                  >
+                    <NativeOptions options={categoryOptions} />
+                  </select>
+                  <ChevronIcon className="pointer-events-none absolute top-1/2 right-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-600" />
+                </div>
+              )}
 
               {creatingNew && (
                 <div className="mt-3 rounded-lg border border-gray-300 bg-gray-50 p-3 sm:max-w-md">
@@ -1651,6 +1818,7 @@ export default function AdminPage() {
               )}
               <p id="admin-category-help" className={HELP}>
                 {categoryHelp}
+                {searchableCategories && " Type to search categories."}
               </p>
             </div>
 
@@ -1833,29 +2001,36 @@ export default function AdminPage() {
                   <label htmlFor="admin-category-filter" className={LABEL}>
                     Filter by category
                   </label>
-                  <div className="relative">
-                    <select
+                  {searchableCategories ? (
+                    <Combobox
                       id="admin-category-filter"
-                      data-testid="admin-category-filter"
+                      testId="admin-category-filter"
                       value={filterToValue(categoryFilter)}
-                      onChange={(e) => setCategoryFilter(valueToFilter(e.target.value))}
-                      className={`${CONTROL} appearance-none pr-10`}
-                    >
-                      <option value="all">All categories ({view.counts.all})</option>
-                      {categories.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.name.trim() === "" ? "Unnamed category" : c.name} ({view.counts.byId[c.id] ?? 0})
-                        </option>
-                      ))}
-                      <option value="uncategorized">Uncategorized ({view.counts.uncategorized})</option>
-                      {(view.counts.unknown > 0 || unknownSelected) && (
-                        <option value={UNKNOWN_CATEGORY_ID}>Category unavailable ({view.counts.unknown})</option>
-                      )}
-                    </select>
-                    <ChevronIcon className="pointer-events-none absolute top-1/2 right-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-600" />
-                  </div>
+                      options={filterChoices}
+                      onChange={(value) => setCategoryFilter(valueToFilter(value))}
+                      placeholder="Type to search categories"
+                      emptyText="No categories match"
+                    />
+                  ) : (
+                    <div className="relative">
+                      <select
+                        id="admin-category-filter"
+                        data-testid="admin-category-filter"
+                        value={filterToValue(categoryFilter)}
+                        onChange={(e) => setCategoryFilter(valueToFilter(e.target.value))}
+                        className={`${CONTROL} appearance-none pr-10`}
+                      >
+                        <NativeOptions options={filterChoices} />
+                      </select>
+                      <ChevronIcon className="pointer-events-none absolute top-1/2 right-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-600" />
+                    </div>
+                  )}
                 </div>
               </div>
+
+              {/* The filters that are on, each with an x that takes off only that one. Not a live region: the "Showing X of Y"
+                  line below is what screen readers hear. */}
+              <ActiveFilterChips filters={activeFilters} className="mt-3" />
 
               <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
                 <p data-testid="admin-summary" aria-live="polite" className="text-[15px] font-medium text-gray-800 [overflow-wrap:anywhere]">
@@ -1895,9 +2070,14 @@ export default function AdminPage() {
         ) : !listReady ? (
           <ListSkeleton />
         ) : emptyState ? (
-          <div data-testid="admin-empty" data-empty-kind={emptyState.kind} className="px-5 py-10 text-center">
-            <p className="text-lg leading-snug font-bold text-gray-900 [overflow-wrap:anywhere]">{emptyState.title}</p>
-            <p className="mx-auto mt-1.5 max-w-[52ch] text-base text-gray-700 [overflow-wrap:anywhere]">{emptyState.detail}</p>
+          // The card is static (not a live region): the "Showing X of Y" line above announces that the results ran out.
+          <div data-testid="admin-empty" data-empty-kind={emptyState.kind} className="p-4 sm:p-5">
+            <EmptyStateCard
+              icon={EMPTY_ICON[emptyState.kind]}
+              title={emptyState.title}
+              description={emptyState.detail}
+              primaryAction={emptyAction}
+            />
           </div>
         ) : (
           <ul className="divide-y divide-gray-200">

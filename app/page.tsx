@@ -5,6 +5,7 @@ import Link from "next/link";
 import type { Category, Medication } from "@/lib/db";
 import { normalizeCategory, normalizeMedication } from "@/lib/normalize";
 import { InventoryTab, type InventoryStatus } from "./components/inventory/InventoryTab";
+import { WarnIcon } from "./components/inventory/Icons";
 import { LoadErrorNotice } from "./components/inventory/LoadErrorNotice";
 import { StatCard } from "./components/inventory/StatCard";
 import { TabUrlSync, useTabInUrl, type Tab } from "./components/inventory/tab-url";
@@ -131,6 +132,11 @@ export default function MainPage() {
 
   // ── Scan state ──────────────────────────────────────────────────
   const videoRef = useRef<HTMLVideoElement>(null);
+  // The stream getUserMedia handed out. The <video> element (and its srcObject) is gone as soon as the Scan tab is left,
+  // so the tracks that keep the camera (and its LED) on can only be reached through this ref.
+  const streamRef = useRef<MediaStream | null>(null);
+  const tabButtonRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({});
+  // True only while a request for a scan or a transaction is in flight: a second scan then waits for the first.
   const scanLockRef = useRef(false);
   const lastScanRef = useRef<{ barcode: string; time: number } | null>(null);
   const processBarcodeRef = useRef<(code: string) => void>(() => {});
@@ -229,14 +235,22 @@ export default function MainPage() {
   }, [applyInventory]);
 
   // ── Camera ──────────────────────────────────────────────────────
-  const stopCamera = useCallback(() => {
-    if (videoRef.current?.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach((t) => t.stop());
-      videoRef.current.srcObject = null;
-    }
-    setScanning(false);
+  // Ends the camera itself: every track of the stream we started (kept in streamRef) and of whatever the <video> still
+  // shows. It touches no state, so it is safe to call from an effect or a cleanup.
+  const releaseStream = useCallback(() => {
+    const video = videoRef.current;
+    const streams = new Set<MediaStream>();
+    if (streamRef.current) streams.add(streamRef.current);
+    if (video?.srcObject instanceof MediaStream) streams.add(video.srcObject);
+    streamRef.current = null;
+    streams.forEach((stream) => stream.getTracks().forEach((track) => track.stop()));
+    if (video) video.srcObject = null;
   }, []);
+
+  const stopCamera = useCallback(() => {
+    releaseStream();
+    setScanning(false);
+  }, [releaseStream]);
 
   const resetScan = useCallback(() => {
     scanLockRef.current = false;
@@ -258,7 +272,14 @@ export default function MainPage() {
     resetScan();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      if (!videoRef.current) return;
+      if (!videoRef.current) {
+        // The Scan tab was left while the browser was still asking for the camera: nobody will look at this stream.
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      // A second Start Camera pressed while the first request was pending: the older stream must not keep running.
+      releaseStream();
+      streamRef.current = stream;
       videoRef.current.srcObject = stream;
       await videoRef.current.play();
       setScanning(true);
@@ -273,16 +294,22 @@ export default function MainPage() {
       const msg = err instanceof Error ? err.message : "Unknown error";
       setCameraError(msg.includes("Permission") ? "Camera permission denied. Use manual entry below." : msg);
     }
-  }, [resetScan]);
+  }, [resetScan, releaseStream]);
 
   // Leaving the Scan tab ends the camera state. This was an effect calling stopCamera(); by the time that effect ran
   // the <video> element was already unmounted with the tab, so all it did was setScanning(false). Doing the same
   // reset while rendering gives the identical result without the extra render pass (and the lint error).
   if (tab !== "scan" && scanning) setScanning(false);
+  // The <video> element is gone with the tab, but the camera is not: end the stream itself (the LED stays on otherwise).
+  // releaseStream sets no state, which is why this one can be an effect.
+  useEffect(() => {
+    if (tab !== "scan") releaseStream();
+  }, [tab, releaseStream]);
+  // Leaving the page (a link to another route) ends the camera too.
   useEffect(() => () => {
-    stopCamera();
+    releaseStream();
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-  }, [stopCamera]);
+  }, [releaseStream]);
 
   // ── Barcode lookup ──────────────────────────────────────────────
   const lookupBarcode = useCallback(async (barcode: string) => {
@@ -297,8 +324,13 @@ export default function MainPage() {
     lastScanRef.current = { barcode: trimmed, time: now };
     stopCamera();
     setTab("scan");
+    // A new scan is a new item: the quantity and note typed for the card that was open must not carry over to this one.
+    setNote("");
+    setQuantity("1");
     setPhase({ kind: "looking" });
 
+    // The lock covers the request only. It is released on every way out (found, new barcode, not saved, network error),
+    // so a card that stays open, or one that is no longer on screen, can never leave later scans doing nothing.
     try {
       const res = await fetch(`/api/medications/barcode/${encodeURIComponent(trimmed)}`);
 
@@ -327,21 +359,19 @@ export default function MainPage() {
             setPhase({ kind: "found", medication: med, isNew: med.is_unnamed ?? false });
             fetchMedications(); // somebody else just created it: the loaded list may lack it too
           } else {
-            scanLockRef.current = false;
             setPhase({ kind: "error", message: `Barcode ${trimmed} saved for staff review` });
           }
         } else {
-          scanLockRef.current = false;
           setPhase({ kind: "error", message: `Could not save barcode ${trimmed}` });
         }
         return;
       }
 
-      scanLockRef.current = false;
       setPhase({ kind: "error", message: "Failed to lookup barcode" });
     } catch {
-      scanLockRef.current = false;
       setPhase({ kind: "error", message: "Failed to lookup barcode" });
+    } finally {
+      scanLockRef.current = false;
     }
   }, [stopCamera, setTab, fetchMedications]);
 
@@ -419,6 +449,10 @@ export default function MainPage() {
         if (buffer.length > 0) {
           const code = buffer;
           buffer = "";
+          // The scanner's Enter belongs to the scan. Left alone it would also press whatever has keyboard focus: the tab
+          // button that was clicked a moment ago (which re-selects the tab the scan has just left), or a link. An Enter
+          // with nothing buffered is an ordinary key press and is left alone.
+          if (code.trim() !== "") e.preventDefault();
           processBarcodeRef.current(code);
           setManualBarcode(code);
         }
@@ -446,6 +480,8 @@ export default function MainPage() {
   const handleTransaction = async () => {
     if (phase.kind !== "found") return;
     const med = phase.medication;
+    // A scan that arrives while the transaction is on its way must not swap the card under it.
+    scanLockRef.current = true;
     setProcessing(true);
     try {
       const res = await fetch("/api/transactions", {
@@ -481,6 +517,13 @@ export default function MainPage() {
   const lowCount = medications.filter((m) => m.stock <= m.threshold).length;
   const inStockCount = medications.filter((m) => m.stock > 0).length;
 
+  // "Scan a barcode" in the Inventory tab's empty state: show the Scan tab and leave keyboard focus on its (always present)
+  // tab button, because the button that was pressed goes away with the Inventory tab. A physical scanner works from there.
+  const goToScan = () => {
+    setTab("scan");
+    tabButtonRefs.current.scan?.focus();
+  };
+
   return (
     <div>
       <TabUrlSync />
@@ -490,9 +533,12 @@ export default function MainPage() {
         {(["scan", "inventory"] as Tab[]).map((t) => (
           <button
             key={t}
+            ref={(element) => {
+              tabButtonRefs.current[t] = element;
+            }}
             onClick={() => setTab(t)}
             aria-current={tab === t ? "true" : undefined}
-            className={`px-5 py-2.5 text-sm font-medium transition-colors rounded-t-lg -mb-px ${
+            className={`min-h-11 px-5 py-2.5 text-sm font-medium transition-colors rounded-t-lg -mb-px ${
               tab === t
                 ? "bg-white border border-b-white border-gray-200 text-blue-700"
                 : "text-gray-500 hover:text-gray-700"
@@ -506,6 +552,7 @@ export default function MainPage() {
       {/* ── SCAN TAB ── */}
       {tab === "scan" && (
         <div className="max-w-lg mx-auto">
+          <h1 className="sr-only">Scan medications</h1>
           {/* The inventory could not be loaded: say why (same words as the Inventory tab) and offer Retry. The stat
               cards below keep their dashes: a dash is "not known", never 0. */}
           {loadStatus === "error" && (
@@ -525,13 +572,14 @@ export default function MainPage() {
             <StatCard label="Low Stock" value={statsReady ? lowCount : null} color={!statsReady ? "blue" : lowCount > 0 ? "amber" : "green"} />
           </div>
 
-          {/* Scan mode toggle */}
+          {/* Scan mode toggle (every button of the Scan tab is at least 44px tall; the pressed state is also spoken) */}
           <div className="flex items-center justify-between mb-3">
             <span className="text-sm font-medium text-gray-500">Scan mode</span>
             <div className="flex rounded-lg border border-gray-300 overflow-hidden text-sm">
               <button
                 onClick={() => { setScanMode("manual"); resetScan(); }}
-                className={`px-4 py-1.5 font-medium transition-colors ${
+                aria-pressed={scanMode === "manual"}
+                className={`min-h-11 px-4 py-1.5 font-medium transition-colors ${
                   scanMode === "manual" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
                 }`}
               >
@@ -539,7 +587,8 @@ export default function MainPage() {
               </button>
               <button
                 onClick={() => { setScanMode("quick"); resetScan(); }}
-                className={`px-4 py-1.5 font-medium transition-colors ${
+                aria-pressed={scanMode === "quick"}
+                className={`min-h-11 px-4 py-1.5 font-medium transition-colors ${
                   scanMode === "quick" ? "bg-blue-600 text-white" : "bg-white text-gray-600 hover:bg-gray-50"
                 }`}
               >
@@ -554,9 +603,10 @@ export default function MainPage() {
               <button
                 key={m}
                 onClick={() => setMode(m)}
-                className={`flex-1 py-2.5 text-sm font-semibold transition-colors ${
+                aria-pressed={mode === m}
+                className={`flex-1 min-h-11 py-2.5 text-sm font-semibold transition-colors ${
                   mode === m
-                    ? m === "dispense" ? "bg-red-600 text-white" : "bg-green-600 text-white"
+                    ? m === "dispense" ? "bg-red-600 text-white" : "bg-green-700 text-white"
                     : "bg-white text-gray-700 hover:bg-gray-50"
                 }`}
               >
@@ -565,15 +615,18 @@ export default function MainPage() {
             ))}
           </div>
 
-          {/* Quick mode toast */}
-          {toast && (
-            <div className={`rounded-xl px-4 py-3 mb-4 flex items-center gap-3 ${
-              toast.color === "green" ? "bg-green-500 text-white" : "bg-red-500 text-white"
-            }`}>
-              <span className="text-3xl font-bold tabular-nums leading-none">{toast.headline}</span>
-              {toast.sub && <span className="text-sm opacity-90 truncate">{toast.sub}</span>}
-            </div>
-          )}
+          {/* Quick mode toast. The wrapper is always there (empty, so it takes no room): a message put into a live region
+              that already exists is read out, one that arrives together with its region often is not. */}
+          <div role="status" aria-live="polite" aria-atomic="true">
+            {toast && (
+              <div className={`rounded-xl px-4 py-3 mb-4 flex items-center gap-3 ${
+                toast.color === "green" ? "bg-green-700 text-white" : "bg-red-700 text-white"
+              }`}>
+                <span className="text-3xl font-bold tabular-nums leading-none">{toast.headline}</span>
+                {toast.sub && <span className="text-sm truncate">{toast.sub}</span>}
+              </div>
+            )}
+          </div>
 
           {/* Camera */}
           <div className="bg-black rounded-xl overflow-hidden mb-4 relative" style={{ aspectRatio: "4/3" }}>
@@ -584,7 +637,7 @@ export default function MainPage() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
                 </svg>
-                <button onClick={startCamera} className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
+                <button onClick={startCamera} className="min-h-11 px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700">
                   Start Camera
                 </button>
                 {cameraError && <p className="text-red-400 text-xs text-center px-4">{cameraError}</p>}
@@ -598,7 +651,7 @@ export default function MainPage() {
           </div>
 
           {scanning && (
-            <button onClick={stopCamera} className="w-full mb-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">
+            <button onClick={stopCamera} className="w-full min-h-11 mb-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">
               Stop Camera
             </button>
           )}
@@ -613,32 +666,34 @@ export default function MainPage() {
                   value={manualBarcode}
                   onChange={(e) => setManualBarcode(e.target.value)}
                   placeholder="Enter barcode manually..."
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 text-gray-900"
+                  aria-label="Barcode"
+                  className="flex-1 min-w-0 min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-600 text-gray-900"
                 />
-                <button type="submit" className="px-4 py-2 bg-gray-700 text-white rounded-lg text-sm font-medium hover:bg-gray-800">
+                <button type="submit" className="min-h-11 px-4 py-2 bg-gray-700 text-white rounded-lg text-sm font-medium hover:bg-gray-800">
                   Lookup
                 </button>
               </form>
 
-              {/* Phase-driven UI */}
+              {/* Phase-driven UI. The two small buttons keep the 44px height of the boxes: they are 44px tall themselves and
+                  reach 12px into the padding above and below (-my-3), so the boxes do not grow. */}
               {phase.kind === "looking" && (
-                <div className="mb-4 p-3 rounded-lg text-sm bg-blue-50 text-blue-800 border border-blue-200 flex items-center gap-2">
+                <div role="status" className="mb-4 p-3 rounded-lg text-sm bg-blue-50 text-blue-800 border border-blue-200 flex items-center gap-2">
                   <div className="w-4 h-4 border-2 border-blue-500 border-t-transparent rounded-full animate-spin flex-shrink-0" />
                   Looking up barcode…
                 </div>
               )}
 
               {phase.kind === "error" && (
-                <div className="mb-4 p-3 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200 flex items-center justify-between">
-                  <span>{phase.message}</span>
-                  <button onClick={resetScan} className="ml-3 text-xs underline flex-shrink-0">Try again</button>
+                <div role="alert" className="mb-4 p-3 rounded-lg text-sm bg-red-50 text-red-800 border border-red-200 flex items-center justify-between">
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{phase.message}</span>
+                  <button onClick={resetScan} className="ml-3 -my-3 inline-flex min-h-11 flex-shrink-0 items-center px-2 text-sm font-medium underline">Try again</button>
                 </div>
               )}
 
               {phase.kind === "success" && (
-                <div className="mb-4 p-3 rounded-lg text-sm bg-green-50 text-green-800 border border-green-200 flex items-center justify-between">
-                  <span>{phase.message}</span>
-                  <button onClick={resetScan} className="ml-3 text-xs underline flex-shrink-0">Scan another</button>
+                <div role="status" className="mb-4 p-3 rounded-lg text-sm bg-green-50 text-green-800 border border-green-200 flex items-center justify-between">
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{phase.message}</span>
+                  <button onClick={resetScan} className="ml-3 -my-3 inline-flex min-h-11 flex-shrink-0 items-center px-2 text-sm font-medium underline">Scan another</button>
                 </div>
               )}
 
@@ -646,67 +701,71 @@ export default function MainPage() {
                 <div className="bg-white border border-gray-200 rounded-xl p-4 shadow-sm">
                   {phase.isNew && (
                     <div className="mb-3 p-2.5 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700 flex items-center gap-2">
-                      <span>⚠</span>
+                      <WarnIcon className="h-4 w-4" />
                       <span>
                         New barcode — saved for staff review.{" "}
                         <Link href="/admin" className="underline font-medium">Complete in Admin</Link>
                       </span>
                     </div>
                   )}
+                  {/* min-w-0 on the text column and break-all on the barcode: a barcode of up to 128 characters has no spaces
+                      to wrap at, and would otherwise push the card (and the page) sideways. */}
                   <div className="flex items-start gap-3 mb-4">
                     {phase.medication.photo_url ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
                         src={phase.medication.photo_url}
                         alt={phase.medication.name || phase.medication.barcode}
-                        className="w-16 h-16 object-cover rounded-lg border"
+                        className="w-16 h-16 shrink-0 object-cover rounded-lg border"
                       />
                     ) : (
-                      <div className="w-16 h-16 bg-gray-100 rounded-lg border flex items-center justify-center text-gray-400 text-xl">Rx</div>
+                      <div className="w-16 h-16 shrink-0 bg-gray-100 rounded-lg border flex items-center justify-center text-gray-600 text-xl">Rx</div>
                     )}
-                    <div>
-                      <p className="font-bold text-gray-900">{phase.medication.name || phase.medication.barcode}</p>
-                      <p className="text-xs text-gray-500 font-mono">{phase.medication.barcode}</p>
-                      <p className="text-sm text-gray-600 mt-1">
+                    <div className="min-w-0 flex-1">
+                      <p className="font-bold text-gray-900 [overflow-wrap:anywhere]">{phase.medication.name || phase.medication.barcode}</p>
+                      <p className="text-xs text-gray-500 font-mono break-all">{phase.medication.barcode}</p>
+                      <p className="text-sm text-gray-600 mt-1 [overflow-wrap:anywhere]">
                         Current stock:{" "}
-                        <span className={`font-semibold ${phase.medication.stock <= phase.medication.threshold ? "text-amber-600" : "text-green-700"}`}>
+                        <span className={`font-semibold ${phase.medication.stock <= phase.medication.threshold ? "text-amber-700" : "text-green-700"}`}>
                           {phase.medication.stock} {phase.medication.unit}
                         </span>
                       </p>
                     </div>
                   </div>
 
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
+                  <label htmlFor="scan-quantity" className="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
                   <input
+                    id="scan-quantity"
                     type="text"
                     inputMode="numeric"
                     value={quantity}
                     placeholder="1"
                     onFocus={(e) => e.target.select()}
                     onChange={(e) => setQuantity(e.target.value.replace(/[^0-9]/g, ""))}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-400 text-gray-900"
+                    className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-blue-600 text-gray-900"
                   />
 
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Note <span className="text-gray-400 font-normal">(optional)</span>
+                  <label htmlFor="scan-note" className="block text-sm font-medium text-gray-700 mb-1">
+                    Note <span className="text-gray-600 font-normal">(optional)</span>
                   </label>
                   <input
+                    id="scan-note"
                     type="text"
                     value={note}
                     onChange={(e) => setNote(e.target.value)}
                     placeholder="e.g. Patient ID, batch number..."
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-400 text-gray-900"
+                    className="w-full min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-sm mb-4 focus:outline-none focus:ring-2 focus:ring-blue-600 text-gray-900"
                   />
 
                   <div className="flex gap-2">
-                    <button onClick={resetScan} className="flex-1 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">
+                    <button onClick={resetScan} className="flex-1 min-h-11 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">
                       Cancel
                     </button>
                     <button
                       onClick={handleTransaction}
                       disabled={processing}
-                      className={`flex-1 py-2 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-60 ${
-                        mode === "dispense" ? "bg-red-600 hover:bg-red-700" : "bg-green-600 hover:bg-green-700"
+                      className={`flex-1 min-h-11 py-2 px-2 rounded-lg text-sm font-semibold text-white transition-colors disabled:opacity-60 [overflow-wrap:anywhere] ${
+                        mode === "dispense" ? "bg-red-600 hover:bg-red-700" : "bg-green-700 hover:bg-green-800"
                       }`}
                     >
                       {processing
@@ -722,12 +781,12 @@ export default function MainPage() {
           )}
 
           {scanMode === "quick" && (
-            <p className="text-center text-xs text-gray-400 mt-2 mb-1">
+            <p className="text-center text-xs text-gray-600 mt-2 mb-1">
               Each scan {mode === "dispense" ? "subtracts" : "adds"} 1 unit instantly — no confirmation needed
             </p>
           )}
 
-          <p className="text-center text-xs text-gray-400 mt-5">
+          <p className="text-center text-xs text-gray-600 mt-5">
             Physical scanner works anywhere on this page — no need to click first
           </p>
         </div>
@@ -746,6 +805,7 @@ export default function MainPage() {
           view={view}
           onViewChange={setView}
           onRetry={retryInventory}
+          onScan={goToScan}
         />
       )}
     </div>
