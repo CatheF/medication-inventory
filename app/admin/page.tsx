@@ -1,39 +1,58 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import Image from "next/image";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, ReactNode } from "react";
+import type { Category, Medication } from "@/lib/db";
+import { sameId } from "@/lib/ids";
+import {
+  DEFAULT_VIEW,
+  UNKNOWN_CATEGORY_FILTER,
+  UNKNOWN_CATEGORY_ID,
+  describeEmpty,
+  isLowStock,
+  isUnknownCategoryFilter,
+  naturalCompare,
+  selectView,
+  sortItems,
+  type CategoryFilter,
+  type ViewState,
+} from "@/lib/inventory-view";
+import { normalizeCategory, normalizeMedication } from "@/lib/normalize";
+import { SUPPLIER_ORDER_NUMBER_MAX_LENGTH } from "@/lib/supplier-order-number";
+import { ItemThumb } from "../components/ItemThumb";
+import { Notice } from "../components/Notice";
 
-type Category = { id: number; name: string };
+// Admin: add, edit and delete medications; assign categories; enter supplier order numbers.
+//
+// Category ids are OPAQUE strings (uuid in the live database, digit strings for the bigint schema). They are compared
+// with sameId() and never go through Number(): Number("<uuid>") is NaN, JSON.stringify turns NaN into null, and that
+// is how a chosen category used to be dropped while the page still said "Medication updated."
+//
+// Nothing here claims success without proof: a save counts as saved only when the server answers 2xx AND the row it
+// sends back carries the category (and supplier order number) that was sent. A failed load is an error with a Retry
+// button, never an empty list.
 
-type Medication = {
-  id: number;
-  name: string | null;
-  barcode: string;
-  photo_url: string | null;
-  stock: number;
-  threshold: number;
-  unit: string;
-  vendor_url: string | null;
-  notes: string | null;
-  category_id: number | null;
-  is_unnamed: boolean;
-};
+// ── Types ───────────────────────────────────────────────────────────────────────────────────────
 
-type FormData = {
+type FormState = {
   name: string;
   barcode: string;
+  /** Free text. Always a string here: leading zeros are significant. */
+  supplier_order_number: string;
   photo_url: string | null;
   stock: string;
   threshold: string;
   unit: string;
   vendor_url: string;
   notes: string;
-  category_id: number | null;
+  /** Opaque id string (uuid or digits); null = uncategorized. */
+  category_id: string | null;
 };
 
-const EMPTY_FORM: FormData = {
+const EMPTY_FORM: FormState = {
   name: "",
   barcode: "",
+  supplier_order_number: "",
   photo_url: null,
   stock: "",
   threshold: "",
@@ -43,551 +62,1859 @@ const EMPTY_FORM: FormData = {
   category_id: null,
 };
 
+// The API names a bad field with these keys, which are exactly the form's keys.
+const FORM_KEYS = [
+  "name",
+  "barcode",
+  "supplier_order_number",
+  "photo_url",
+  "stock",
+  "threshold",
+  "unit",
+  "vendor_url",
+  "notes",
+  "category_id",
+] as const;
+type FormKey = (typeof FORM_KEYS)[number];
+
+function isFormKey(value: string): value is FormKey {
+  return (FORM_KEYS as readonly string[]).includes(value);
+}
+
+type MedsState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; items: Medication[]; refreshError: string | null };
+
+type CatsState =
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; items: Category[] };
+
+/** The one message the page shows about an action. `scope` decides where: inside the open form, or at the page top. */
+type NoticeState = {
+  tone: "error" | "success";
+  scope: "form" | "page";
+  /** A fixed phrase ("Not saved"). Text that comes from the data (an item name, a barcode) goes in `subject`. */
+  title?: string;
+  /** What the message is about: an item's name or barcode. Free text, so it wraps however long it is. */
+  subject?: string;
+  message: string;
+  hint?: string;
+  detail?: string | null;
+  /** The item this success message is about; its row repeats "Saved" next to its buttons. */
+  savedId?: number;
+};
+
+type FocusTarget =
+  | "notice"
+  | "form-heading"
+  | "new-category-input"
+  | "category-select"
+  | "opener"
+  | "saved-row"
+  | "list-heading";
+
+/** What a Retry button is retrying. Each kind runs at most once at a time. */
+type RetryKind = "medications" | "categories";
+
+/** Value of the select option that opens the inline "new category" box. Cannot collide with an id (uuid or digits). */
+const NEW_CATEGORY_VALUE = "__new__";
+
+const NO_MEDICATIONS: Medication[] = [];
+
+// ── Requests ────────────────────────────────────────────────────────────────────────────────────
+
+const REQUEST_TIMEOUT_MS = 30_000;
+const JSON_HEADERS = { "Content-Type": "application/json" };
+
+type ApiFailure = {
+  kind: "failed";
+  /** null: no HTTP answer at all (offline, DNS, timeout). */
+  status: number | null;
+  timedOut: boolean;
+  message: string;
+  /** True when the answer was the app's own JSON error ({ error }), not a bare HTTP error page from something else. */
+  fromApi: boolean;
+  /** The server's technical detail and error code, when it sent them. */
+  detail: string | null;
+  /** The form field the server blames, when it names one. */
+  field: string | null;
+};
+type ApiSuccess = { kind: "ok"; status: number; body: unknown };
+type ApiResult = ApiSuccess | ApiFailure;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function timeoutSignal(): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(REQUEST_TIMEOUT_MS) : undefined;
+}
+
+function readFailure(status: number, body: unknown): ApiFailure {
+  const record = isRecord(body) ? body : null;
+  const error = record && typeof record.error === "string" ? record.error.trim() : "";
+  const detail = record && typeof record.detail === "string" ? record.detail.trim() : "";
+  const code = record && typeof record.code === "string" ? record.code.trim() : "";
+  const field = record && typeof record.field === "string" && record.field !== "" ? record.field : null;
+  const technical = [detail, code ? `code ${code}` : ""].filter((part) => part !== "").join(" · ");
+  return {
+    kind: "failed",
+    status,
+    timedOut: false,
+    message: error !== "" ? error : `The server answered with an error (HTTP ${status}).`,
+    fromApi: error !== "",
+    detail: technical !== "" ? technical : null,
+    field,
+  };
+}
+
+/** One fetch with a time limit. Never throws: every outcome is a value the caller has to look at. */
+async function callApi(url: string, init: RequestInit = {}): Promise<ApiResult> {
+  let res: Response;
+  try {
+    res = await fetch(url, { cache: "no-store", ...init, signal: timeoutSignal() });
+  } catch (err) {
+    const timedOut = err instanceof DOMException && (err.name === "TimeoutError" || err.name === "AbortError");
+    return {
+      kind: "failed",
+      status: null,
+      timedOut,
+      message: timedOut
+        ? "The server took too long to answer."
+        : "Could not reach the server. Check the internet connection.",
+      fromApi: false,
+      detail: null,
+      field: null,
+    };
+  }
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null; // not JSON; the caller decides what that means
+  }
+  if (!res.ok) return readFailure(res.status, body);
+  return { kind: "ok", status: res.status, body };
+}
+
+type LoadResult<T> = { ok: true; items: T[] } | { ok: false; message: string };
+
+async function loadList<T>(
+  url: string,
+  noun: string,
+  convert: (row: Record<string, unknown>) => T,
+  isValid: (item: T) => boolean
+): Promise<LoadResult<T>> {
+  const unexpected: LoadResult<T> = { ok: false, message: `The server sent an unexpected answer for the ${noun}.` };
+  const result = await callApi(url);
+  if (result.kind === "failed") {
+    if (result.status !== null) return { ok: false, message: result.message };
+    return {
+      ok: false,
+      message: result.timedOut
+        ? `The server took too long to answer while loading the ${noun}.`
+        : `Could not reach the server while loading the ${noun}. Check the internet connection.`,
+    };
+  }
+  const body = result.body;
+  if (!Array.isArray(body) || !body.every(isRecord)) return unexpected;
+  try {
+    const items = body.map(convert);
+    return items.every(isValid) ? { ok: true, items } : unexpected;
+  } catch {
+    return unexpected; // a load must always end in a value, or the page would stay on "Loading…" forever
+  }
+}
+
+// The noun is "inventory", as on the Inventory tab, so a failed load is worded the same on every screen.
+const loadMedications = () =>
+  loadList("/api/medications", "inventory", normalizeMedication, (m) => Number.isSafeInteger(m.id) && m.id > 0);
+const loadCategories = () => loadList("/api/categories", "category list", normalizeCategory, (c) => c.id !== "");
+
+/** The words staff see wherever the inventory could not be loaded: the same title and reassurance on every screen. */
+const LOAD_ERROR_TITLE = "Couldn’t load the inventory";
+const LOAD_ERROR_REASSURANCE = "This does not mean the inventory is empty.";
+
+function toMedication(body: unknown): Medication | null {
+  if (!isRecord(body)) return null;
+  const med = normalizeMedication(body);
+  return Number.isSafeInteger(med.id) && med.id > 0 ? med : null;
+}
+
+function toCategory(body: unknown): Category | null {
+  if (!isRecord(body)) return null;
+  const cat = normalizeCategory(body);
+  return cat.id !== "" && cat.name.trim() !== "" ? cat : null;
+}
+
+// ── Saving: what is sent, and how the answer is checked ───────────────────────────────────────────
+
+type SupplierPlan = {
+  /** The supplier order number is only sent when it changed (or is non-empty on create). */
+  send: boolean;
+  /** Trimmed text, or null to clear. Exactly what the row must hold afterwards. */
+  value: string | null;
+};
+
+/**
+ * Sending the supplier order number only when it changed keeps saves working on a database that has not been
+ * migrated yet: an item can still be edited as long as that field is left alone.
+ */
+function planSupplier(form: FormState, editing: Medication | null): SupplierPlan {
+  const typed = form.supplier_order_number.trim();
+  const loaded = (editing?.supplier_order_number ?? "").trim();
+  return { send: editing ? typed !== loaded : typed !== "", value: typed === "" ? null : typed };
+}
+
+// What the server stores for each field once it has validated it (app/api/medications/_shared.ts). Two values that
+// normalize to the same thing are "unchanged": a field nobody touched must never be sent back.
+
+/** Name, photo and vendor URL are trimmed by the server; a blank one means "none". */
+function trimmedOrNull(value: string | null | undefined): string | null {
+  const text = typeof value === "string" ? value.trim() : "";
+  return text === "" ? null : text;
+}
+
+/** Notes keep their own spacing and line breaks; only an all-blank value means "no notes". */
+function notesOrNull(value: string | null | undefined): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+/** A blank unit becomes "units". */
+function unitOrDefault(value: string): string {
+  return value.trim() || "units";
+}
+
+function countOf(text: string): number {
+  return text === "" ? 0 : Number(text);
+}
+
+/**
+ * Creating sends every field. Editing sends only the fields that differ from the row as it was loaded into the form
+ * (plus the category, always).
+ *
+ * Why: stock changes all day from the Scan tab and the kiosk. A form that stays open for a minute holds the stock from
+ * when it was opened, and sending it back would silently undo every dispense since then. A field the user did not
+ * change is not theirs to overwrite.
+ *
+ * The category is the one exception: it is always sent (a string, or null for "Uncategorized") so the saved row can be
+ * checked against it afterwards, and so a body is never empty.
+ */
+function buildPayload(form: FormState, supplier: SupplierPlan, loaded: Medication | null): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (loaded === null || trimmedOrNull(form.name) !== trimmedOrNull(loaded.name)) body.name = form.name;
+  if (loaded === null || form.barcode.trim() !== loaded.barcode.trim()) body.barcode = form.barcode;
+  if (loaded === null || trimmedOrNull(form.photo_url) !== trimmedOrNull(loaded.photo_url)) body.photo_url = form.photo_url;
+  if (loaded === null || unitOrDefault(form.unit) !== unitOrDefault(loaded.unit)) body.unit = form.unit;
+  if (loaded === null || countOf(form.stock) !== loaded.stock) body.stock = countOf(form.stock);
+  if (loaded === null || countOf(form.threshold) !== loaded.threshold) body.threshold = countOf(form.threshold);
+  if (loaded === null || trimmedOrNull(form.vendor_url) !== trimmedOrNull(loaded.vendor_url)) {
+    body.vendor_url = form.vendor_url === "" ? null : form.vendor_url;
+  }
+  if (loaded === null || notesOrNull(form.notes) !== notesOrNull(loaded.notes)) {
+    body.notes = form.notes === "" ? null : form.notes;
+  }
+  body.category_id = form.category_id;
+  if (supplier.send) body.supplier_order_number = supplier.value;
+  return body;
+}
+
+/** Read-after-write: names the values the server accepted but did not actually store. */
+function findNotStored(saved: Medication, sentCategory: string | null, supplier: SupplierPlan): string[] {
+  const missing: string[] = [];
+  if (!sameId(saved.category_id, sentCategory)) missing.push("category");
+  if (supplier.send && saved.supplier_order_number !== supplier.value) missing.push("supplier order number");
+  return missing;
+}
+
+// ── Display helpers ─────────────────────────────────────────────────────────────────────────────
+
+function displayName(med: Pick<Medication, "name">): string | null {
+  const name = typeof med.name === "string" ? med.name.trim() : "";
+  return name === "" ? null : name;
+}
+
+function supplierOf(med: Pick<Medication, "supplier_order_number">): string | null {
+  const value = typeof med.supplier_order_number === "string" ? med.supplier_order_number.trim() : "";
+  return value === "" ? null : value;
+}
+
+type StockStatus = "out" | "low" | "ok";
+
+/** The same rule as the Inventory tab: 0 is Out, at or below the threshold is Low, everything else is OK. */
+function stockStatus(med: Pick<Medication, "stock" | "threshold">): StockStatus {
+  if (med.stock === 0) return "out";
+  return isLowStock(med) ? "low" : "ok";
+}
+
+type CategoryLabel = { kind: "category" | "unknown" | "uncategorized"; title: string };
+
+function categoryLabel(categoryId: string | null, categories: readonly Category[]): CategoryLabel {
+  if (categoryId === null || categoryId.trim() === "") return { kind: "uncategorized", title: "Uncategorized" };
+  const found = categories.find((c) => sameId(c.id, categoryId));
+  if (!found) return { kind: "unknown", title: "Category unavailable" };
+  const name = found.name.trim();
+  return { kind: "category", title: name === "" ? "Unnamed category" : name };
+}
+
+/** Loaded categories plus the ones created on this page, without repeats, in the order the Inventory tab uses. */
+function mergeCategories(loaded: readonly Category[], created: readonly Category[]): Category[] {
+  const merged: Category[] = [];
+  for (const category of [...loaded, ...created]) {
+    if (category.id === "" || merged.some((m) => sameId(m.id, category.id))) continue;
+    merged.push(category);
+  }
+  return merged.sort((a, b) => naturalCompare(a.name, b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+}
+
+function filterToValue(filter: CategoryFilter): string {
+  if (filter.kind === "all") return "all";
+  if (filter.kind === "uncategorized") return "uncategorized";
+  return filter.id;
+}
+
+function valueToFilter(value: string): CategoryFilter {
+  if (value === "all") return { kind: "all" };
+  if (value === "uncategorized") return { kind: "uncategorized" };
+  if (value === UNKNOWN_CATEGORY_ID) return UNKNOWN_CATEGORY_FILTER;
+  return { kind: "category", id: value };
+}
+
+function describedBy(...ids: Array<string | false | null | undefined>): string | undefined {
+  const list = ids.filter((id): id is string => typeof id === "string" && id !== "");
+  return list.length > 0 ? list.join(" ") : undefined;
+}
+
+/**
+ * The server refuses a supplier order number that holds characters nobody can see: a soft hyphen, a zero-width space, a
+ * direction mark, a tab. Text pasted from a PDF often carries them. The server's message names them, but the person
+ * cannot find them by looking, so the form adds what to do about it.
+ */
+function mentionsInvisibleCharacters(message: string): boolean {
+  return /\b(?:invisible|control)\b/i.test(message);
+}
+
+// ── Look ────────────────────────────────────────────────────────────────────────────────────────
+
+const FOCUS = "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-700";
+const LABEL_BASE = "mb-1.5 flex flex-wrap items-center gap-x-1.5 text-base font-semibold";
+const LABEL = `${LABEL_BASE} text-gray-900`;
+const HELP = "mt-1.5 text-sm text-gray-600";
+const CONTROL =
+  "min-h-11 w-full rounded-[10px] border border-gray-400 bg-white px-3 py-2 text-base text-gray-900 placeholder:text-gray-500! focus-visible:border-blue-700 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-blue-700 aria-invalid:border-red-600 aria-invalid:bg-red-50 disabled:opacity-60";
+const BTN = `inline-flex min-h-11 items-center justify-center rounded-[10px] px-4 text-base font-semibold ${FOCUS}`;
+const BTN_PRIMARY = `${BTN} bg-blue-700 text-white hover:bg-blue-800 disabled:opacity-60`;
+const BTN_SECONDARY = `${BTN} border border-gray-400 bg-white text-gray-800 hover:bg-gray-50`;
+const BTN_DANGER = `${BTN} border border-red-300 bg-white text-red-700 hover:bg-red-50`;
+// max-w-full + overflow-wrap: a category name is free text and may be one long unbroken string; it wraps inside the card
+// instead of running out of it.
+const TAG = "inline-flex max-w-full items-center gap-1 rounded-md border px-2 text-[13px] leading-5 [overflow-wrap:anywhere]";
+// Codes (barcodes, supplier order numbers) are compared character by character, so they get an explicit monospace
+// stack: 0 and O, 1 and l must look different.
+const MONO = "[font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace]";
+
+const PILL: Record<StockStatus, { label: string; className: string }> = {
+  out: { label: "Out", className: "border-red-200 bg-red-100 text-red-800" },
+  low: { label: "Low", className: "border-amber-200 bg-amber-100 text-amber-800" },
+  ok: { label: "OK", className: "border-green-200 bg-green-100 text-green-800" },
+};
+
+// Decorative icons (the words next to them carry the meaning).
+function Icon({ className = "h-4 w-4", children }: { className?: string; children: ReactNode }) {
+  return (
+    <svg
+      className={`shrink-0 ${className}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2.2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      {children}
+    </svg>
+  );
+}
+
+function TagIcon({ className }: { className?: string }) {
+  return (
+    <Icon className={className}>
+      <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
+      <line x1="7" y1="7" x2="7.01" y2="7" />
+    </Icon>
+  );
+}
+
+function WarnIcon({ className }: { className?: string }) {
+  return (
+    <Icon className={className}>
+      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </Icon>
+  );
+}
+
+function CheckIcon({ className }: { className?: string }) {
+  return (
+    <Icon className={className}>
+      <polyline points="20 6 9 17 4 12" />
+    </Icon>
+  );
+}
+
+function ChevronIcon({ className }: { className?: string }) {
+  return (
+    <Icon className={className}>
+      <polyline points="6 9 12 15 18 9" />
+    </Icon>
+  );
+}
+
+function SearchIcon({ className }: { className?: string }) {
+  return (
+    <Icon className={className}>
+      <circle cx="11" cy="11" r="8" />
+      <line x1="21" y1="21" x2="16.65" y2="16.65" />
+    </Icon>
+  );
+}
+
+function BarcodeGlyph() {
+  return (
+    <svg className="h-3 w-[17px] shrink-0" viewBox="0 0 18 12" fill="currentColor" aria-hidden="true" focusable="false">
+      <rect x="0" width="2" height="12" />
+      <rect x="3" width="1" height="12" />
+      <rect x="5" width="3" height="12" />
+      <rect x="9" width="1" height="12" />
+      <rect x="11" width="2" height="12" />
+      <rect x="14" width="1" height="12" />
+      <rect x="16" width="2" height="12" />
+    </svg>
+  );
+}
+
+// ── Small components ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * "Retry" under a notice's message: 44px tall (the shared Notice's own button is smaller).
+ *
+ * While a retry is running the button stays in place, says so, and ignores clicks. It is aria-disabled instead of
+ * disabled on purpose: a disabled button drops keyboard focus, and the person who pressed Enter on it would have to
+ * tab from the top of the page again.
+ */
+function RetryButton({ onClick, busy }: { onClick: () => void; busy: boolean }) {
+  return (
+    <button
+      type="button"
+      data-retry-button=""
+      onClick={busy ? undefined : onClick}
+      aria-disabled={busy || undefined}
+      aria-busy={busy || undefined}
+      className={`mt-2.5 inline-flex min-h-11 items-center rounded-lg border border-current px-4 text-sm font-semibold hover:bg-white/60 ${FOCUS} ${busy ? "cursor-progress opacity-80" : ""}`}
+    >
+      {busy ? "Retrying…" : "Retry"}
+    </button>
+  );
+}
+
+type FieldProps = {
+  id: string;
+  label: ReactNode;
+  /** "optional" / "required" text after the label (real words, not just a star). */
+  note?: string;
+  /** Rendered as the field's help text; the control points at it with aria-describedby={`${id}-help`}. */
+  help?: ReactNode;
+  className?: string;
+  labelClassName?: string;
+  children: ReactNode;
+};
+
+function Field({ id, label, note, help, className = "", labelClassName = "text-gray-900", children }: FieldProps) {
+  return (
+    <div className={className}>
+      <label htmlFor={id} className={`${LABEL_BASE} ${labelClassName}`}>
+        {label}
+        {note && <span className="font-normal text-gray-700">({note})</span>}
+      </label>
+      {children}
+      {help && (
+        <p id={`${id}-help`} className={HELP}>
+          {help}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function CategoryTag({ label }: { label: CategoryLabel }) {
+  if (label.kind === "category") {
+    return (
+      <>
+        <span className="sr-only">Category: </span>
+        <span className={`${TAG} border-blue-200 bg-blue-50 font-semibold text-blue-800`}>{label.title}</span>
+      </>
+    );
+  }
+  if (label.kind === "unknown") {
+    return (
+      <span className={`${TAG} border-dashed border-amber-500 bg-amber-50 font-semibold text-amber-900`}>
+        <WarnIcon className="h-3 w-3" />
+        {label.title}
+      </span>
+    );
+  }
+  return <span className={`${TAG} border-dashed border-gray-400 font-medium italic text-gray-700`}>{label.title}</span>;
+}
+
+function StatusPill({ status }: { status: StockStatus }) {
+  const { label, className } = PILL[status];
+  return (
+    <span
+      data-status={status}
+      className={`inline-flex items-center rounded-full border px-2.5 py-px text-[13px] leading-5 font-bold whitespace-nowrap ${className}`}
+    >
+      <span className="sr-only">Stock status: </span>
+      {label}
+    </span>
+  );
+}
+
+function ListSkeleton() {
+  const bar = "animate-pulse rounded bg-gray-200 motion-reduce:animate-none";
+  return (
+    <div data-testid="admin-loading" className="p-4 sm:p-5">
+      <p role="status" className="mb-4 text-base text-gray-700">
+        Loading medications…
+      </p>
+      <ul aria-hidden="true" className="space-y-4">
+        {[0, 1, 2].map((i) => (
+          <li key={i} className="flex items-center gap-3">
+            <div className={`h-10 w-10 shrink-0 rounded-lg ${bar}`} />
+            <div className="flex-1 space-y-2">
+              <div className={`h-4 w-2/3 ${bar}`} />
+              <div className={`h-3 w-1/3 ${bar}`} />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+type RowProps = {
+  med: Medication;
+  categories: readonly Category[];
+  /** This row was just saved: it says so, because the keyboard focus returns to this row after a save. */
+  saved: boolean;
+  /** A delete request for this row is in flight. */
+  deleting: boolean;
+  onEdit: (med: Medication, trigger: HTMLElement) => void;
+  onDelete: (med: Medication) => void;
+};
+
+// 80%, not less: "Deleting…" is information, and the text must stay readable (4.5:1) while the button is inactive.
+const BUSY = "aria-disabled:cursor-progress aria-disabled:opacity-80";
+
+function MedicationRow({ med, categories, saved, deleting, onEdit, onDelete }: RowProps) {
+  const name = displayName(med);
+  const supplier = supplierOf(med);
+  const status = stockStatus(med);
+  const category = categoryLabel(med.category_id, categories);
+  const nameId = `admin-name-${med.id}`;
+
+  return (
+    <li
+      data-testid={`admin-row-${med.id}`}
+      aria-busy={deleting || undefined}
+      className="grid grid-cols-[40px_minmax(0,1fr)] gap-x-3 gap-y-3 p-4 hover:bg-gray-50 md:grid-cols-[40px_minmax(0,1fr)_auto_auto] md:items-start"
+    >
+      <ItemThumb name={med.name} photoUrl={med.photo_url} size={40} />
+
+      <div className="min-w-0">
+        <p id={nameId} className="text-base leading-snug font-semibold text-gray-900 [overflow-wrap:anywhere]">
+          {name ?? <span className="font-medium italic text-gray-700">Unnamed item</span>}
+        </p>
+        <p className="mt-1.5 flex flex-wrap gap-1.5" data-testid={`admin-category-${med.id}`}>
+          <CategoryTag label={category} />
+          {med.is_unnamed && <span className={`${TAG} border-amber-200 bg-amber-100 font-semibold text-amber-800`}>Needs review</span>}
+        </p>
+        {/* The page-level "Saved." message is at the top of the page; on a long list that is far from this row. The
+            keyboard focus comes back to this row, so the confirmation is repeated here, where the person is looking.
+            It is plain text, not a live region: the page-level message is what screen readers announce. */}
+        {saved && (
+          <p
+            data-testid={`admin-saved-${med.id}`}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-green-300 bg-green-50 px-2 text-sm leading-6 font-semibold text-green-800"
+          >
+            <CheckIcon className="h-3.5 w-3.5" />
+            Saved
+          </p>
+        )}
+        <dl className="mt-2.5 flex flex-wrap gap-x-7 gap-y-2.5">
+          <div className="min-w-0" data-testid={`admin-barcode-${med.id}`}>
+            <dt className="flex items-center gap-1.5 text-[13px] leading-snug font-bold text-gray-700">
+              <BarcodeGlyph />
+              Barcode
+            </dt>
+            <dd className={`mt-0.5 ${MONO} text-[15px] leading-snug break-all text-gray-900`}>{med.barcode}</dd>
+          </div>
+          <div className="min-w-0" data-testid={`admin-supplier-${med.id}`}>
+            <dt className="flex items-center gap-1.5 text-[13px] leading-snug font-bold text-teal-700">
+              <TagIcon className="h-[15px] w-[15px]" />
+              Supplier order no.
+            </dt>
+            <dd className="mt-0.5 leading-snug">
+              {supplier !== null ? (
+                <span className={`inline-block max-w-full rounded-md border border-teal-200 bg-teal-50 px-2 ${MONO} text-[15px] break-all text-gray-900`}>
+                  {supplier}
+                </span>
+              ) : (
+                <span className="text-[15px] italic text-gray-700">Not set</span>
+              )}
+            </dd>
+          </div>
+        </dl>
+      </div>
+
+      {/* The unit is free text and can be one long unbroken string: it wraps, and the column cannot grow past 14rem. */}
+      <div className="col-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 md:col-start-auto md:block md:max-w-56 md:text-right">
+        <p className="text-[15px] text-gray-700 [overflow-wrap:anywhere]">
+          <span className="sr-only">Stock: </span>
+          <strong className="text-xl font-bold text-gray-900 tabular-nums">{med.stock}</strong> {med.unit}
+        </p>
+        <p className="flex flex-wrap items-center gap-x-2.5 gap-y-1 md:mt-1 md:justify-end">
+          <StatusPill status={status} />
+          <span className="text-[13px] text-gray-700">Threshold: {med.threshold}</span>
+        </p>
+      </div>
+
+      {/* While a delete is in flight the row's buttons are aria-disabled (not disabled: that would drop keyboard focus). */}
+      <div className="col-start-2 flex flex-wrap gap-2 md:col-start-auto">
+        <button
+          type="button"
+          id={`admin-edit-${med.id}`}
+          data-testid={`admin-edit-${med.id}`}
+          aria-describedby={nameId}
+          aria-disabled={deleting || undefined}
+          onClick={(event: MouseEvent<HTMLButtonElement>) => {
+            if (!deleting) onEdit(med, event.currentTarget);
+          }}
+          className={`${BTN_SECONDARY} ${BUSY}`}
+        >
+          Edit
+        </button>
+        <button
+          type="button"
+          data-testid={`admin-delete-${med.id}`}
+          aria-describedby={nameId}
+          aria-disabled={deleting || undefined}
+          onClick={() => {
+            if (!deleting) onDelete(med);
+          }}
+          className={`${BTN_DANGER} ${BUSY}`}
+        >
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
+      </div>
+    </li>
+  );
+}
+
+// ── Page ────────────────────────────────────────────────────────────────────────────────────────
+
 export default function AdminPage() {
-  const [medications, setMedications] = useState<Medication[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [editing, setEditing] = useState<Medication | null>(null);
+  // Data. "loading" until the request settles; a failed request is "error", never an empty list.
+  const [meds, setMeds] = useState<MedsState>({ status: "loading" });
+  const [cats, setCats] = useState<CatsState>({ status: "loading" });
+  // Categories created on this page: shown even if the next category list the server sends does not include them yet.
+  const [createdCategories, setCreatedCategories] = useState<Category[]>([]);
+  const latestMedsRequest = useRef(0);
+  const latestCatsRequest = useRef(0);
+
+  // Form
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState<FormData>(EMPTY_FORM);
+  const [editing, setEditing] = useState<Medication | null>(null);
+  const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
-  const [status, setStatus] = useState<{ type: "success" | "error"; text: string } | null>(null);
+  const [notice, setNotice] = useState<NoticeState | null>(null);
+  const [fieldError, setFieldError] = useState<FormKey | null>(null);
   const [photoUploading, setPhotoUploading] = useState(false);
-  const [search, setSearch] = useState("");
-  // New category creation inline
-  const [showNewCatInput, setShowNewCatInput] = useState(false);
+  const [photoError, setPhotoError] = useState<string | null>(null);
+  // Every time the form opens, closes or switches to another item, the "form session" changes. A photo upload or a
+  // category creation remembers the session it started in and drops its answer if the session is no longer the same:
+  // a late answer must not land in the form of a different item.
+  const formSession = useRef(0);
+  const photoRequest = useRef(0);
+  // Part of the file input's key: a file chosen for one form must not still be shown as chosen in the next one.
+  const [formKey, setFormKey] = useState(0);
+
+  // Rows whose delete request is in flight. The ref answers "already deleting this?" at the very moment of a click,
+  // before React has re-rendered; the state is what the rows render from.
+  const deletingRef = useRef<Set<number>>(new Set());
+  const [deleting, setDeleting] = useState<ReadonlySet<number>>(new Set());
+
+  // Retry buttons: which retries are running, and a polite message for screen readers.
+  const retryingRef = useRef<Record<RetryKind, boolean>>({ medications: false, categories: false });
+  const [retrying, setRetrying] = useState<Record<RetryKind, boolean>>({ medications: false, categories: false });
+  const [announcement, setAnnouncement] = useState("");
+
+  // Inline category creation
+  const [creatingNew, setCreatingNew] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [creatingCat, setCreatingCat] = useState(false);
+  const [catError, setCatError] = useState<{ message: string; detail: string | null } | null>(null);
+  const [catNote, setCatNote] = useState<string | null>(null);
+  // The last attempt to create a category was refused with a permission error (HTTP 403). That is about the database, not
+  // about one form: the help line under the select keeps saying so after the red error is gone, and on the next form,
+  // instead of inviting the same action again. Any later answer (a success, another kind of failure) replaces it.
+  const [categoryCreateDenied, setCategoryCreateDenied] = useState(false);
 
-  const loadMedications = useCallback(async () => {
-    try {
-      const res = await fetch("/api/medications");
-      const data = await res.json();
-      setMedications(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error(err);
-    }
+  // List filters
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>({ kind: "all" });
+
+  // Keyboard focus: where it goes after the page changes under the user (form opens, save fails, row is deleted...).
+  const noticeRef = useRef<HTMLDivElement>(null);
+  const formHeadingRef = useRef<HTMLHeadingElement>(null);
+  const listHeadingRef = useRef<HTMLHeadingElement>(null);
+  const categorySelectRef = useRef<HTMLSelectElement>(null);
+  const newCatInputRef = useRef<HTMLInputElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const openerRef = useRef<{ element: HTMLElement; medicationId: number | null } | null>(null);
+  const focusSeq = useRef(0);
+  const [focusRequest, setFocusRequest] = useState<{ target: FocusTarget; seq: number } | null>(null);
+
+  const requestFocus = useCallback((target: FocusTarget) => {
+    focusSeq.current += 1;
+    setFocusRequest({ target, seq: focusSeq.current });
   }, []);
 
-  const loadCategories = useCallback(async () => {
-    try {
-      const res = await fetch("/api/categories");
-      const data = await res.json();
-      setCategories(Array.isArray(data) ? data : []);
-    } catch (err) {
-      console.error(err);
+  // The request is made together with the state change that puts the target on screen, so the element exists when
+  // this effect runs after the commit. It only moves focus; it never sets state.
+  useEffect(() => {
+    if (!focusRequest) return;
+    let element: HTMLElement | null = null;
+    switch (focusRequest.target) {
+      case "notice":
+        element = noticeRef.current;
+        break;
+      case "form-heading":
+        element = formHeadingRef.current;
+        break;
+      case "new-category-input":
+        element = newCatInputRef.current;
+        break;
+      case "category-select":
+        element = categorySelectRef.current;
+        break;
+      case "list-heading":
+        element = listHeadingRef.current;
+        break;
+      case "opener":
+      case "saved-row": {
+        // Back to the control that opened the form; if that is gone (the "Complete" button of an item that is no
+        // longer unnamed), to the item's Edit button. Past that the two differ: after Cancel the list is the next best
+        // place; after a save there is nothing to go back to when the item left the filtered list (it was moved to
+        // another category), so the "Saved" message itself is the place to land.
+        const opener = openerRef.current;
+        if (opener?.element.isConnected) element = opener.element;
+        else if (opener?.medicationId != null) element = document.getElementById(`admin-edit-${opener.medicationId}`);
+        if (focusRequest.target === "saved-row") element ??= noticeRef.current;
+        element ??= listHeadingRef.current ?? document.getElementById("admin-add-button");
+        break;
+      }
     }
+    element?.focus();
+  }, [focusRequest]);
+
+  // ── Loading ──
+  // The lint rule against setState in effects is satisfied the same way app/page.tsx does it: the effect only starts
+  // module-level requests, and state is set in the .then() callbacks.
+  const applyMedications = useCallback((requestId: number, result: LoadResult<Medication>) => {
+    if (requestId !== latestMedsRequest.current) return; // a newer request replaced this one
+    setMeds((prev) => {
+      if (result.ok) return { status: "ready", items: result.items, refreshError: null };
+      // A refresh that fails after a good load keeps the list on screen and says so.
+      if (prev.status === "ready") return { ...prev, refreshError: result.message };
+      return { status: "error", message: result.message };
+    });
   }, []);
+
+  const applyCategories = useCallback((requestId: number, result: LoadResult<Category>) => {
+    if (requestId !== latestCatsRequest.current) return;
+    setCats((prev) => {
+      if (result.ok) return { status: "ready", items: result.items };
+      if (prev.status === "ready") return prev; // keep the names already known
+      return { status: "error", message: result.message };
+    });
+  }, []);
+
+  const reloadMedications = useCallback(
+    (showLoading: boolean) => {
+      const requestId = ++latestMedsRequest.current;
+      if (showLoading) setMeds({ status: "loading" });
+      loadMedications().then((result) => applyMedications(requestId, result));
+    },
+    [applyMedications]
+  );
 
   useEffect(() => {
-    loadMedications();
-    loadCategories();
-  }, [loadMedications, loadCategories]);
+    const medsRequest = ++latestMedsRequest.current;
+    const catsRequest = ++latestCatsRequest.current;
+    loadMedications().then((result) => applyMedications(medsRequest, result));
+    loadCategories().then((result) => applyCategories(catsRequest, result));
+  }, [applyMedications, applyCategories]);
 
-  const unnamedMeds = medications.filter((m) => m.is_unnamed);
+  const upsertMedication = (saved: Medication) =>
+    setMeds((prev) => {
+      if (prev.status !== "ready") return prev;
+      const exists = prev.items.some((m) => m.id === saved.id);
+      return { ...prev, items: exists ? prev.items.map((m) => (m.id === saved.id ? saved : m)) : [...prev.items, saved] };
+    });
 
-  const openNew = () => {
-    setEditing(null);
-    setForm(EMPTY_FORM);
-    setShowForm(true);
-    setStatus(null);
-    setShowNewCatInput(false);
-    setNewCatName("");
+  const removeMedication = (id: number) =>
+    setMeds((prev) => (prev.status === "ready" ? { ...prev, items: prev.items.filter((m) => m.id !== id) } : prev));
+
+  // ── Derived ──
+  const categories = useMemo(
+    () => mergeCategories(cats.status === "ready" ? cats.items : [], createdCategories),
+    [cats, createdCategories]
+  );
+  const items = meds.status === "ready" ? meds.items : NO_MEDICATIONS;
+  const viewState: ViewState = useMemo(
+    () => ({ ...DEFAULT_VIEW, search, category: categoryFilter, grouped: false }),
+    [search, categoryFilter]
+  );
+  const view = useMemo(() => selectView(items, categories, viewState), [items, categories, viewState]);
+  const unnamed = useMemo(() => sortItems(items.filter((m) => m.is_unnamed), "name", categories), [items, categories]);
+  // The list is shown only after BOTH requests settled: until the categories are known every categorized item would
+  // read "Category unavailable".
+  const listReady = meds.status === "ready" && cats.status !== "loading";
+  const unknownSelected = isUnknownCategoryFilter(categoryFilter);
+
+  const selectedCategory = form.category_id === null ? null : (categories.find((c) => sameId(c.id, form.category_id)) ?? null);
+  // The item's category is not in the list (categories failed to load, or it is gone). It stays selected, labelled
+  // honestly, so saving another field never clears it.
+  const currentCategoryMissing = form.category_id !== null && selectedCategory === null;
+  const categorySelectValue = creatingNew ? NEW_CATEGORY_VALUE : (selectedCategory?.id ?? form.category_id ?? "");
+
+  // The line under the category select. An empty list is not proof that no category exists (a table hidden by a database
+  // permission also reads as empty), so it is described neutrally, never as an invitation to create one. A creation the
+  // database refused (HTTP 403) is said plainly instead: the person can still save the item, without a category.
+  const categoryHelp =
+    cats.status === "error"
+      ? "Categories could not be loaded. The item keeps its current category unless you change it."
+      : categoryCreateDenied
+        ? "Categories can’t be created until the database permission is fixed. You can still save the item without a category."
+        : cats.status === "ready" && categories.length === 0
+          ? "No categories are available yet."
+          : "Used to group this item on the Inventory tab.";
+
+  // The server refused the supplier order number for invisible characters (the notice shows its text): the hint under the
+  // field says what to do. It goes with the field's red state and clears when the field is edited.
+  const supplierPasteHint =
+    fieldError === "supplier_order_number" &&
+    notice?.scope === "form" &&
+    notice.tone === "error" &&
+    mentionsInvisibleCharacters(notice.message);
+
+  // ── Retry ──
+  // A Retry button does not make its own message vanish while it works. The failed list or warning stays where it is,
+  // the button says "Retrying…" (and ignores clicks), and the result is announced. If the retry fails, the button is
+  // still there and keyboard focus has not moved. If it succeeds, the message and the button go away, so focus moves to
+  // the list heading, unless the person has already gone somewhere else.
+  const setRetry = (kind: RetryKind, running: boolean) => {
+    retryingRef.current[kind] = running;
+    setRetrying((prev) => ({ ...prev, [kind]: running }));
   };
 
-  const openEdit = (med: Medication) => {
+  const focusIsOnRetryOrLost = () => {
+    const active = document.activeElement;
+    return active === null || active === document.body || (active instanceof HTMLElement && active.hasAttribute("data-retry-button"));
+  };
+
+  const retryMedications = () => {
+    if (retryingRef.current.medications) return;
+    setRetry("medications", true);
+    setAnnouncement("Retrying…");
+    const requestId = ++latestMedsRequest.current;
+    void loadMedications().then((result) => {
+      const restoreFocus = result.ok && focusIsOnRetryOrLost();
+      applyMedications(requestId, result);
+      setRetry("medications", false);
+      setAnnouncement(result.ok ? "Inventory loaded." : "The inventory still could not be loaded.");
+      if (restoreFocus && requestId === latestMedsRequest.current) requestFocus("list-heading");
+    });
+  };
+
+  const retryCategories = () => {
+    if (retryingRef.current.categories) return;
+    setRetry("categories", true);
+    setAnnouncement("Retrying…");
+    const requestId = ++latestCatsRequest.current;
+    void loadCategories().then((result) => {
+      const restoreFocus = result.ok && focusIsOnRetryOrLost();
+      applyCategories(requestId, result);
+      setRetry("categories", false);
+      setAnnouncement(result.ok ? "Categories loaded." : "The categories still could not be loaded.");
+      if (restoreFocus && requestId === latestCatsRequest.current) requestFocus("list-heading");
+    });
+  };
+
+  // ── Form handlers ──
+  // Closing, opening or switching the form ends the current "form session" and clears everything that belonged to it.
+  const resetTransient = () => {
+    formSession.current += 1; // a photo upload or category creation still on its way belongs to the form that just went away
+    setFormKey((k) => k + 1);
+    setNotice(null);
+    setFieldError(null);
+    setCreatingNew(false);
+    setNewCatName("");
+    setCatError(null);
+    setCatNote(null);
+    setPhotoError(null);
+    setPhotoUploading(false);
+    setCreatingCat(false);
+  };
+
+  const openNew = (trigger: HTMLElement) => {
+    if (saving) return; // a save is in flight: its answer belongs to the form that is open now
+    openerRef.current = { element: trigger, medicationId: null };
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    resetTransient();
+    setShowForm(true);
+    requestFocus("form-heading");
+  };
+
+  const openEdit = (med: Medication, trigger: HTMLElement) => {
+    if (saving) return; // a save is in flight: its answer belongs to the form that is open now
+    openerRef.current = { element: trigger, medicationId: med.id };
     setEditing(med);
     setForm({
       name: med.name ?? "",
       barcode: med.barcode,
+      supplier_order_number: med.supplier_order_number ?? "",
       photo_url: med.photo_url,
       stock: String(med.stock),
       threshold: String(med.threshold),
       unit: med.unit,
-      vendor_url: med.vendor_url || "",
-      notes: med.notes || "",
+      vendor_url: med.vendor_url ?? "",
+      notes: med.notes ?? "",
       category_id: med.category_id,
     });
+    resetTransient();
     setShowForm(true);
-    setStatus(null);
-    setShowNewCatInput(false);
-    setNewCatName("");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    requestFocus("form-heading");
   };
 
-  const handleCreateCategory = async () => {
-    if (!newCatName.trim()) return;
-    setCreatingCat(true);
-    try {
-      const res = await fetch("/api/categories", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newCatName.trim() }),
-      });
-      const cat = await res.json();
-      if (!res.ok && res.status !== 200) {
-        setStatus({ type: "error", text: "Failed to create category" });
-        return;
-      }
-      await loadCategories();
-      setForm((f) => ({ ...f, category_id: cat.id }));
-      setShowNewCatInput(false);
-      setNewCatName("");
-    } catch {
-      setStatus({ type: "error", text: "Failed to create category" });
-    } finally {
-      setCreatingCat(false);
+  const closeForm = () => {
+    if (saving) return; // a save is in flight: its answer belongs to the form that is open now
+    setShowForm(false);
+    setEditing(null);
+    resetTransient();
+    requestFocus("opener");
+  };
+
+  const setFormValue = <K extends FormKey>(key: K, value: FormState[K]) => {
+    setForm((f) => ({ ...f, [key]: value }));
+    if (fieldError === key) setFieldError(null);
+  };
+
+  // A barcode scanner types the number and then presses Enter: Enter in a text box must not submit the form.
+  // Enter on a button, a select or the file picker keeps its normal meaning, so the form can be finished from the
+  // keyboard alone.
+  const handleFormKeyDown = (event: KeyboardEvent<HTMLFormElement>) => {
+    if (event.key !== "Enter") return;
+    const target = event.target;
+    if (target instanceof HTMLInputElement && ["text", "url", "search", "email", "tel", "number", "password"].includes(target.type)) {
+      event.preventDefault();
     }
   };
 
-  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    setPhotoUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      const res = await fetch("/api/upload", { method: "POST", body: fd });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Upload failed");
-      setForm((f) => ({ ...f, photo_url: data.url }));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : "Photo upload failed";
-      setStatus({ type: "error", text: `Photo upload failed: ${msg}` });
-    } finally {
-      setPhotoUploading(false);
+  const showSaveFailure = (failure: ApiFailure, supplier: SupplierPlan) => {
+    let message = failure.message;
+    if (failure.status === null) {
+      message = failure.timedOut
+        ? "The server took too long to answer. The item may or may not have been saved: check the list before saving again."
+        : "Could not reach the server. Check the internet connection and try again.";
     }
+    const named = failure.field !== null && isFormKey(failure.field) ? failure.field : null;
+    const field: FormKey | null = named ?? (failure.status === 409 && /barcode/i.test(failure.message) ? "barcode" : null);
+    const supplierColumnMissing = failure.status === 409 && failure.field === "supplier_order_number" && supplier.send;
+    setNotice({
+      tone: "error",
+      scope: "form",
+      title: failure.timedOut ? "Not confirmed" : "Not saved",
+      message,
+      detail: failure.detail,
+      hint: supplierColumnMissing
+        ? "Your other changes are still in the form. To save them now, clear the Supplier order number field."
+        : "Your changes are still in the form.",
+    });
+    setFieldError(field);
+    requestFocus("notice");
+    if (failure.status === 404) reloadMedications(meds.status !== "ready"); // the item is gone: refresh the list behind the form
   };
 
-  const handleSave = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSave = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (saving || photoUploading) return;
+
+    // A half-finished "new category" must not be silently dropped by saving the item.
+    if (creatingNew && newCatName.trim() !== "") {
+      setCatError({ message: "Save the new category first, or choose Cancel, then save the item.", detail: null });
+      requestFocus("new-category-input");
+      return;
+    }
+
+    const wasEditing = editing;
+    const supplier = planSupplier(form, wasEditing);
+    const sentCategory = form.category_id;
     setSaving(true);
-    setStatus(null);
-    try {
-      const url = editing ? `/api/medications/${editing.id}` : "/api/medications";
-      const method = editing ? "PUT" : "POST";
-      const res = await fetch(url, {
-        method,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...form,
-          stock: form.stock === "" ? 0 : Number(form.stock),
-          threshold: form.threshold === "" ? 0 : Number(form.threshold),
-          vendor_url: form.vendor_url || null,
-          notes: form.notes || null,
-          category_id: form.category_id,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        const detail = data.detail ? ` — ${data.detail}` : data.code ? ` (${data.code})` : "";
-        setStatus({ type: "error", text: (data.error || "Save failed") + detail });
-        return;
-      }
-      setStatus({ type: "success", text: editing ? "Medication updated." : "Medication added." });
-      setShowForm(false);
-      setEditing(null);
-      loadMedications();
-    } catch {
-      setStatus({ type: "error", text: "Network error" });
-    } finally {
-      setSaving(false);
+    setNotice(null);
+    setFieldError(null);
+
+    const result = await callApi(wasEditing ? `/api/medications/${wasEditing.id}` : "/api/medications", {
+      method: wasEditing ? "PUT" : "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify(buildPayload(form, supplier, wasEditing)),
+    });
+    setSaving(false);
+
+    if (result.kind === "failed") {
+      showSaveFailure(result, supplier);
+      return;
     }
+
+    const saved = toMedication(result.body);
+    if (saved === null) {
+      setNotice({
+        tone: "error",
+        scope: "form",
+        title: "Not confirmed",
+        message: "The server’s answer could not be read, so it is not certain that the item was saved.",
+        hint: "Reload the list to check before saving again. Your changes are still in the form.",
+      });
+      requestFocus("notice");
+      reloadMedications(meds.status !== "ready");
+      return;
+    }
+
+    upsertMedication(saved);
+    reloadMedications(meds.status !== "ready");
+
+    const notStored = findNotStored(saved, sentCategory, supplier);
+    if (notStored.length > 0) {
+      setEditing(saved); // the item exists now, so the next save updates it instead of adding a second one
+      setNotice({
+        tone: "error",
+        scope: "form",
+        title: "Saved, but a value was not stored",
+        message: `The item was saved, but the ${notStored.join(" and ")} ${notStored.length === 1 ? "was" : "were"} not stored. Nothing else changed.`,
+        hint: "Your changes are still in the form. Try saving again.",
+      });
+      requestFocus("notice");
+      return;
+    }
+
+    const label = displayName(saved) ?? saved.barcode;
+    setShowForm(false);
+    setEditing(null);
+    resetTransient();
+    setNotice({
+      tone: "success",
+      scope: "page",
+      // The item's name or barcode is free text: it goes in `subject`, which wraps, never in the fixed `title`.
+      subject: label,
+      message: `Saved. Category: ${categoryLabel(saved.category_id, categories).title} · Supplier order no.: ${supplierOf(saved) ?? "Not set"}`,
+      savedId: saved.id,
+    });
+    // Back to the row that was edited (it says "Saved"), or to the message when that row is no longer in the list.
+    requestFocus("saved-row");
   };
 
   const handleDelete = async (med: Medication) => {
-    if (!confirm(`Delete "${med.name || med.barcode}"? This also deletes all its transaction history.`)) return;
-    try {
-      await fetch(`/api/medications/${med.id}`, { method: "DELETE" });
-      loadMedications();
+    // A second click before the first answer arrives (the row's button is already marked busy): ignore it, and do not
+    // ask the confirmation again.
+    if (deletingRef.current.has(med.id)) return;
+    const label = displayName(med) ?? med.barcode;
+    if (!window.confirm(`Delete "${label}"? This also deletes all its transaction history.`)) return;
+
+    deletingRef.current.add(med.id);
+    setDeleting(new Set(deletingRef.current));
+    setAnnouncement(`Deleting “${label}”…`);
+    const result = await callApi(`/api/medications/${med.id}`, { method: "DELETE" });
+    deletingRef.current.delete(med.id);
+    setDeleting(new Set(deletingRef.current));
+    setAnnouncement(""); // the notice below announces the result itself
+
+    // The item is not in the database any more, however that came about: stop showing it.
+    const itemIsGone = (message: string) => {
       if (editing?.id === med.id) {
         setShowForm(false);
         setEditing(null);
+        resetTransient();
       }
-    } catch {
-      setStatus({ type: "error", text: "Delete failed" });
+      removeMedication(med.id);
+      reloadMedications(meds.status !== "ready");
+      setNotice({ tone: "success", scope: "page", message });
+      requestFocus("list-heading");
+    };
+
+    if (result.kind === "failed") {
+      // The app's own "item not found" answer: someone else (another tab, another person) deleted it first. What the
+      // person asked for has happened, so "Not deleted" would be wrong. A bare 404 from something that is not the app's
+      // API says nothing about the item and stays an error.
+      if (result.status === 404 && result.fromApi) {
+        itemIsGone(`“${label}” was already deleted. The list was refreshed.`);
+        return;
+      }
+      setNotice({
+        tone: "error",
+        scope: "page",
+        title: "Not deleted",
+        message:
+          result.status === null
+            ? result.timedOut
+              ? "The server took too long to answer."
+              : "Could not reach the server. Check the internet connection."
+            : result.message,
+        detail: result.detail,
+        hint:
+          result.status === null
+            ? `Reload the list to check whether “${label}” was deleted.`
+            : result.status === 404
+              ? "The list was refreshed."
+              : `“${label}” was not deleted.`,
+      });
+      requestFocus("notice");
+      if (result.status === 404) reloadMedications(meds.status !== "ready"); // not the API's answer: look again
+      return;
     }
+    itemIsGone(`Deleted “${label}”.`);
   };
 
-  const displayed = medications.filter(
-    (m) =>
-      (m.name ?? "").toLowerCase().includes(search.toLowerCase()) ||
-      m.barcode.includes(search)
+  // ── Inline category creation ──
+  const cancelNewCategory = () => {
+    setCreatingNew(false);
+    setNewCatName("");
+    setCatError(null);
+    requestFocus("category-select");
+  };
+
+  const handleCreateCategory = async () => {
+    const name = newCatName.trim();
+    if (name === "" || creatingCat) return;
+    const session = formSession.current;
+    setCreatingCat(true);
+    setCatError(null);
+    setCatNote(null);
+    const result = await callApi("/api/categories", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ name }),
+    });
+    // The form this name was typed into may be gone by now (Cancel, then another item). Then nothing below may touch the
+    // form that is open: its category, notes and messages are not this request's. A category that was created still
+    // exists on the server, so it is added to the page's lists either way.
+    const sameForm = session === formSession.current;
+    if (sameForm) setCreatingCat(false);
+    // What this answer says about the database holds whichever form it was asked from.
+    setCategoryCreateDenied(result.kind === "failed" && result.status === 403);
+
+    if (result.kind === "failed") {
+      if (!sameForm) return;
+      setCatError({
+        message:
+          result.status === null
+            ? result.timedOut
+              ? "The server took too long to answer. The category may or may not have been created."
+              : "Could not reach the server. Check the internet connection and try again."
+            : result.message,
+        detail: result.detail,
+      });
+      return;
+    }
+    const created = toCategory(result.body);
+    if (created === null) {
+      if (!sameForm) return;
+      setCatError({ message: "The server’s answer could not be read. Reload the page to check whether the category was created.", detail: null });
+      return;
+    }
+    setCreatedCategories((prev) => [...prev.filter((c) => !sameId(c.id, created.id)), created]);
+    if (!sameForm) return;
+    setForm((f) => ({ ...f, category_id: created.id }));
+    setCreatingNew(false);
+    setNewCatName("");
+    setCatNote(
+      result.status === 201
+        ? `Category “${created.name}” was created and selected.`
+        : `Category “${created.name}” already exists. It is selected.`
+    );
+    requestFocus("category-select");
+  };
+
+  // ── Photo ──
+  const handlePhotoUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const input = event.currentTarget;
+    const file = input.files?.[0];
+    if (!file) return;
+    const session = formSession.current;
+    const request = ++photoRequest.current;
+    setPhotoUploading(true);
+    setPhotoError(null);
+    const data = new FormData();
+    data.append("file", file);
+    const result = await callApi("/api/upload", { method: "POST", body: data });
+    // The photo belongs to the form it was chosen in. If that form is gone (Cancel, then another item) or a newer photo
+    // was chosen since, the answer is dropped: it must not be attached to a different item.
+    if (session !== formSession.current || request !== photoRequest.current) return;
+    setPhotoUploading(false);
+    input.value = ""; // choosing the same file again (after an error) must still count as a change
+    if (result.kind === "failed") {
+      setPhotoError(`Photo upload failed: ${result.message}`);
+      return;
+    }
+    const url = isRecord(result.body) && typeof result.body.url === "string" && result.body.url !== "" ? result.body.url : null;
+    if (url === null) {
+      setPhotoError("Photo upload failed: the server did not send back the photo’s address.");
+      return;
+    }
+    setFormValue("photo_url", url);
+  };
+
+  // ── List actions ──
+  const clearFilters = () => {
+    setSearch("");
+    setCategoryFilter({ kind: "all" });
+    searchRef.current?.focus();
+  };
+
+  // ── Render ──
+  const formTitle = editing
+    ? editing.is_unnamed
+      ? `Complete unnamed item: ${editing.barcode}`
+      : `Edit: ${editing.name || editing.barcode}`
+    : "New Medication";
+
+  // Everything that can carry text from the data (an item name, a barcode) wraps: the shared Notice does not wrap its
+  // `title`, so such text is never passed as one.
+  const renderNotice = (n: NoticeState) => (
+    <Notice ref={noticeRef} tone={n.tone} title={n.title} data-testid={n.tone === "success" ? "admin-success" : "admin-error"}>
+      {n.subject && <p className="font-semibold [overflow-wrap:anywhere]">{n.subject}</p>}
+      <p className={`[overflow-wrap:anywhere] ${n.subject ? "mt-0.5" : ""}`}>{n.message}</p>
+      {n.hint && <p className="mt-1 [overflow-wrap:anywhere]">{n.hint}</p>}
+      {n.detail && <p className={`mt-1.5 ${MONO} text-xs break-words opacity-90`}>Details: {n.detail}</p>}
+    </Notice>
   );
+
+  const emptyState = (() => {
+    if (!listReady || view.visible.length > 0) return null;
+    const empty = describeEmpty(items.length, viewState, categories);
+    if (empty.kind === "no-items") {
+      return { kind: empty.kind, title: "No medications yet.", detail: "Use “+ Add Medication” to create the first one." };
+    }
+    if (empty.kind === "category-empty" && empty.detail.includes("Admin page")) {
+      return { kind: empty.kind, title: empty.title, detail: "Use Edit on an item to put it in this category." };
+    }
+    return empty;
+  })();
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-5">
+      {/* Spoken, not shown: what a Retry or a Delete is doing, and how a Retry ended. Always in the page, so the text
+          that appears in it is announced. */}
+      <div role="status" aria-live="polite" aria-atomic="true" data-testid="admin-live" className="sr-only">
+        {announcement}
+      </div>
+
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Admin</h1>
-          <p className="text-sm text-gray-500">Manage medications.</p>
+          <p className="mt-0.5 text-base text-gray-600">Add and edit medications, their categories and supplier order numbers.</p>
         </div>
         <button
-          onClick={openNew}
-          className="px-4 py-2 bg-blue-700 text-white rounded-lg text-sm font-medium hover:bg-blue-800"
+          type="button"
+          id="admin-add-button"
+          data-testid="admin-add-button"
+          onClick={(event) => openNew(event.currentTarget)}
+          className={BTN_PRIMARY}
         >
           + Add Medication
         </button>
       </div>
 
+      {/* The result of the last action (saved, deleted, delete failed) */}
+      {notice?.scope === "page" && <div className="mb-5">{renderNotice(notice)}</div>}
+
+      {cats.status === "error" && (
+        <Notice tone="warning" title="Categories could not be loaded" data-testid="admin-categories-error" className="mb-5">
+          <p>
+            Category names and choices are missing, so categorized items show “Category unavailable”. You can still edit items:
+            an item keeps its current category unless you change it.
+          </p>
+          <p className="mt-1 [overflow-wrap:anywhere]">{cats.message}</p>
+          <RetryButton onClick={retryCategories} busy={retrying.categories} />
+        </Notice>
+      )}
+
       {/* Unnamed items review section */}
-      {unnamedMeds.length > 0 && (
-        <div className="mb-5 bg-amber-50 border border-amber-300 rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <span className="text-amber-600 text-lg">⚠</span>
-            <h2 className="font-semibold text-amber-800">
-              {unnamedMeds.length} unnamed item{unnamedMeds.length !== 1 ? "s" : ""} need review
+      {unnamed.length > 0 && (
+        <section
+          aria-labelledby="admin-unnamed-heading"
+          data-testid="admin-unnamed-section"
+          className="mb-6 rounded-xl border border-amber-300 bg-amber-50 p-4"
+        >
+          <div className="mb-3 flex flex-wrap items-center gap-x-2 gap-y-1">
+            <WarnIcon className="h-5 w-5 text-amber-700" />
+            <h2 id="admin-unnamed-heading" className="text-base font-semibold text-amber-900">
+              {unnamed.length} unnamed {unnamed.length === 1 ? "item needs" : "items need"} review
             </h2>
-            <span className="text-xs text-amber-600">
-              — scanned barcodes not yet in the system
-            </span>
+            <span className="text-sm text-amber-900">— scanned barcodes not yet in the system</span>
           </div>
-          <div className="space-y-2">
-            {unnamedMeds.map((med) => (
-              <div
+          <ul className="space-y-2">
+            {unnamed.map((med) => (
+              <li
                 key={med.id}
-                className="flex items-center justify-between bg-white rounded-lg border border-amber-200 px-3 py-2"
+                className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg border border-amber-200 bg-white px-3 py-2"
               >
-                <div>
-                  <p className="text-xs text-gray-500 font-mono">{med.barcode}</p>
-                  <p className="text-sm text-gray-700">{med.name || <span className="text-gray-400 italic">no name</span>}</p>
+                <div className="min-w-0">
+                  <p id={`admin-unnamed-barcode-${med.id}`} className={`${MONO} text-sm break-all text-gray-800`}>
+                    <span className="sr-only">Barcode: </span>
+                    {med.barcode}
+                  </p>
+                  <p className="text-sm text-gray-700 [overflow-wrap:anywhere]">
+                    {displayName(med) ?? <span className="italic">no name</span>}
+                  </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-400">{med.stock} {med.unit}</span>
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-gray-700 [overflow-wrap:anywhere]">
+                    {med.stock} {med.unit}
+                  </span>
                   <button
-                    onClick={() => openEdit(med)}
-                    className="px-3 py-1 text-xs bg-amber-600 text-white rounded hover:bg-amber-700"
+                    type="button"
+                    data-testid={`admin-complete-${med.id}`}
+                    aria-describedby={`admin-unnamed-barcode-${med.id}`}
+                    aria-disabled={deleting.has(med.id) || undefined}
+                    onClick={(event) => {
+                      if (!deleting.has(med.id)) openEdit(med, event.currentTarget);
+                    }}
+                    className={`${BTN} bg-amber-700 text-white hover:bg-amber-800 ${BUSY}`}
                   >
                     Complete
                   </button>
                 </div>
-              </div>
+              </li>
             ))}
-          </div>
-        </div>
-      )}
-
-      {/* Status */}
-      {status && (
-        <div
-          className={`mb-4 p-3 rounded-lg text-sm border ${
-            status.type === "success"
-              ? "bg-green-50 text-green-800 border-green-200"
-              : "bg-red-50 text-red-800 border-red-200"
-          }`}
-        >
-          {status.text}
-        </div>
+          </ul>
+        </section>
       )}
 
       {/* Form */}
       {showForm && (
-        <div className="bg-white border border-gray-200 rounded-xl p-6 mb-6 shadow-sm">
-          <h2 className="text-lg font-semibold mb-4">
-            {editing
-              ? editing.is_unnamed
-                ? `Complete unnamed item: ${editing.barcode}`
-                : `Edit: ${editing.name || editing.barcode}`
-              : "New Medication"}
+        <section className="mb-6 rounded-xl border border-gray-200 bg-white p-5 shadow-sm sm:p-6">
+          <h2
+            id="admin-form-heading"
+            ref={formHeadingRef}
+            tabIndex={-1}
+            className={`text-xl font-semibold text-gray-900 [overflow-wrap:anywhere] ${FOCUS}`}
+          >
+            {formTitle}
           </h2>
           {editing?.is_unnamed && (
-            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-700">
+            <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
               This barcode was auto-created from a scan. Fill in the details below to complete the record.
+            </p>
+          )}
+          {notice?.scope === "form" && (
+            <div id="admin-notice-anchor" className="mt-4">
+              {renderNotice(notice)}
             </div>
           )}
+
           <form
+            data-testid="admin-form"
+            aria-labelledby="admin-form-heading"
             onSubmit={handleSave}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.target as HTMLElement).tagName !== "TEXTAREA") {
-                e.preventDefault();
-              }
-            }}
-            className="grid grid-cols-1 sm:grid-cols-2 gap-4"
+            onKeyDown={handleFormKeyDown}
+            className="mt-5 grid grid-cols-1 gap-x-5 gap-y-5 sm:grid-cols-2"
           >
-            <div className="sm:col-span-2">
-              <label className="label">Name</label>
+            <Field id="admin-name" label="Name" help="Shown in the inventory and on order sheets." className="sm:col-span-2">
               <input
+                id="admin-name"
+                data-testid="name-input"
                 type="text"
                 value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
-                className="input"
+                onChange={(e) => setFormValue("name", e.target.value)}
+                aria-describedby={describedBy("admin-name-help", fieldError === "name" && "admin-notice-anchor")}
+                aria-invalid={fieldError === "name" ? true : undefined}
+                autoComplete="off"
+                className={CONTROL}
                 placeholder="e.g. Ibuprofen 200mg"
               />
-            </div>
+            </Field>
 
-            <div>
-              <label className="label">Barcode *</label>
+            <Field
+              id="admin-barcode"
+              label={
+                <>
+                  <BarcodeGlyph />
+                  Barcode
+                </>
+              }
+              note="required"
+              help="The number printed under the barcode (what the scanner reads)."
+            >
               <input
+                id="admin-barcode"
+                data-testid="barcode-input"
                 required
+                aria-required="true"
                 type="text"
                 value={form.barcode}
-                onChange={(e) => setForm((f) => ({ ...f, barcode: e.target.value }))}
-                className="input font-mono"
+                onChange={(e) => setFormValue("barcode", e.target.value)}
+                aria-describedby={describedBy("admin-barcode-help", fieldError === "barcode" && "admin-notice-anchor")}
+                aria-invalid={fieldError === "barcode" ? true : undefined}
+                autoComplete="off"
+                spellCheck={false}
+                maxLength={128}
+                className={`${CONTROL} ${MONO}`}
                 placeholder="e.g. 012345678901"
               />
-            </div>
+            </Field>
 
-            <div>
-              <label className="label">Unit</label>
+            <Field
+              id="supplier-order-number"
+              label={
+                <>
+                  <TagIcon className="h-[15px] w-[15px]" />
+                  Supplier order number
+                </>
+              }
+              labelClassName="text-teal-800"
+              note="optional"
+              help="The number your supplier uses when ordering this item. This is not the barcode. Letters, dashes and leading zeros are kept exactly as typed."
+            >
               <input
+                id="supplier-order-number"
+                data-testid="supplier-order-number-input"
                 type="text"
-                value={form.unit}
-                onChange={(e) => setForm((f) => ({ ...f, unit: e.target.value }))}
-                className="input"
-                placeholder="e.g. tablets, mL, doses"
+                value={form.supplier_order_number}
+                onChange={(e) => setFormValue("supplier_order_number", e.target.value)}
+                aria-describedby={describedBy(
+                  "supplier-order-number-help",
+                  supplierPasteHint && "supplier-order-number-hint",
+                  fieldError === "supplier_order_number" && "admin-notice-anchor"
+                )}
+                aria-invalid={fieldError === "supplier_order_number" ? true : undefined}
+                autoComplete="off"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                maxLength={SUPPLIER_ORDER_NUMBER_MAX_LENGTH}
+                className={`${CONTROL} ${MONO}`}
+                placeholder="e.g. 00417-B"
               />
-            </div>
-
-            <div>
-              <label className="label">Current Stock</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={form.stock}
-                placeholder="0"
-                onFocus={(e) => e.target.select()}
-                onChange={(e) => setForm((f) => ({ ...f, stock: e.target.value.replace(/[^0-9]/g, "") }))}
-                className="input"
-              />
-            </div>
-
-            <div>
-              <label className="label">Low-Stock Threshold</label>
-              <input
-                type="text"
-                inputMode="numeric"
-                value={form.threshold}
-                placeholder="0"
-                onFocus={(e) => e.target.select()}
-                onChange={(e) => setForm((f) => ({ ...f, threshold: e.target.value.replace(/[^0-9]/g, "") }))}
-                className="input"
-              />
-            </div>
+              {/* Under the field, above its general help. The notice above the form carries the server's own text and
+                  has the focus; this says what to do. An icon and words, not colour alone. */}
+              {supplierPasteHint && (
+                <p
+                  id="supplier-order-number-hint"
+                  data-testid="supplier-order-number-hint"
+                  className="mt-1.5 flex items-start gap-1.5 text-sm font-semibold text-red-700"
+                >
+                  <WarnIcon className="mt-0.5 h-4 w-4" />
+                  <span>If you pasted this code, delete it and type it by hand.</span>
+                </p>
+              )}
+            </Field>
 
             {/* Category picker */}
             <div className="sm:col-span-2">
-              <label className="label">Category</label>
-              {!showNewCatInput ? (
-                <div className="flex gap-2">
-                  <select
-                    value={form.category_id ?? ""}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      if (val === "__new__") {
-                        setShowNewCatInput(true);
-                        setForm((f) => ({ ...f, category_id: null }));
-                      } else {
-                        setForm((f) => ({ ...f, category_id: val === "" ? null : Number(val) }));
-                      }
-                    }}
-                    className="input flex-1"
-                  >
-                    <option value="">— No category —</option>
-                    {categories.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
-                      </option>
-                    ))}
-                    <option value="__new__">+ Create new category…</option>
-                  </select>
-                </div>
-              ) : (
-                <div className="flex gap-2">
-                  <input
-                    autoFocus
-                    type="text"
-                    value={newCatName}
-                    onChange={(e) => setNewCatName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") { e.preventDefault(); handleCreateCategory(); }
-                      if (e.key === "Escape") { setShowNewCatInput(false); setNewCatName(""); }
-                    }}
-                    placeholder="New category name…"
-                    className="input flex-1"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleCreateCategory}
-                    disabled={creatingCat || !newCatName.trim()}
-                    className="px-4 py-2 bg-blue-700 text-white rounded-lg text-sm font-medium hover:bg-blue-800 disabled:opacity-50"
-                  >
-                    {creatingCat ? "Saving…" : "Save"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => { setShowNewCatInput(false); setNewCatName(""); }}
-                    className="px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-600 hover:bg-gray-50"
-                  >
-                    Cancel
-                  </button>
+              <label htmlFor="admin-category" className={LABEL}>
+                Category
+              </label>
+              <div className="relative sm:max-w-md">
+                <select
+                  id="admin-category"
+                  data-testid="category-select"
+                  ref={categorySelectRef}
+                  value={categorySelectValue}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setCatNote(null);
+                    if (value === NEW_CATEGORY_VALUE) {
+                      // Keep the item's current category: it comes back if the new one is cancelled.
+                      setCreatingNew(true);
+                      setCatError(null);
+                      requestFocus("new-category-input");
+                      return;
+                    }
+                    setCreatingNew(false);
+                    setNewCatName("");
+                    setCatError(null);
+                    setFormValue("category_id", value === "" ? null : value);
+                  }}
+                  aria-describedby={describedBy("admin-category-help", fieldError === "category_id" && "admin-notice-anchor")}
+                  aria-invalid={fieldError === "category_id" ? true : undefined}
+                  className={`${CONTROL} appearance-none pr-10`}
+                >
+                  <option value="">— Uncategorized —</option>
+                  {currentCategoryMissing && form.category_id !== null && (
+                    <option value={form.category_id}>
+                      {cats.status === "loading" ? "Current category (loading…)" : "Current category (name unavailable)"}
+                    </option>
+                  )}
+                  {categories.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name.trim() === "" ? "Unnamed category" : c.name}
+                    </option>
+                  ))}
+                  <option value={NEW_CATEGORY_VALUE}>+ Create new category…</option>
+                </select>
+                <ChevronIcon className="pointer-events-none absolute top-1/2 right-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-600" />
+              </div>
+
+              {creatingNew && (
+                <div className="mt-3 rounded-lg border border-gray-300 bg-gray-50 p-3 sm:max-w-md">
+                  <label htmlFor="admin-new-category" className={LABEL}>
+                    New category name
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <input
+                      id="admin-new-category"
+                      data-testid="new-category-input"
+                      ref={newCatInputRef}
+                      type="text"
+                      value={newCatName}
+                      maxLength={60}
+                      onChange={(e) => {
+                        setNewCatName(e.target.value);
+                        if (catError) setCatError(null);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void handleCreateCategory();
+                        }
+                        if (e.key === "Escape") {
+                          e.preventDefault();
+                          cancelNewCategory();
+                        }
+                      }}
+                      aria-describedby={describedBy(catError && "admin-category-error-box")}
+                      aria-invalid={catError ? true : undefined}
+                      autoComplete="off"
+                      placeholder="e.g. Vaccines"
+                      className={`${CONTROL} min-w-0 flex-1 basis-40`}
+                    />
+                    <button
+                      type="button"
+                      data-testid="new-category-save"
+                      onClick={() => void handleCreateCategory()}
+                      disabled={creatingCat || newCatName.trim() === ""}
+                      className={BTN_PRIMARY}
+                    >
+                      {creatingCat ? "Saving…" : "Save category"}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="new-category-cancel"
+                      aria-label="Cancel new category"
+                      onClick={cancelNewCategory}
+                      className={BTN_SECONDARY}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {catError && (
+                    <div id="admin-category-error-box" className="mt-3">
+                      <Notice tone="error" data-testid="category-error">
+                        <p className="[overflow-wrap:anywhere]">{catError.message}</p>
+                        {catError.detail && <p className={`mt-1.5 ${MONO} text-xs break-words opacity-90`}>Details: {catError.detail}</p>}
+                      </Notice>
+                    </div>
+                  )}
                 </div>
               )}
-              {form.category_id && (
-                <p className="text-xs text-gray-500 mt-1">
-                  Category: {categories.find((c) => c.id === form.category_id)?.name}
+
+              {catNote && (
+                <p role="status" data-testid="category-note" className="mt-2 text-sm font-semibold text-green-800">
+                  {catNote}
                 </p>
               )}
+              <p id="admin-category-help" className={HELP}>
+                {categoryHelp}
+              </p>
             </div>
 
-            <div className="sm:col-span-2">
-              <label className="label">Vendor URL</label>
+            <div className="grid grid-cols-1 gap-x-5 gap-y-5 sm:col-span-2 sm:grid-cols-3">
+              <Field id="admin-unit" label="Unit" help="What you count this item in.">
+                <input
+                  id="admin-unit"
+                  data-testid="unit-input"
+                  type="text"
+                  value={form.unit}
+                  onChange={(e) => setFormValue("unit", e.target.value)}
+                  aria-describedby={describedBy("admin-unit-help", fieldError === "unit" && "admin-notice-anchor")}
+                  aria-invalid={fieldError === "unit" ? true : undefined}
+                  autoComplete="off"
+                  maxLength={40}
+                  className={CONTROL}
+                  placeholder="e.g. tablets, mL, doses"
+                />
+              </Field>
+              <Field id="admin-stock" label="Current Stock" help="How many are on hand now.">
+                <input
+                  id="admin-stock"
+                  data-testid="stock-input"
+                  type="text"
+                  inputMode="numeric"
+                  value={form.stock}
+                  placeholder="0"
+                  maxLength={10}
+                  autoComplete="off"
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setFormValue("stock", e.target.value.replace(/[^0-9]/g, ""))}
+                  aria-describedby={describedBy("admin-stock-help", fieldError === "stock" && "admin-notice-anchor")}
+                  aria-invalid={fieldError === "stock" ? true : undefined}
+                  className={CONTROL}
+                />
+              </Field>
+              <Field id="admin-threshold" label="Low-Stock Threshold" help="Shown as Low at or below this number.">
+                <input
+                  id="admin-threshold"
+                  data-testid="threshold-input"
+                  type="text"
+                  inputMode="numeric"
+                  value={form.threshold}
+                  placeholder="0"
+                  maxLength={10}
+                  autoComplete="off"
+                  onFocus={(e) => e.target.select()}
+                  onChange={(e) => setFormValue("threshold", e.target.value.replace(/[^0-9]/g, ""))}
+                  aria-describedby={describedBy("admin-threshold-help", fieldError === "threshold" && "admin-notice-anchor")}
+                  aria-invalid={fieldError === "threshold" ? true : undefined}
+                  className={CONTROL}
+                />
+              </Field>
+            </div>
+
+            <Field
+              id="admin-vendor-url"
+              label="Vendor URL"
+              note="optional"
+              help="A web page where this item can be reordered."
+              className="sm:col-span-2"
+            >
               <input
+                id="admin-vendor-url"
+                data-testid="vendor-url-input"
                 type="url"
-                value={form.vendor_url || ""}
-                onChange={(e) => setForm((f) => ({ ...f, vendor_url: e.target.value }))}
-                className="input"
+                inputMode="url"
+                value={form.vendor_url}
+                onChange={(e) => setFormValue("vendor_url", e.target.value)}
+                aria-describedby={describedBy("admin-vendor-url-help", fieldError === "vendor_url" && "admin-notice-anchor")}
+                aria-invalid={fieldError === "vendor_url" ? true : undefined}
+                autoComplete="off"
+                className={CONTROL}
                 placeholder="https://vendor.com/product/..."
               />
-            </div>
+            </Field>
 
-            <div className="sm:col-span-2">
-              <label className="label">Notes</label>
+            <Field id="admin-notes" label="Notes" note="optional" className="sm:col-span-2">
               <textarea
-                value={form.notes || ""}
-                onChange={(e) => setForm((f) => ({ ...f, notes: e.target.value }))}
-                className="input"
-                rows={2}
+                id="admin-notes"
+                data-testid="notes-input"
+                value={form.notes}
+                onChange={(e) => setFormValue("notes", e.target.value)}
+                aria-describedby={describedBy(fieldError === "notes" && "admin-notice-anchor")}
+                aria-invalid={fieldError === "notes" ? true : undefined}
+                className={CONTROL}
+                rows={3}
                 placeholder="Storage instructions, warnings, etc."
               />
-            </div>
+            </Field>
 
-            <div className="sm:col-span-2">
-              <label className="label">Photo</label>
+            <Field
+              id="admin-photo"
+              label="Photo"
+              note="optional"
+              help="An item can always be saved without a photo."
+              className="sm:col-span-2"
+            >
               <div className="flex items-start gap-3">
-                {form.photo_url && (
-                  <div className="relative w-20 h-20 rounded-lg overflow-hidden border border-gray-200 flex-shrink-0">
-                    <Image src={form.photo_url} alt="Medication" fill className="object-cover" unoptimized />
-                  </div>
-                )}
-                <div className="flex-1">
+                {form.photo_url && <ItemThumb name={form.name} photoUrl={form.photo_url} size={56} />}
+                <div className="min-w-0 flex-1">
                   <input
+                    key={formKey}
+                    id="admin-photo"
+                    data-testid="photo-input"
                     type="file"
                     accept="image/*"
                     onChange={handlePhotoUpload}
-                    className="block w-full text-sm text-gray-500 file:mr-3 file:py-1.5 file:px-3 file:rounded file:border-0 file:text-sm file:font-medium file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                    aria-describedby={describedBy("admin-photo-help", photoError && "admin-photo-error")}
+                    className={`block w-full text-base text-gray-700 file:mr-3 file:min-h-10 file:cursor-pointer file:rounded-lg file:border-0 file:bg-blue-50 file:px-4 file:text-base file:font-semibold file:text-blue-800 hover:file:bg-blue-100 ${FOCUS}`}
                   />
-                  {photoUploading && <p className="text-xs text-gray-500 mt-1">Uploading...</p>}
+                  {photoUploading && (
+                    <p role="status" className="mt-1.5 text-sm text-gray-700">
+                      Uploading…
+                    </p>
+                  )}
+                  {form.photo_url && !photoUploading && !photoError && (
+                    <p className="mt-1.5 text-sm text-gray-700">Photo attached. It is kept with the item when you save.</p>
+                  )}
+                  {photoError && (
+                    <p id="admin-photo-error" role="alert" data-testid="admin-photo-error" className="mt-1.5 flex items-start gap-1.5 text-sm font-semibold text-red-700">
+                      <WarnIcon className="mt-0.5 h-4 w-4" />
+                      <span>{photoError}</span>
+                    </p>
+                  )}
                 </div>
               </div>
-            </div>
+            </Field>
 
-            <div className="sm:col-span-2 flex gap-3 pt-2">
-              <button
-                type="button"
-                onClick={() => { setShowForm(false); setEditing(null); }}
-                className="flex-1 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50"
-              >
+            <div className="flex flex-col gap-3 sm:col-span-2 sm:flex-row sm:justify-end">
+              <button type="button" data-testid="cancel-button" onClick={closeForm} disabled={saving} className={`${BTN_SECONDARY} disabled:opacity-60`}>
                 Cancel
               </button>
-              <button
-                type="submit"
-                disabled={saving || photoUploading}
-                className="flex-1 py-2 bg-blue-700 text-white rounded-lg text-sm font-semibold hover:bg-blue-800 disabled:opacity-60"
-              >
-                {saving ? "Saving..." : editing ? "Save Changes" : "Add Medication"}
+              <button type="submit" data-testid="save-button" disabled={saving || photoUploading} className={`${BTN_PRIMARY} sm:min-w-44`}>
+                {saving ? "Saving…" : editing ? "Save Changes" : "Add Medication"}
               </button>
             </div>
           </form>
-        </div>
+        </section>
       )}
 
       {/* Medication list */}
-      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
-        <div className="p-4 border-b border-gray-100 flex items-center justify-between">
-          <h2 className="font-semibold text-gray-900">
-            All Medications ({medications.length})
+      <section aria-labelledby="admin-list-heading" className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+        <div className="border-b border-gray-200 p-4 sm:p-5">
+          <h2
+            id="admin-list-heading"
+            ref={listHeadingRef}
+            tabIndex={-1}
+            className={`text-lg font-semibold text-gray-900 ${FOCUS}`}
+          >
+            All Medications
+            {meds.status === "ready" && <span className="font-normal text-gray-600"> ({meds.items.length})</span>}
           </h2>
-          <input
-            type="text"
-            placeholder="Search..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="px-3 py-1.5 border border-gray-300 rounded-lg text-sm w-48 focus:outline-none focus:ring-2 focus:ring-blue-400 text-gray-900"
-          />
-        </div>
 
-        {displayed.length === 0 ? (
-          <div className="p-8 text-center text-gray-400 text-sm">
-            {medications.length === 0 ? "No medications yet." : "No results."}
-          </div>
-        ) : (
-          <div className="divide-y divide-gray-100">
-            {displayed.map((med) => (
-              <div key={med.id} className="flex items-center gap-3 p-4 hover:bg-gray-50">
-                <div className="relative w-10 h-10 rounded-lg overflow-hidden border border-gray-200 flex-shrink-0 bg-gray-50">
-                  {med.photo_url ? (
-                    <Image src={med.photo_url} alt={med.name ?? med.barcode} fill className="object-cover" unoptimized />
-                  ) : (
-                    <span className="flex items-center justify-center h-full text-xs text-gray-400">Rx</span>
-                  )}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="font-medium text-sm text-gray-900 truncate">{med.name || med.barcode}</p>
-                    {med.is_unnamed && (
-                      <span className="text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded shrink-0">
-                        needs review
-                      </span>
-                    )}
-                    {med.category_id && (
-                      <span className="text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded shrink-0">
-                        {categories.find((c) => c.id === med.category_id)?.name}
-                      </span>
-                    )}
+          {listReady && (
+            <>
+              <div className="mt-4 flex flex-wrap items-end gap-x-4 gap-y-4">
+                <div className="min-w-[220px] flex-1 basis-64">
+                  <label htmlFor="admin-search" className={LABEL}>
+                    Search
+                  </label>
+                  <div className="relative">
+                    <SearchIcon className="pointer-events-none absolute top-1/2 left-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-500" />
+                    <input
+                      id="admin-search"
+                      data-testid="admin-search"
+                      ref={searchRef}
+                      type="search"
+                      value={search}
+                      onChange={(e) => setSearch(e.target.value)}
+                      placeholder="Name, barcode or supplier no."
+                      autoComplete="off"
+                      spellCheck={false}
+                      maxLength={200}
+                      className={`${CONTROL} pr-3 pl-10`}
+                    />
                   </div>
-                  <p className="text-xs text-gray-400 font-mono">{med.barcode}</p>
                 </div>
-                <div className="text-right flex-shrink-0">
-                  <p
-                    className={`text-sm font-semibold ${
-                      med.stock <= med.threshold ? "text-amber-600" : "text-gray-900"
-                    }`}
-                  >
-                    {med.stock} {med.unit}
-                  </p>
-                  <p className="text-xs text-gray-400">threshold: {med.threshold}</p>
-                </div>
-                <div className="flex gap-1 flex-shrink-0">
-                  <button
-                    onClick={() => openEdit(med)}
-                    className="px-2.5 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => handleDelete(med)}
-                    className="px-2.5 py-1 text-xs bg-red-50 text-red-600 rounded hover:bg-red-100"
-                  >
-                    Delete
-                  </button>
+                <div className="min-w-[220px] flex-1 basis-56 sm:max-w-xs">
+                  <label htmlFor="admin-category-filter" className={LABEL}>
+                    Filter by category
+                  </label>
+                  <div className="relative">
+                    <select
+                      id="admin-category-filter"
+                      data-testid="admin-category-filter"
+                      value={filterToValue(categoryFilter)}
+                      onChange={(e) => setCategoryFilter(valueToFilter(e.target.value))}
+                      className={`${CONTROL} appearance-none pr-10`}
+                    >
+                      <option value="all">All categories ({view.counts.all})</option>
+                      {categories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name.trim() === "" ? "Unnamed category" : c.name} ({view.counts.byId[c.id] ?? 0})
+                        </option>
+                      ))}
+                      <option value="uncategorized">Uncategorized ({view.counts.uncategorized})</option>
+                      {(view.counts.unknown > 0 || unknownSelected) && (
+                        <option value={UNKNOWN_CATEGORY_ID}>Category unavailable ({view.counts.unknown})</option>
+                      )}
+                    </select>
+                    <ChevronIcon className="pointer-events-none absolute top-1/2 right-3 h-[18px] w-[18px] -translate-y-1/2 text-gray-600" />
+                  </div>
                 </div>
               </div>
-            ))}
-          </div>
-        )}
-      </div>
 
-      <style jsx>{`
-        .label {
-          display: block;
-          font-size: 0.875rem;
-          font-weight: 500;
-          color: #374151;
-          margin-bottom: 0.25rem;
-        }
-        .input {
-          width: 100%;
-          padding: 0.5rem 0.75rem;
-          border: 1px solid #d1d5db;
-          border-radius: 0.5rem;
-          font-size: 0.875rem;
-          outline: none;
-          color: #111827;
-        }
-        .input:focus {
-          ring: 2px solid #3b82f6;
-          border-color: #3b82f6;
-        }
-      `}</style>
+              <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+                <p data-testid="admin-summary" aria-live="polite" className="text-[15px] font-medium text-gray-800 [overflow-wrap:anywhere]">
+                  {view.summary.text}
+                </p>
+                {view.summary.filtersActive && (
+                  <button
+                    type="button"
+                    data-testid="admin-clear-filters"
+                    onClick={clearFilters}
+                    className={`inline-flex min-h-10 items-center rounded-lg px-2 text-[15px] font-semibold text-blue-700 underline underline-offset-2 hover:text-blue-900 ${FOCUS}`}
+                  >
+                    Clear filters
+                  </button>
+                )}
+              </div>
+
+              {meds.status === "ready" && meds.refreshError && (
+                <Notice tone="warning" title="The list could not be refreshed" data-testid="admin-refresh-warning" className="mt-3">
+                  <p className="[overflow-wrap:anywhere]">{meds.refreshError}</p>
+                  <p className="mt-1">The list below may be out of date.</p>
+                  <RetryButton onClick={retryMedications} busy={retrying.medications} />
+                </Notice>
+              )}
+            </>
+          )}
+        </div>
+
+        {meds.status === "error" ? (
+          <div className="p-4 sm:p-5">
+            <Notice tone="error" title={LOAD_ERROR_TITLE} data-testid="admin-load-error">
+              <p>{LOAD_ERROR_REASSURANCE}</p>
+              <p className="mt-1 [overflow-wrap:anywhere]">{meds.message}</p>
+              <RetryButton onClick={retryMedications} busy={retrying.medications} />
+            </Notice>
+          </div>
+        ) : !listReady ? (
+          <ListSkeleton />
+        ) : emptyState ? (
+          <div data-testid="admin-empty" data-empty-kind={emptyState.kind} className="px-5 py-10 text-center">
+            <p className="text-lg leading-snug font-bold text-gray-900 [overflow-wrap:anywhere]">{emptyState.title}</p>
+            <p className="mx-auto mt-1.5 max-w-[52ch] text-base text-gray-700 [overflow-wrap:anywhere]">{emptyState.detail}</p>
+          </div>
+        ) : (
+          <ul className="divide-y divide-gray-200">
+            {view.visible.map((med) => (
+              <MedicationRow
+                key={med.id}
+                med={med}
+                categories={categories}
+                saved={notice?.savedId === med.id}
+                deleting={deleting.has(med.id)}
+                onEdit={openEdit}
+                onDelete={handleDelete}
+              />
+            ))}
+          </ul>
+        )}
+      </section>
     </div>
   );
 }

@@ -1,6 +1,11 @@
 @import "tailwindcss";
 
+/* The app is light-only: a white page, white cards and fixed dark text (text-gray-900 and friends). There is deliberately no
+   `prefers-color-scheme: dark` override: it turned the page near-black under those fixed colors and made the headings
+   nearly invisible whenever the visitor's operating system was in dark mode. `color-scheme: light` also keeps the
+   browser's own form controls, date pickers and scrollbars light in that case. */
 :root {
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #171717;
 }
@@ -9,14 +14,10 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  /* Tailwind's `font-mono` (barcodes, supplier numbers) used to point at --font-geist-mono, which nothing defines, so it
+     silently fell back to the proportional font. No monospace web font is loaded (and none is added): this is the
+     system monospace stack, the same one the order sheet uses (.sheet-mono below). */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 body {
@@ -25,21 +26,106 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* Inputs always use dark text; placeholders stay mid-gray.
-   Prevents the dark-mode foreground color (#ededed) from
-   making typed text invisible on light backgrounds. */
+/* Inputs always use dark text, whatever color the text around them has. */
 input:not([type="file"]),
 textarea,
 select {
   color: #111827;
 }
 
+/* Placeholders: gray-500 is 4.83:1 on white (the old #9ca3af was 2.5:1). This rule is outside any @layer, so it also
+   wins over Tailwind's placeholder:text-* utilities. */
 ::placeholder {
-  color: #9ca3af;
+  color: #6b7280;
   opacity: 1;
 }
 
 @keyframes kiosk-shrink {
   from { width: 100%; }
   to { width: 0%; }
+}
+
+/* ── Order sheet (app/order-sheet) ───────────────────────────────────────────────────────────────────────────
+   The sheet is ONE component (<PrintSheet>): a "paper" preview on screen AND the thing that prints. Only
+   `.print-sheet` prints: the page marks everything else `print:hidden`, and the boxes around the sheet carry
+   `.print-reset`. Paper size and page margins come from an @page rule that the page injects for the chosen paper
+   (Letter or A4). Everything below is scoped with :has(.print-sheet), so printing any other page is unchanged. */
+
+/* System fonts: they look the same on every computer and embed cleanly in a saved PDF. */
+.sheet-font {
+  font-family: Arial, Helvetica, "Liberation Sans", sans-serif;
+}
+.sheet-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media print {
+  html:has(.print-sheet),
+  body:has(.print-sheet) {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  body:has(.print-sheet) {
+    min-height: 0 !important;
+  }
+  main:has(.print-sheet) {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* The boxes around the sheet lose their card look, and any scrolling or clipping: an overflow box would cut a long
+     table off at the end of the first page. */
+  .print-reset {
+    display: block !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: none !important;
+    overflow: visible !important;
+    transform: none !important;
+    outline: 0 !important;
+  }
+
+  .print-sheet {
+    width: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+  .print-sheet h3,
+  .print-sheet dl {
+    break-after: avoid;
+  }
+  /* 1px short of the full width: with collapsed borders the outer half of the right border sits outside the table box, and
+     on some paper sizes the printer clips it at the page edge, which loses the table's right-hand line. */
+  .print-sheet table {
+    table-layout: fixed;
+    width: calc(100% - 1px);
+    border-collapse: collapse;
+  }
+  /* The column headings (and the footer line) repeat on every page; a row is never split across two pages. */
+  .print-sheet thead {
+    display: table-header-group;
+  }
+  .print-sheet tfoot {
+    display: table-footer-group;
+  }
+  .print-sheet tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  .print-sheet th,
+  .print-sheet td {
+    overflow-wrap: anywhere;
+  }
 }

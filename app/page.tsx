@@ -1,8 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState, useCallback } from "react";
-import Image from "next/image";
 import Link from "next/link";
+import type { Category, Medication } from "@/lib/db";
+import { normalizeCategory, normalizeMedication } from "@/lib/normalize";
+import { InventoryTab, type InventoryStatus } from "./components/inventory/InventoryTab";
+import { LoadErrorNotice } from "./components/inventory/LoadErrorNotice";
+import { StatCard } from "./components/inventory/StatCard";
+import { TabUrlSync, useTabInUrl, type Tab } from "./components/inventory/tab-url";
+import { useInventoryView } from "./components/inventory/useInventoryView";
 
 type MedScan = {
   id: number;
@@ -15,16 +21,8 @@ type MedScan = {
   is_unnamed: boolean;
 };
 
-type MedFull = MedScan & {
-  vendor_url: string | null;
-  notes: string | null;
-  category_id: number | null;
-};
-
-type Category = { id: number; name: string };
 type Mode = "dispense" | "receive";
 type ScanMode = "manual" | "quick";
-type Tab = "scan" | "inventory";
 type Toast = { color: "green" | "red"; headline: string; sub?: string };
 
 type ScanPhase =
@@ -34,8 +32,102 @@ type ScanPhase =
   | { kind: "error"; message: string }
   | { kind: "success"; message: string };
 
+// ── Inventory data loading ──────────────────────────────────────────────────────────────────────
+// A failed request is never turned into an empty list: it becomes a message the Inventory tab shows next to a
+// Retry button. (The API answers { error, code? } with a non-2xx status when the database is unreachable or refuses.)
+type ListResult<T> = { ok: true; data: T[] } | { ok: false; message: string };
+type InventoryResult = { meds: ListResult<Medication>; cats: ListResult<Category> };
+
+const REQUEST_TIMEOUT_MS = 30_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function serverMessage(body: unknown, status: number, fallback: string): string {
+  if (isRecord(body) && typeof body.error === "string" && body.error.trim() !== "") {
+    const code = typeof body.code === "string" && body.code !== "" ? ` (code ${body.code})` : "";
+    return `${body.error.trim()}${code}`;
+  }
+  return `${fallback} (the server answered ${status}).`;
+}
+
+async function loadList<T>(
+  url: string,
+  noun: string,
+  convert: (row: Record<string, unknown>) => T,
+  isValid: (item: T) => boolean = () => true
+): Promise<ListResult<T>> {
+  let res: Response;
+  try {
+    const signal = typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(REQUEST_TIMEOUT_MS) : undefined;
+    res = await fetch(url, { signal, cache: "no-store" }); // never a cached list: stale data looks like lost data
+  } catch (err) {
+    const timedOut = err instanceof DOMException && (err.name === "TimeoutError" || err.name === "AbortError");
+    return {
+      ok: false,
+      message: timedOut
+        ? `The server took too long to answer while loading the ${noun}.`
+        : `Could not reach the server while loading the ${noun}. Check the internet connection.`,
+    };
+  }
+  let body: unknown = null;
+  try {
+    body = await res.json();
+  } catch {
+    body = null; // not JSON: handled below
+  }
+  if (!res.ok) return { ok: false, message: serverMessage(body, res.status, `The ${noun} could not be loaded`) };
+  if (!Array.isArray(body) || !body.every(isRecord)) {
+    return { ok: false, message: `The server sent an unexpected answer for the ${noun}.` };
+  }
+  const data = body.map(convert);
+  if (!data.every(isValid)) return { ok: false, message: `The server sent an unexpected answer for the ${noun}.` };
+  return { ok: true, data };
+}
+
+async function loadInventory(): Promise<InventoryResult> {
+  const [meds, cats] = await Promise.all([
+    loadList("/api/medications", "inventory", normalizeMedication, (item) => Number.isFinite(item.id)),
+    loadList("/api/categories", "category list", normalizeCategory),
+  ]);
+  return { meds, cats };
+}
+
+// ── Physical scanner: which focused element keeps the keystrokes ───────────────────────────────
+// A scanner "types" the barcode and Enter like a keyboard. While focus is in a field where typing means something
+// else (a text box, a <select> that jumps between its options by typed letters, a text area, an editable element)
+// the keys belong to that field and are not a scan. Anything else is no text entry: a checkbox the mouse just ticked
+// (focus stays on it), a radio button, a slider, a button... ignore digits, so a scan sent while one of them has focus
+// is still a scan.
+const TEXT_ENTRY_INPUT_TYPES: ReadonlySet<string> = new Set([
+  "text",
+  "search",
+  "number",
+  "email",
+  "url",
+  "tel",
+  "password",
+  "date",
+  "datetime-local",
+  "month",
+  "week",
+  "time",
+]);
+
+function isTextEntryTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;
+  // input.type is the normalized type: an unknown or missing type reads as "text"
+  return target instanceof HTMLInputElement && TEXT_ENTRY_INPUT_TYPES.has(target.type);
+}
+
 export default function MainPage() {
-  const [tab, setTab] = useState<Tab>("scan");
+  // The tab lives in the address (/?tab=inventory), the Inventory view (search, filters, sort, grouping) in
+  // sessionStorage: see tab-url.tsx and useInventoryView.ts. Both give the server render and the first client render
+  // the same answer (Scan tab, default view) and apply the real values right after, so there is no hydration mismatch.
+  const [tab, setTab] = useTabInUrl();
 
   // ── Scan state ──────────────────────────────────────────────────
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -57,31 +149,84 @@ export default function MainPage() {
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Inventory state ─────────────────────────────────────────────
-  const [medications, setMedications] = useState<MedFull[]>([]);
+  const [medications, setMedications] = useState<Medication[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
-  const [search, setSearch] = useState("");
-  const [stockFilter, setStockFilter] = useState<"all" | "low" | "ok">("all");
-  const [categoryFilter, setCategoryFilter] = useState<number | "none" | null>(null);
-  const [invLoading, setInvLoading] = useState(true);
+  const [view, setView] = useInventoryView();
+  // "loading" until BOTH requests have settled; "error" only when the items could not be loaded and there is
+  // nothing to show; otherwise "ready". A refresh that fails after a successful load keeps the old list and sets
+  // refreshError instead (the Inventory tab shows it as a warning with Retry).
+  const [loadStatus, setLoadStatus] = useState<InventoryStatus>("loading");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [categoriesError, setCategoriesError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(true); // the first load starts on mount
+  const hasDataRef = useRef(false);
+  const latestRequestRef = useRef(0);
+  const initialLoadRef = useRef<Promise<InventoryResult> | null>(null);
 
-  const fetchMedications = useCallback(async () => {
-    try {
-      const [medsRes, catsRes] = await Promise.all([
-        fetch("/api/medications"),
-        fetch("/api/categories"),
-      ]);
-      const meds = await medsRes.json();
-      const cats = await catsRes.json();
-      setMedications(Array.isArray(meds) ? meds : []);
-      setCategories(Array.isArray(cats) ? cats : []);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setInvLoading(false);
+  const applyInventory = useCallback((requestId: number, result: InventoryResult) => {
+    if (requestId !== latestRequestRef.current) return; // a newer request replaced this one
+    if (result.meds.ok) {
+      hasDataRef.current = true;
+      setMedications(result.meds.data);
+      setLoadStatus("ready");
+      setLoadError(null);
+      setRefreshError(null);
+    } else if (hasDataRef.current) {
+      setRefreshError(result.meds.message);
+    } else {
+      setLoadStatus("error");
+      setLoadError(result.meds.message);
     }
+    if (result.cats.ok) {
+      setCategories(result.cats.data);
+      setCategoriesError(null);
+    } else {
+      setCategoriesError(result.cats.message);
+    }
+    setRefreshing(false);
   }, []);
 
-  useEffect(() => { fetchMedications(); }, [fetchMedications]);
+  const reloadInventory = useCallback(
+    (showLoading: boolean) => {
+      const requestId = ++latestRequestRef.current;
+      setRefreshing(true);
+      if (showLoading) {
+        setLoadStatus("loading");
+        setLoadError(null);
+      }
+      loadInventory().then((result) => applyInventory(requestId, result));
+    },
+    [applyInventory]
+  );
+
+  // Quiet reload (after a transaction): keeps whatever is on screen while it runs.
+  const fetchMedications = useCallback(() => reloadInventory(false), [reloadInventory]);
+  // "Retry" button: shows the loading state again only when there is no list yet.
+  const retryInventory = useCallback(() => reloadInventory(!hasDataRef.current), [reloadInventory]);
+
+  // Scan tab: the load-error notice (see below) is replaced by the loading state while a retry runs, and takes the
+  // focused Retry button with it. If the retry fails again the notice comes back; put keyboard focus on it then, like
+  // the Inventory tab does, instead of leaving it at the top of the page.
+  const scanErrorRef = useRef<HTMLDivElement>(null);
+  const scanRetryPendingRef = useRef(false);
+  const handleScanRetry = () => {
+    scanRetryPendingRef.current = true;
+    retryInventory();
+  };
+  useEffect(() => {
+    if (!scanRetryPendingRef.current || loadStatus === "loading") return;
+    scanRetryPendingRef.current = false;
+    const focus = document.activeElement;
+    if (loadStatus === "error" && (focus === null || focus === document.body)) scanErrorRef.current?.focus();
+  }, [loadStatus, loadError]);
+
+  useEffect(() => {
+    // React Strict Mode (development) runs effects twice; both runs share one request.
+    const request = (initialLoadRef.current ??= loadInventory());
+    const requestId = ++latestRequestRef.current;
+    request.then((result) => applyInventory(requestId, result));
+  }, [applyInventory]);
 
   // ── Camera ──────────────────────────────────────────────────────
   const stopCamera = useCallback(() => {
@@ -130,7 +275,10 @@ export default function MainPage() {
     }
   }, [resetScan]);
 
-  useEffect(() => { if (tab !== "scan") stopCamera(); }, [tab, stopCamera]);
+  // Leaving the Scan tab ends the camera state. This was an effect calling stopCamera(); by the time that effect ran
+  // the <video> element was already unmounted with the tab, so all it did was setScanning(false). Doing the same
+  // reset while rendering gives the identical result without the extra render pass (and the lint error).
+  if (tab !== "scan" && scanning) setScanning(false);
   useEffect(() => () => {
     stopCamera();
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -169,11 +317,15 @@ export default function MainPage() {
         if (createRes.ok) {
           const med: MedScan = await createRes.json();
           setPhase({ kind: "found", medication: med, isNew: true });
+          // The new item is not in the loaded list yet: load it again so the Scan tab's numbers and the Inventory tab
+          // include it without a page reload.
+          fetchMedications();
         } else if (createRes.status === 409) {
           const refetchRes = await fetch(`/api/medications/barcode/${encodeURIComponent(trimmed)}`);
           if (refetchRes.ok) {
             const med: MedScan = await refetchRes.json();
             setPhase({ kind: "found", medication: med, isNew: med.is_unnamed ?? false });
+            fetchMedications(); // somebody else just created it: the loaded list may lack it too
           } else {
             scanLockRef.current = false;
             setPhase({ kind: "error", message: `Barcode ${trimmed} saved for staff review` });
@@ -191,7 +343,7 @@ export default function MainPage() {
       scanLockRef.current = false;
       setPhase({ kind: "error", message: "Failed to lookup barcode" });
     }
-  }, [stopCamera]);
+  }, [stopCamera, setTab, fetchMedications]);
 
   // ── Quick scan ──────────────────────────────────────────────────
   const quickScanBarcode = useCallback(async (barcode: string) => {
@@ -257,8 +409,10 @@ export default function MainPage() {
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      // Text boxes, text areas, editable elements and the <select> of the Inventory tab's Sort control (it uses typed
+      // letters to jump between its options, so a letter and Enter there would be read as a one-character "scan" and
+      // save a junk item) keep their keystrokes. Checkboxes, radio buttons, buttons and the like do not.
+      if (isTextEntryTarget(e.target)) return;
 
       if (e.key === "Enter") {
         if (timer) { clearTimeout(timer); timer = null; }
@@ -321,27 +475,23 @@ export default function MainPage() {
     }
   };
 
-  // ── Inventory filtering ─────────────────────────────────────────
-  let displayed = medications.filter(
-    (m) => (m.name ?? "").toLowerCase().includes(search.toLowerCase()) || m.barcode.includes(search)
-  );
-  if (stockFilter === "low") displayed = displayed.filter((m) => m.stock <= m.threshold);
-  if (stockFilter === "ok") displayed = displayed.filter((m) => m.stock > m.threshold);
-  if (categoryFilter === "none") displayed = displayed.filter((m) => m.category_id === null);
-  else if (categoryFilter !== null) displayed = displayed.filter((m) => m.category_id === categoryFilter);
-
+  // ── Scan tab stats ──────────────────────────────────────────────
+  // Em dash (never 0) until the inventory has loaded: a zero would read as "the inventory is empty".
+  const statsReady = loadStatus === "ready";
   const lowCount = medications.filter((m) => m.stock <= m.threshold).length;
   const inStockCount = medications.filter((m) => m.stock > 0).length;
-  const unnamedCount = medications.filter((m) => m.is_unnamed).length;
 
   return (
     <div>
+      <TabUrlSync />
+
       {/* Tab bar */}
       <div className="flex gap-1 border-b border-gray-200 mb-5">
         {(["scan", "inventory"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
+            aria-current={tab === t ? "true" : undefined}
             className={`px-5 py-2.5 text-sm font-medium transition-colors rounded-t-lg -mb-px ${
               tab === t
                 ? "bg-white border border-b-white border-gray-200 text-blue-700"
@@ -356,11 +506,23 @@ export default function MainPage() {
       {/* ── SCAN TAB ── */}
       {tab === "scan" && (
         <div className="max-w-lg mx-auto">
+          {/* The inventory could not be loaded: say why (same words as the Inventory tab) and offer Retry. The stat
+              cards below keep their dashes: a dash is "not known", never 0. */}
+          {loadStatus === "error" && (
+            <LoadErrorNotice
+              ref={scanErrorRef}
+              data-testid="scan-inventory-error"
+              message={loadError}
+              onRetry={handleScanRetry}
+              className="mb-4"
+            />
+          )}
+
           {/* Summary stats */}
           <div className="grid grid-cols-3 gap-4 mb-4">
-            <StatCard label="Total Items" value={medications.length} color="blue" />
-            <StatCard label="In Stock" value={inStockCount} color="green" />
-            <StatCard label="Low Stock" value={lowCount} color={lowCount > 0 ? "amber" : "green"} />
+            <StatCard label="Total Items" value={statsReady ? medications.length : null} color="blue" />
+            <StatCard label="In Stock" value={statsReady ? inStockCount : null} color={statsReady ? "green" : "blue"} />
+            <StatCard label="Low Stock" value={statsReady ? lowCount : null} color={!statsReady ? "blue" : lowCount > 0 ? "amber" : "green"} />
           </div>
 
           {/* Scan mode toggle */}
@@ -573,184 +735,19 @@ export default function MainPage() {
 
       {/* ── INVENTORY TAB ── */}
       {tab === "inventory" && (
-        <div>
-          {/* Stats */}
-          <div className="grid grid-cols-3 gap-4 mb-4">
-            <StatCard label="Total" value={medications.length} color="blue" />
-            <StatCard label="Low Stock" value={lowCount} color={lowCount > 0 ? "amber" : "green"} />
-            <StatCard label="In Stock" value={medications.filter((m) => m.stock > m.threshold).length} color="green" />
-          </div>
-
-          {/* Alerts */}
-          {lowCount > 0 && (
-            <div className="mb-3 p-3 bg-amber-50 border border-amber-300 rounded-lg flex items-center justify-between">
-              <p className="text-amber-800 text-sm font-medium">
-                {lowCount} medication{lowCount !== 1 ? "s are" : " is"} at or below threshold.
-              </p>
-              <button onClick={() => setStockFilter("low")} className="text-xs text-amber-700 underline">
-                Show only
-              </button>
-            </div>
-          )}
-          {unnamedCount > 0 && (
-            <div className="mb-3 p-3 bg-amber-50 border border-amber-300 rounded-lg flex items-center justify-between">
-              <p className="text-amber-800 text-sm font-medium">
-                {unnamedCount} unnamed item{unnamedCount !== 1 ? "s" : ""} need staff review.
-              </p>
-              <Link href="/admin" className="text-xs text-amber-700 underline">Review in Admin</Link>
-            </div>
-          )}
-
-          {/* Category chips */}
-          {categories.length > 0 && (
-            <div className="flex flex-wrap gap-2 mb-3">
-              <button
-                onClick={() => setCategoryFilter(null)}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  categoryFilter === null ? "bg-blue-700 text-white" : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-50"
-                }`}
-              >
-                All categories
-              </button>
-              {categories.map((c) => (
-                <button
-                  key={c.id}
-                  onClick={() => setCategoryFilter(c.id === categoryFilter ? null : c.id)}
-                  className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                    categoryFilter === c.id ? "bg-blue-700 text-white" : "bg-white border border-gray-300 text-gray-600 hover:bg-gray-50"
-                  }`}
-                >
-                  {c.name}
-                </button>
-              ))}
-              <button
-                onClick={() => setCategoryFilter(categoryFilter === "none" ? null : "none")}
-                className={`px-3 py-1 rounded-full text-xs font-medium transition-colors ${
-                  categoryFilter === "none" ? "bg-gray-700 text-white" : "bg-white border border-gray-300 text-gray-400 hover:bg-gray-50"
-                }`}
-              >
-                Uncategorized
-              </button>
-            </div>
-          )}
-
-          {/* Controls */}
-          <div className="flex flex-col sm:flex-row gap-3 mb-4">
-            <input
-              type="text"
-              placeholder="Search by name or barcode..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-400 text-gray-900"
-            />
-            <div className="flex gap-2">
-              {(["all", "low", "ok"] as const).map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setStockFilter(f)}
-                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    stockFilter === f ? "bg-blue-700 text-white" : "bg-white border border-gray-300 text-gray-700 hover:bg-gray-50"
-                  }`}
-                >
-                  {f === "ok" ? "Adequate" : f === "low" ? "Low" : "All"}
-                </button>
-              ))}
-            </div>
-            <Link href="/admin" className="px-4 py-2 bg-blue-700 text-white rounded-lg text-sm font-medium hover:bg-blue-800 text-center">
-              + Add
-            </Link>
-          </div>
-
-          {/* Grid */}
-          {invLoading ? (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <div key={i} className="bg-white rounded-xl border border-gray-200 p-4 animate-pulse">
-                  <div className="bg-gray-200 h-32 rounded-lg mb-3" />
-                  <div className="bg-gray-200 h-4 rounded w-3/4 mb-2" />
-                  <div className="bg-gray-200 h-3 rounded w-1/2" />
-                </div>
-              ))}
-            </div>
-          ) : displayed.length === 0 ? (
-            <div className="text-center py-16 text-gray-500">
-              {medications.length === 0 ? (
-                <>
-                  <p className="text-lg font-medium mb-2">No medications yet</p>
-                  <p className="text-sm mb-4">Add medications via Admin or import a CSV file.</p>
-                  <Link href="/admin" className="text-blue-600 underline text-sm">Go to Admin</Link>
-                </>
-              ) : (
-                <p className="text-lg">No results for &ldquo;{search}&rdquo;</p>
-              )}
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
-              {displayed.map((med) => (
-                <div
-                  key={med.id}
-                  className="bg-white rounded-xl border border-gray-200 overflow-hidden hover:shadow-md transition-shadow"
-                >
-                  <div className="relative h-36 bg-gray-100">
-                    {med.photo_url ? (
-                      <Image src={med.photo_url} alt={med.name ?? med.barcode} fill className="object-cover" unoptimized />
-                    ) : (
-                      <div className="flex items-center justify-center h-full text-gray-400">
-                        <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-                        </svg>
-                      </div>
-                    )}
-                  </div>
-                  <div className="p-3">
-                    <p className="font-semibold text-sm text-gray-900 leading-tight mb-1 line-clamp-2">
-                      {med.name || <span className="text-gray-400 font-mono font-normal">{med.barcode}</span>}
-                    </p>
-                    {med.is_unnamed && (
-                      <span className="inline-block text-xs bg-amber-100 text-amber-700 px-1.5 py-0.5 rounded mb-1">needs review</span>
-                    )}
-                    {med.category_id && (
-                      <span className="inline-block text-xs bg-blue-50 text-blue-600 px-1.5 py-0.5 rounded mb-1 ml-1">
-                        {categories.find((c) => c.id === med.category_id)?.name}
-                      </span>
-                    )}
-                    <p className="text-xs text-gray-500 mb-2 font-mono">{med.barcode}</p>
-                    <div className="flex items-center justify-between">
-                      <span className="text-lg font-bold text-gray-900">
-                        {med.stock}
-                        <span className="text-xs font-normal text-gray-500 ml-1">{med.unit}</span>
-                      </span>
-                      <span className={`text-xs px-2 py-0.5 rounded-full border font-medium ${
-                        med.stock === 0 ? "bg-red-100 text-red-800 border-red-200" :
-                        med.stock <= med.threshold ? "bg-amber-100 text-amber-800 border-amber-200" :
-                        "bg-green-100 text-green-800 border-green-200"
-                      }`}>
-                        {med.stock === 0 ? "Out" : med.stock <= med.threshold ? "Low" : "OK"}
-                      </span>
-                    </div>
-                    <p className="text-xs text-gray-400 mt-1">Threshold: {med.threshold} {med.unit}</p>
-                    {med.vendor_url && (
-                      <a href={med.vendor_url} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline mt-1 block truncate">
-                        Order from vendor
-                      </a>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+        <InventoryTab
+          status={loadStatus}
+          errorMessage={loadError}
+          medications={medications}
+          categories={categories}
+          categoriesError={categoriesError}
+          refreshError={refreshError}
+          refreshing={refreshing}
+          view={view}
+          onViewChange={setView}
+          onRetry={retryInventory}
+        />
       )}
-    </div>
-  );
-}
-
-function StatCard({ label, value, color }: { label: string; value: number; color: "blue" | "amber" | "green" }) {
-  const colors = { blue: "bg-blue-50 border-blue-200 text-blue-800", amber: "bg-amber-50 border-amber-200 text-amber-800", green: "bg-green-50 border-green-200 text-green-800" };
-  return (
-    <div className={`rounded-xl border p-4 ${colors[color]}`}>
-      <p className="text-2xl font-bold">{value}</p>
-      <p className="text-sm mt-0.5 opacity-80">{label}</p>
     </div>
   );
 }

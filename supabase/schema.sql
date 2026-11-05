@@ -6,6 +6,14 @@
 
 -- ── Tables ────────────────────────────────────────────────────
 
+-- NOTE ON CATEGORY ID TYPES: this file declares categories.id (and
+-- medications.category_id below) as BIGINT. At least one deployed database,
+-- the Health Center Supabase project, was created differently and uses UUID
+-- ids for both. The application is id-type agnostic: it treats category ids as
+-- opaque strings (it never converts them to numbers) and PostgREST casts them
+-- to whichever type the column has. Neither side is wrong, so do NOT convert a
+-- deployed database to match this file, or this file to match a deployed
+-- database. The SQL in supabase/migrations/ names no id type and works on both.
 CREATE TABLE IF NOT EXISTS categories (
   id         BIGSERIAL PRIMARY KEY,
   name       TEXT UNIQUE NOT NULL,
@@ -16,6 +24,11 @@ CREATE TABLE IF NOT EXISTS medications (
   id          BIGSERIAL PRIMARY KEY,
   name        TEXT,
   barcode     TEXT UNIQUE NOT NULL,
+  -- The number the supplier uses when ordering this item, typed in by staff.
+  -- TEXT on purpose: leading zeros, letters and punctuation are kept exactly.
+  -- Not the barcode. NULL means "not set". (Existing databases get this column
+  -- from supabase/migrations/20261105000000_categories_access_and_supplier_order_number.sql)
+  supplier_order_number TEXT,
   photo_url   TEXT,
   stock       INTEGER NOT NULL DEFAULT 0,
   threshold   INTEGER NOT NULL DEFAULT 10,
@@ -121,3 +134,15 @@ $$;
 --
 -- -- Allow medications to be saved without a name (barcode is the only required field):
 -- ALTER TABLE medications ALTER COLUMN name DROP NOT NULL;
+--
+-- =============================================================
+-- Also for EXISTING databases: supplier order numbers + category access
+-- =============================================================
+-- CREATE TABLE IF NOT EXISTS does not add columns to a table that already
+-- exists, so a database created before supplier_order_number was added to the
+-- medications table above must apply
+--   supabase/migrations/20261105000000_categories_access_and_supplier_order_number.sql
+-- It adds that column and the categories SELECT/INSERT policies, is safe to
+-- re-run, and works with uuid or bigint category ids. It is a separate file
+-- (not part of this one) and needs the project owner's authorization before it
+-- is applied to a real project.
