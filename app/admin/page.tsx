@@ -1,28 +1,57 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, ReactNode } from "react";
+import {
+  EMPTY_FORM,
+  NEW_CATEGORY_VALUE,
+  buildPayload,
+  categoryLabel,
+  categoryNameProblem,
+  describedBy,
+  displayName,
+  filterToValue,
+  findNotStored,
+  firstProblemField,
+  formCategoryOptions,
+  formFromMedication,
+  formProblems,
+  isEmptyPayload,
+  isFormKey,
+  isRecord,
+  listFilterOptions,
+  mergeCategories,
+  planSupplier,
+  rebaseForm,
+  stockStatus,
+  supplierOf,
+  toCategory,
+  toMedication,
+  valueToFilter,
+  type CategoryLabel,
+  type FieldProblem,
+  type FormKey,
+  type FormState,
+  type ProblemField,
+  type StockStatus,
+  type SupplierPlan,
+} from "@/lib/admin-form";
 import { shouldUseCombobox, type ComboboxOption } from "@/lib/combobox";
 import type { Category, Medication } from "@/lib/db";
 import { categoryTitleByKey, describeActiveFilters, type ActiveFilterKey } from "@/lib/filter-chips";
 import { sameId } from "@/lib/ids";
 import {
   DEFAULT_VIEW,
-  UNKNOWN_CATEGORY_FILTER,
-  UNKNOWN_CATEGORY_ID,
   describeEmpty,
-  isLowStock,
   isUnknownCategoryFilter,
-  naturalCompare,
   selectView,
   sortItems,
-  type CategoryCounts,
   type CategoryFilter,
   type EmptyKind,
   type ViewState,
 } from "@/lib/inventory-view";
 import { normalizeCategory, normalizeMedication } from "@/lib/normalize";
-import { SUPPLIER_ORDER_NUMBER_INVISIBLE_REASON, SUPPLIER_ORDER_NUMBER_MAX_LENGTH } from "@/lib/supplier-order-number";
+import { SUPPLIER_ORDER_NUMBER_INVISIBLE_REASON } from "@/lib/supplier-order-number";
 import { ActiveFilterChips, type ActiveFilter } from "../components/ActiveFilterChips";
 import { Combobox } from "../components/Combobox";
 import { EmptyStateCard, type EmptyAction, type EmptyIcon } from "../components/EmptyStateCard";
@@ -46,53 +75,6 @@ import { Notice } from "../components/Notice";
 
 // ── Types ───────────────────────────────────────────────────────────────────────────────────────
 
-type FormState = {
-  name: string;
-  barcode: string;
-  /** Free text. Always a string here: leading zeros are significant. */
-  supplier_order_number: string;
-  photo_url: string | null;
-  stock: string;
-  threshold: string;
-  unit: string;
-  vendor_url: string;
-  notes: string;
-  /** Opaque id string (uuid or digits); null = uncategorized. */
-  category_id: string | null;
-};
-
-const EMPTY_FORM: FormState = {
-  name: "",
-  barcode: "",
-  supplier_order_number: "",
-  photo_url: null,
-  stock: "",
-  threshold: "",
-  unit: "units",
-  vendor_url: "",
-  notes: "",
-  category_id: null,
-};
-
-// The API names a bad field with these keys, which are exactly the form's keys.
-const FORM_KEYS = [
-  "name",
-  "barcode",
-  "supplier_order_number",
-  "photo_url",
-  "stock",
-  "threshold",
-  "unit",
-  "vendor_url",
-  "notes",
-  "category_id",
-] as const;
-type FormKey = (typeof FORM_KEYS)[number];
-
-function isFormKey(value: string): value is FormKey {
-  return (FORM_KEYS as readonly string[]).includes(value);
-}
-
 type MedsState =
   | { status: "loading" }
   | { status: "error"; message: string }
@@ -105,7 +87,7 @@ type CatsState =
 
 /** The one message the page shows about an action. `scope` decides where: inside the open form, or at the page top. */
 type NoticeState = {
-  tone: "error" | "success";
+  tone: "error" | "success" | "info";
   scope: "form" | "page";
   /** A fixed phrase ("Not saved"). Text that comes from the data (an item name, a barcode) goes in `subject`. */
   title?: string;
@@ -123,6 +105,8 @@ type FocusTarget =
   | "form-heading"
   | "new-category-input"
   | "category-select"
+  | "supplier-input"
+  | "unit-input"
   | "opener"
   | "saved-row"
   | "list-heading";
@@ -130,10 +114,13 @@ type FocusTarget =
 /** What a Retry button is retrying. Each kind runs at most once at a time. */
 type RetryKind = "medications" | "categories";
 
-/** Value of the select option that opens the inline "new category" box. Cannot collide with an id (uuid or digits). */
-const NEW_CATEGORY_VALUE = "__new__";
-
 const NO_MEDICATIONS: Medication[] = [];
+
+/** Where the keyboard goes when a save is refused because of a field's text: the field itself, where the message is. */
+const PROBLEM_FOCUS: Record<ProblemField, FocusTarget> = { supplier_order_number: "supplier-input", unit: "unit-input" };
+
+/** Test ids of the three kinds of message an action can end in. */
+const NOTICE_TEST_ID: Record<NoticeState["tone"], string> = { success: "admin-success", error: "admin-error", info: "admin-info" };
 
 // ── Requests ────────────────────────────────────────────────────────────────────────────────────
 
@@ -155,10 +142,6 @@ type ApiFailure = {
 };
 type ApiSuccess = { kind: "ok"; status: number; body: unknown };
 type ApiResult = ApiSuccess | ApiFailure;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function timeoutSignal(): AbortSignal | undefined {
   return typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(REQUEST_TIMEOUT_MS) : undefined;
@@ -249,192 +232,10 @@ const loadCategories = () => loadList("/api/categories", "category list", normal
 const LOAD_ERROR_TITLE = "Couldn’t load the inventory";
 const LOAD_ERROR_REASSURANCE = "This does not mean the inventory is empty.";
 
-function toMedication(body: unknown): Medication | null {
-  if (!isRecord(body)) return null;
-  const med = normalizeMedication(body);
-  return Number.isSafeInteger(med.id) && med.id > 0 ? med : null;
-}
-
-function toCategory(body: unknown): Category | null {
-  if (!isRecord(body)) return null;
-  const cat = normalizeCategory(body);
-  return cat.id !== "" && cat.name.trim() !== "" ? cat : null;
-}
-
-// ── Saving: what is sent, and how the answer is checked ───────────────────────────────────────────
-
-type SupplierPlan = {
-  /** The supplier order number is only sent when it changed (or is non-empty on create). */
-  send: boolean;
-  /** Trimmed text, or null to clear. Exactly what the row must hold afterwards. */
-  value: string | null;
-};
-
-/**
- * Sending the supplier order number only when it changed keeps saves working on a database that has not been
- * migrated yet: an item can still be edited as long as that field is left alone.
- */
-function planSupplier(form: FormState, editing: Medication | null): SupplierPlan {
-  const typed = form.supplier_order_number.trim();
-  const loaded = (editing?.supplier_order_number ?? "").trim();
-  return { send: editing ? typed !== loaded : typed !== "", value: typed === "" ? null : typed };
-}
-
-// What the server stores for each field once it has validated it (app/api/medications/_shared.ts). Two values that
-// normalize to the same thing are "unchanged": a field nobody touched must never be sent back.
-
-/** Name, photo and vendor URL are trimmed by the server; a blank one means "none". */
-function trimmedOrNull(value: string | null | undefined): string | null {
-  const text = typeof value === "string" ? value.trim() : "";
-  return text === "" ? null : text;
-}
-
-/** Notes keep their own spacing and line breaks; only an all-blank value means "no notes". */
-function notesOrNull(value: string | null | undefined): string | null {
-  return typeof value === "string" && value.trim() !== "" ? value : null;
-}
-
-/** A blank unit becomes "units". */
-function unitOrDefault(value: string): string {
-  return value.trim() || "units";
-}
-
-function countOf(text: string): number {
-  return text === "" ? 0 : Number(text);
-}
-
-/**
- * Creating sends every field. Editing sends only the fields that differ from the row as it was loaded into the form
- * (plus the category, always).
- *
- * Why: stock changes all day from the Scan tab and the kiosk. A form that stays open for a minute holds the stock from
- * when it was opened, and sending it back would silently undo every dispense since then. A field the user did not
- * change is not theirs to overwrite.
- *
- * The category is the one exception: it is always sent (a string, or null for "Uncategorized") so the saved row can be
- * checked against it afterwards, and so a body is never empty.
- */
-function buildPayload(form: FormState, supplier: SupplierPlan, loaded: Medication | null): Record<string, unknown> {
-  const body: Record<string, unknown> = {};
-  if (loaded === null || trimmedOrNull(form.name) !== trimmedOrNull(loaded.name)) body.name = form.name;
-  if (loaded === null || form.barcode.trim() !== loaded.barcode.trim()) body.barcode = form.barcode;
-  if (loaded === null || trimmedOrNull(form.photo_url) !== trimmedOrNull(loaded.photo_url)) body.photo_url = form.photo_url;
-  if (loaded === null || unitOrDefault(form.unit) !== unitOrDefault(loaded.unit)) body.unit = form.unit;
-  if (loaded === null || countOf(form.stock) !== loaded.stock) body.stock = countOf(form.stock);
-  if (loaded === null || countOf(form.threshold) !== loaded.threshold) body.threshold = countOf(form.threshold);
-  if (loaded === null || trimmedOrNull(form.vendor_url) !== trimmedOrNull(loaded.vendor_url)) {
-    body.vendor_url = form.vendor_url === "" ? null : form.vendor_url;
-  }
-  if (loaded === null || notesOrNull(form.notes) !== notesOrNull(loaded.notes)) {
-    body.notes = form.notes === "" ? null : form.notes;
-  }
-  body.category_id = form.category_id;
-  if (supplier.send) body.supplier_order_number = supplier.value;
-  return body;
-}
-
-/** Read-after-write: names the values the server accepted but did not actually store. */
-function findNotStored(saved: Medication, sentCategory: string | null, supplier: SupplierPlan): string[] {
-  const missing: string[] = [];
-  if (!sameId(saved.category_id, sentCategory)) missing.push("category");
-  if (supplier.send && saved.supplier_order_number !== supplier.value) missing.push("supplier order number");
-  return missing;
-}
-
-// ── Display helpers ─────────────────────────────────────────────────────────────────────────────
-
-function displayName(med: Pick<Medication, "name">): string | null {
-  const name = typeof med.name === "string" ? med.name.trim() : "";
-  return name === "" ? null : name;
-}
-
-function supplierOf(med: Pick<Medication, "supplier_order_number">): string | null {
-  const value = typeof med.supplier_order_number === "string" ? med.supplier_order_number.trim() : "";
-  return value === "" ? null : value;
-}
-
-type StockStatus = "out" | "low" | "ok";
-
-/** The same rule as the Inventory tab: 0 is Out, at or below the threshold is Low, everything else is OK. */
-function stockStatus(med: Pick<Medication, "stock" | "threshold">): StockStatus {
-  if (med.stock === 0) return "out";
-  return isLowStock(med) ? "low" : "ok";
-}
-
-type CategoryLabel = { kind: "category" | "unknown" | "uncategorized"; title: string };
-
-function categoryLabel(categoryId: string | null, categories: readonly Category[]): CategoryLabel {
-  if (categoryId === null || categoryId.trim() === "") return { kind: "uncategorized", title: "Uncategorized" };
-  const found = categories.find((c) => sameId(c.id, categoryId));
-  if (!found) return { kind: "unknown", title: "Category unavailable" };
-  const name = found.name.trim();
-  return { kind: "category", title: name === "" ? "Unnamed category" : name };
-}
-
-/** Loaded categories plus the ones created on this page, without repeats, in the order the Inventory tab uses. */
-function mergeCategories(loaded: readonly Category[], created: readonly Category[]): Category[] {
-  const merged: Category[] = [];
-  for (const category of [...loaded, ...created]) {
-    if (category.id === "" || merged.some((m) => sameId(m.id, category.id))) continue;
-    merged.push(category);
-  }
-  return merged.sort((a, b) => naturalCompare(a.name, b.name) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-}
-
-function filterToValue(filter: CategoryFilter): string {
-  if (filter.kind === "all") return "all";
-  if (filter.kind === "uncategorized") return "uncategorized";
-  return filter.id;
-}
-
-function valueToFilter(value: string): CategoryFilter {
-  if (value === "all") return { kind: "all" };
-  if (value === "uncategorized") return { kind: "uncategorized" };
-  if (value === UNKNOWN_CATEGORY_ID) return UNKNOWN_CATEGORY_FILTER;
-  return { kind: "category", id: value };
-}
-
-function describedBy(...ids: Array<string | false | null | undefined>): string | undefined {
-  const list = ids.filter((id): id is string => typeof id === "string" && id !== "");
-  return list.length > 0 ? list.join(" ") : undefined;
-}
-
 // ── Category choices ────────────────────────────────────────────────────────────────────────────
-// One list of choices feeds both ways of picking: the native <select> (a short list, best on phones) and the searchable
-// <Combobox> (a long list). They render exactly the same options, so they can never offer different things.
-
-const UNCATEGORIZED_LABEL = "— Uncategorized —";
-
-/** A category's name as people read it: a blank name shows as "Unnamed category", never as an empty row. */
-function categoryName(category: Category): string {
-  return category.name.trim() === "" ? "Unnamed category" : category.name;
-}
-
-/**
- * The choices of the item form's Category field, in this order: Uncategorized; the item's current category when it is not
- * in the list (it stays selected, labelled honestly, so saving another field never clears it); every category; and the
- * "+ Create new category…" command. Values are category id strings and are never turned into numbers.
- */
-function formCategoryOptions(categories: readonly Category[], missingId: string | null, loading: boolean): ComboboxOption[] {
-  const options: ComboboxOption[] = [{ value: "", label: UNCATEGORIZED_LABEL }];
-  if (missingId !== null) {
-    options.push({ value: missingId, label: loading ? "Current category (loading…)" : "Current category (name unavailable)" });
-  }
-  for (const category of categories) options.push({ value: category.id, label: categoryName(category) });
-  options.push({ value: NEW_CATEGORY_VALUE, label: "+ Create new category…", kind: "action" });
-  return options;
-}
-
-/** The choices of the list's category filter, each with the number of items it would show. */
-function listFilterOptions(categories: readonly Category[], counts: CategoryCounts, showUnavailable: boolean): ComboboxOption[] {
-  const options: ComboboxOption[] = [{ value: "all", label: `All categories (${counts.all})` }];
-  for (const category of categories) {
-    options.push({ value: category.id, label: `${categoryName(category)} (${counts.byId[category.id] ?? 0})` });
-  }
-  options.push({ value: "uncategorized", label: `Uncategorized (${counts.uncategorized})` });
-  if (showUnavailable) options.push({ value: UNKNOWN_CATEGORY_ID, label: `Category unavailable (${counts.unknown})` });
-  return options;
-}
+// The choices (formCategoryOptions, listFilterOptions in lib/admin-form.ts) feed both ways of picking: the native <select> (a
+// short list, best on phones) and the searchable <Combobox> (a long list). They render the same options, so they can never
+// offer different things.
 
 /** The options of a native <select>, from the same list the searchable picker gets. */
 function NativeOptions({ options }: { options: readonly ComboboxOption[] }) {
@@ -612,6 +413,26 @@ function Field({ id, label, note, help, className = "", labelClassName = "text-g
   );
 }
 
+/**
+ * What is wrong with a field's text, right under the field: an icon and words, never colour alone. The message is the
+ * live region and never changes while the text keeps being too long, so a screen reader says it once, not on every
+ * keystroke; how many characters were typed is plain text beside it. The field points at the message with
+ * aria-describedby, so it is read out when the keyboard lands there.
+ */
+function FieldProblemMessage({ id, testId, problem }: { id: string; testId: string; problem: FieldProblem }) {
+  return (
+    <div className="mt-1.5 flex items-start gap-1.5 text-sm text-red-700">
+      <WarnIcon className="mt-0.5 h-4 w-4" />
+      <div className="min-w-0">
+        <p id={id} data-testid={testId} role="alert" className="font-semibold [overflow-wrap:anywhere]">
+          {problem.message}
+        </p>
+        <p className="mt-0.5">You typed {problem.length} characters.</p>
+      </div>
+    </div>
+  );
+}
+
 function CategoryTag({ label }: { label: CategoryLabel }) {
   if (label.kind === "category") {
     return (
@@ -681,7 +502,10 @@ type RowProps = {
 // 80%, not less: "Deleting…" is information, and the text must stay readable (4.5:1) while the button is inactive.
 const BUSY = "aria-disabled:cursor-progress aria-disabled:opacity-80";
 
-function MedicationRow({ med, categories, saved, deleting, onEdit, onDelete }: RowProps) {
+// Memoized: every keystroke in the item form re-renders the page, and the list below it must not follow (a long list took
+// hundreds of milliseconds per key). A row re-renders only when its own item, the categories, its "Saved" mark, its
+// "Deleting…" state or its handlers change, so the page hands it handlers that keep one identity (see editRow / deleteRow).
+const MedicationRow = memo(function MedicationRow({ med, categories, saved, deleting, onEdit, onDelete }: RowProps) {
   const name = displayName(med);
   const supplier = supplierOf(med);
   const status = stockStatus(med);
@@ -784,7 +608,7 @@ function MedicationRow({ med, categories, saved, deleting, onEdit, onDelete }: R
       </div>
     </li>
   );
-}
+});
 
 // ── Page ────────────────────────────────────────────────────────────────────────────────────────
 
@@ -848,6 +672,8 @@ export default function AdminPage() {
   const categorySelectRef = useRef<HTMLSelectElement>(null);
   const categoryComboRef = useRef<HTMLInputElement>(null);
   const newCatInputRef = useRef<HTMLInputElement>(null);
+  const supplierInputRef = useRef<HTMLInputElement>(null);
+  const unitInputRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   // The control that opened the form, so Cancel and Save can hand the focus back to it. `testId` finds it again when React
   // made a new element for it while the form was open: the empty list's "Add medication" is taken off the page then.
@@ -877,6 +703,12 @@ export default function AdminPage() {
         break;
       case "category-select":
         element = categorySelectRef.current ?? categoryComboRef.current;
+        break;
+      case "supplier-input":
+        element = supplierInputRef.current;
+        break;
+      case "unit-input":
+        element = unitInputRef.current;
         break;
       case "list-heading":
         element = listHeadingRef.current;
@@ -1007,6 +839,11 @@ export default function AdminPage() {
     notice.tone === "error" &&
     notice.message === SUPPLIER_ORDER_NUMBER_INVISIBLE_REASON;
 
+  // Text that is too long, flagged next to its field as soon as it is there (a paste can bring it in one go). The inputs set
+  // no maxLength: that would cut pasted text off without a word. Only what a save would send is checked (lib/admin-form.ts).
+  const problems = showForm ? formProblems(form, editing) : {};
+  const newCategoryProblem = creatingNew ? categoryNameProblem(newCatName) : null;
+
   // ── Retry ──
   // A Retry button does not make its own message vanish while it works. The failed list or warning stays where it is,
   // the button says "Retrying…" (and ignores clicks), and the result is announced. If the retry fails, the button is
@@ -1080,18 +917,7 @@ export default function AdminPage() {
     if (saving) return; // a save is in flight: its answer belongs to the form that is open now
     openerRef.current = { element: trigger, medicationId: med.id, testId: null };
     setEditing(med);
-    setForm({
-      name: med.name ?? "",
-      barcode: med.barcode,
-      supplier_order_number: med.supplier_order_number ?? "",
-      photo_url: med.photo_url,
-      stock: String(med.stock),
-      threshold: String(med.threshold),
-      unit: med.unit,
-      vendor_url: med.vendor_url ?? "",
-      notes: med.notes ?? "",
-      category_id: med.category_id,
-    });
+    setForm(formFromMedication(med));
     resetTransient();
     setShowForm(true);
     requestFocus("form-heading");
@@ -1105,9 +931,13 @@ export default function AdminPage() {
     requestFocus("opener");
   };
 
+  // "No changes to save." describes the form as it was when Save was pressed: as soon as the form changes it is out of date.
+  const dismissInfoNotice = () => setNotice((current) => (current?.tone === "info" ? null : current));
+
   const setFormValue = <K extends FormKey>(key: K, value: FormState[K]) => {
     setForm((f) => ({ ...f, [key]: value }));
     if (fieldError === key) setFieldError(null);
+    dismissInfoNotice();
   };
 
   // A barcode scanner types the number and then presses Enter: Enter in a text box must not submit the form.
@@ -1157,17 +987,37 @@ export default function AdminPage() {
       return;
     }
 
+    // Text that is too long is never cut short and never saved. The message is already next to the field (it appears as soon
+    // as the text is too long); pressing Save takes the keyboard there, to the first such field on the page.
     const wasEditing = editing;
+    const problemField = firstProblemField(formProblems(form, wasEditing));
+    if (problemField !== null) {
+      requestFocus(PROBLEM_FOCUS[problemField]);
+      return;
+    }
+
+    // Only what the person changed is sent, so a field someone else changed meanwhile (the stock, the category) is not put back.
     const supplier = planSupplier(form, wasEditing);
-    const sentCategory = form.category_id;
-    setSaving(true);
+    const payload = buildPayload(form, supplier, wasEditing);
     setNotice(null);
     setFieldError(null);
+    if (isEmptyPayload(payload)) {
+      // The server refuses an empty save, and a request that repeats what is stored would only bump "updated" and say "Saved".
+      setNotice({
+        tone: "info",
+        scope: "form",
+        message: "No changes to save.",
+        hint: "Change a field first, or choose Cancel to close the form.",
+      });
+      requestFocus("notice");
+      return;
+    }
 
+    setSaving(true);
     const result = await callApi(wasEditing ? `/api/medications/${wasEditing.id}` : "/api/medications", {
       method: wasEditing ? "PUT" : "POST",
       headers: JSON_HEADERS,
-      body: JSON.stringify(buildPayload(form, supplier, wasEditing)),
+      body: JSON.stringify(payload),
     });
     setSaving(false);
 
@@ -1193,9 +1043,12 @@ export default function AdminPage() {
     upsertMedication(saved);
     reloadMedications(meds.status !== "ready");
 
-    const notStored = findNotStored(saved, sentCategory, supplier);
+    const notStored = findNotStored(saved, payload);
     if (notStored.length > 0) {
       setEditing(saved); // the item exists now, so the next save updates it instead of adding a second one
+      // The row the server sent is the baseline of the next save, so the fields the person did not touch follow it too: their
+      // values from when the form was opened may be stale, and the next save must not read that as the person's change.
+      setForm((current) => rebaseForm(current, wasEditing, saved));
       setNotice({
         tone: "error",
         scope: "form",
@@ -1284,6 +1137,18 @@ export default function AdminPage() {
     itemIsGone(`Deleted “${label}”.`);
   };
 
+  // ── Row handlers ──
+  // The list rows are memoized, so the handlers they receive must keep one identity or every row would still re-render with
+  // the page. The latest versions are read through refs, the way app/components/inventory/InventoryTab.tsx does it.
+  const openEditRef = useRef(openEdit);
+  const deleteRef = useRef(handleDelete);
+  useEffect(() => {
+    openEditRef.current = openEdit;
+    deleteRef.current = handleDelete;
+  });
+  const editRow = useCallback((med: Medication, trigger: HTMLElement) => openEditRef.current(med, trigger), []);
+  const deleteRow = useCallback((med: Medication) => void deleteRef.current(med), []);
+
   // ── Inline category creation ──
   // What picking a choice in the Category field does, for the native select and the searchable picker alike. "+ Create new
   // category…" opens the inline box and keeps the item's current category: it comes back if the new one is cancelled.
@@ -1311,6 +1176,11 @@ export default function AdminPage() {
   const handleCreateCategory = async () => {
     const name = newCatName.trim();
     if (name === "" || creatingCat) return;
+    // A name that is too long is never cut short and never created. The message is already under the box; the keyboard goes back to it.
+    if (categoryNameProblem(name) !== null) {
+      requestFocus("new-category-input");
+      return;
+    }
     const session = formSession.current;
     setCreatingCat(true);
     setCatError(null);
@@ -1350,6 +1220,7 @@ export default function AdminPage() {
     setCreatedCategories((prev) => [...prev.filter((c) => !sameId(c.id, created.id)), created]);
     if (!sameForm) return;
     setForm((f) => ({ ...f, category_id: created.id }));
+    dismissInfoNotice();
     setCreatingNew(false);
     setNewCatName("");
     setCatNote(
@@ -1433,7 +1304,7 @@ export default function AdminPage() {
   // Everything that can carry text from the data (an item name, a barcode) wraps: the shared Notice does not wrap its
   // `title`, so such text is never passed as one.
   const renderNotice = (n: NoticeState) => (
-    <Notice ref={noticeRef} tone={n.tone} title={n.title} data-testid={n.tone === "success" ? "admin-success" : "admin-error"}>
+    <Notice ref={noticeRef} tone={n.tone} title={n.title} data-testid={NOTICE_TEST_ID[n.tone]}>
       {n.subject && <p className="font-semibold [overflow-wrap:anywhere]">{n.subject}</p>}
       <p className={`[overflow-wrap:anywhere] ${n.subject ? "mt-0.5" : ""}`}>{n.message}</p>
       {n.hint && <p className="mt-1 [overflow-wrap:anywhere]">{n.hint}</p>}
@@ -1630,7 +1501,6 @@ export default function AdminPage() {
                 aria-invalid={fieldError === "barcode" ? true : undefined}
                 autoComplete="off"
                 spellCheck={false}
-                maxLength={128}
                 className={`${CONTROL} ${MONO}`}
                 placeholder="e.g. 012345678901"
               />
@@ -1651,23 +1521,31 @@ export default function AdminPage() {
               <input
                 id="supplier-order-number"
                 data-testid="supplier-order-number-input"
+                ref={supplierInputRef}
                 type="text"
                 value={form.supplier_order_number}
                 onChange={(e) => setFormValue("supplier_order_number", e.target.value)}
                 aria-describedby={describedBy(
-                  "supplier-order-number-help",
+                  problems.supplier_order_number && "supplier-order-number-problem",
                   supplierPasteHint && "supplier-order-number-hint",
+                  "supplier-order-number-help",
                   fieldError === "supplier_order_number" && "admin-notice-anchor"
                 )}
-                aria-invalid={fieldError === "supplier_order_number" ? true : undefined}
+                aria-invalid={problems.supplier_order_number || fieldError === "supplier_order_number" ? true : undefined}
                 autoComplete="off"
                 autoCapitalize="none"
                 autoCorrect="off"
                 spellCheck={false}
-                maxLength={SUPPLIER_ORDER_NUMBER_MAX_LENGTH}
                 className={`${CONTROL} ${MONO}`}
                 placeholder="e.g. 00417-B"
               />
+              {problems.supplier_order_number && (
+                <FieldProblemMessage
+                  id="supplier-order-number-problem"
+                  testId="problem-supplier-order-number"
+                  problem={problems.supplier_order_number}
+                />
+              )}
               {/* Under the field, above its general help. The notice above the form carries the server's own text and
                   has the focus; this says what to do. An icon and words, not colour alone. */}
               {supplierPasteHint && (
@@ -1732,7 +1610,6 @@ export default function AdminPage() {
                       ref={newCatInputRef}
                       type="text"
                       value={newCatName}
-                      maxLength={60}
                       onChange={(e) => {
                         setNewCatName(e.target.value);
                         if (catError) setCatError(null);
@@ -1747,8 +1624,8 @@ export default function AdminPage() {
                           cancelNewCategory();
                         }
                       }}
-                      aria-describedby={describedBy(catError && "admin-category-error-box")}
-                      aria-invalid={catError ? true : undefined}
+                      aria-describedby={describedBy(newCategoryProblem && "admin-new-category-problem", catError && "admin-category-error-box")}
+                      aria-invalid={newCategoryProblem || catError ? true : undefined}
                       autoComplete="off"
                       placeholder="e.g. Vaccines"
                       className={`${CONTROL} min-w-0 flex-1 basis-40`}
@@ -1772,6 +1649,9 @@ export default function AdminPage() {
                       Cancel
                     </button>
                   </div>
+                  {newCategoryProblem && (
+                    <FieldProblemMessage id="admin-new-category-problem" testId="problem-new-category" problem={newCategoryProblem} />
+                  )}
                   {catError && (
                     <div id="admin-category-error-box" className="mt-3">
                       <Notice tone="error" data-testid="category-error">
@@ -1799,16 +1679,21 @@ export default function AdminPage() {
                 <input
                   id="admin-unit"
                   data-testid="unit-input"
+                  ref={unitInputRef}
                   type="text"
                   value={form.unit}
                   onChange={(e) => setFormValue("unit", e.target.value)}
-                  aria-describedby={describedBy("admin-unit-help", fieldError === "unit" && "admin-notice-anchor")}
-                  aria-invalid={fieldError === "unit" ? true : undefined}
+                  aria-describedby={describedBy(
+                    problems.unit && "admin-unit-problem",
+                    "admin-unit-help",
+                    fieldError === "unit" && "admin-notice-anchor"
+                  )}
+                  aria-invalid={problems.unit || fieldError === "unit" ? true : undefined}
                   autoComplete="off"
-                  maxLength={40}
                   className={CONTROL}
                   placeholder="e.g. tablets, mL, doses"
                 />
+                {problems.unit && <FieldProblemMessage id="admin-unit-problem" testId="problem-unit" problem={problems.unit} />}
               </Field>
               <Field id="admin-stock" label="Current Stock" help="How many are on hand now.">
                 <input
@@ -1961,7 +1846,7 @@ export default function AdminPage() {
                       type="search"
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      placeholder="Name, barcode or supplier no."
+                      placeholder="Name, barcode or supplier order no."
                       autoComplete="off"
                       spellCheck={false}
                       maxLength={200}
@@ -2060,8 +1945,8 @@ export default function AdminPage() {
                 categories={categories}
                 saved={notice?.savedId === med.id}
                 deleting={deleting.has(med.id)}
-                onEdit={openEdit}
-                onDelete={handleDelete}
+                onEdit={editRow}
+                onDelete={deleteRow}
               />
             ))}
           </ul>

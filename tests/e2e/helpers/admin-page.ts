@@ -106,6 +106,17 @@ export async function fillItemForm(page: Page, fields: ItemFields): Promise<void
   if (fields.notes !== undefined) await page.getByTestId("notes-input").fill(fields.notes);
 }
 
+/**
+ * Puts `text` into a field the way a paste does: the old text is selected and the whole new text arrives in ONE insertion,
+ * with no key presses. This is the route by which a long value used to be cut off silently by an input's `maxlength`.
+ */
+export async function pasteInto(page: Page, testId: string, text: string): Promise<void> {
+  const field = page.getByTestId(testId);
+  await field.click();
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.insertText(text);
+}
+
 export async function openNewItemForm(page: Page): Promise<void> {
   await page.getByTestId("admin-add-button").click();
   await expect(page.getByTestId("admin-form")).toBeVisible();

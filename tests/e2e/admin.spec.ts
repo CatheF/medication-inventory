@@ -40,6 +40,7 @@ import {
   openEditForm,
   openNewItemForm,
   parseCounts,
+  pasteInto,
   saveItem,
   serverIgnoresFields,
   stored,
@@ -345,7 +346,7 @@ test.describe("Admin: the category survives create and edit", () => {
     await saveItem(page);
 
     await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized · Supplier order no.: Not set");
-    expect(lastBody(api, "PUT", PUT_ITEM(item.id)).category_id).toBeNull();
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "Fits the standard probe." }); // the category was not touched, so it is not sent
     expect(stored(api, item.id).category_id).toBeNull();
     expect(stored(api, item.id).notes).toBe("Fits the standard probe.");
     await expect(page.getByTestId(`admin-category-${item.id}`)).toContainText("Uncategorized");
@@ -383,6 +384,191 @@ test.describe("Admin: the category survives create and edit", () => {
     expect(choices.slice(1, -1)).toEqual([...CATEGORY_NAMES].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" })));
     expect(choices.join(" ")).not.toContain("NaN");
     await expect(page.getByTestId("admin-form")).toContainText("Used to group this item on the Inventory tab.");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 1b. A save sends only what the person changed ("Editing another field does not clear the category or overwrite unrelated
+//     item data"). The category used to be the one field that was always sent, so a form that had been open for a
+//     while put back the category it was opened with, whatever another person had set in the meantime.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+test.describe("Admin: a save sends only what the person changed", () => {
+  for (const shape of SHAPES) {
+    test(`editing only the notes sends only the notes: a category that another person set while the form was open stays (${shape} ids)`, async ({ page }) => {
+      const item = seedItem(IBUPROFEN, shape); // Pain & Fever, supplier 0092, stock 18
+      const api = await openAdmin(page, { shape });
+      await openEditForm(page, item.id); // the form now holds Pain & Fever and stock 18
+      expect(await chosenCategory(page)).toBe(PAIN_AND_FEVER);
+
+      // Someone else files the item under Antibiotics, and a dispense on the Scan tab takes the stock down to 7
+      stored(api, item.id).category_id = categoryId(2, shape);
+      expect(await dispenseFromAnotherScreen(page, item.id, 11)).toBe(201);
+      expect(stored(api, item.id)).toMatchObject({ category_id: categoryId(2, shape), stock: 7 });
+
+      await fillItemForm(page, { notes: "Checked on the shelf" });
+      await saveItem(page);
+
+      // The page reports the item as it is stored now: Antibiotics, not the category the form was opened with
+      const success = page.getByTestId("admin-success");
+      await expect(success).toContainText("Saved. Category: Antibiotics · Supplier order no.: 0092");
+      await expect(page.getByTestId("admin-error")).toHaveCount(0);
+      expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "Checked on the shelf" });
+      expect(stored(api, item.id)).toMatchObject({ notes: "Checked on the shelf", category_id: categoryId(2, shape), stock: 7, supplier_order_number: "0092" });
+      await expect(page.getByTestId(`admin-category-${item.id}`)).toContainText("Antibiotics");
+      await expect(page.getByTestId(`admin-category-${item.id}`)).not.toContainText(PAIN_AND_FEVER);
+      expect(writes(api)).toEqual(["POST /api/transactions", `PUT /api/medications/${item.id}`]);
+
+      await reloadAdmin(page);
+      await openEditForm(page, item.id);
+      expect(await chosenCategory(page)).toBe(ANTIBIOTICS);
+    });
+
+    test(`the category is sent when the person changes it, as the id text, and the other fields are left out (${shape} ids)`, async ({ page }) => {
+      const item = seedItem(ACETAMINOPHEN, shape);
+      const api = await openAdmin(page, { shape });
+      await openEditForm(page, item.id);
+      await chooseCategory(page, ANTIBIOTICS);
+      await saveItem(page);
+
+      await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Antibiotics");
+      expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ category_id: categoryId(2, shape) });
+      expect(stored(api, item.id).category_id).toBe(categoryId(2, shape));
+    });
+
+    test(`choosing Uncategorized sends an explicit null that clears the category, and sends nothing else (${shape} ids)`, async ({ page }) => {
+      const item = seedItem(ACETAMINOPHEN, shape);
+      const api = await openAdmin(page, { shape });
+      await openEditForm(page, item.id);
+      await chooseCategory(page, UNCATEGORIZED);
+      await saveItem(page);
+
+      await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized · Supplier order no.: 00417-B");
+      expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ category_id: null });
+      expect(stored(api, item.id).category_id).toBeNull();
+
+      await reloadAdmin(page);
+      await expect(page.getByTestId(`admin-category-${item.id}`)).toContainText("Uncategorized");
+    });
+  }
+
+  test("an item that has no category stays without one when another field is edited: the save carries no category at all", async ({ page }) => {
+    const item = seedItem(THERMOMETER_COVERS);
+    expect(item.category_id).toBeNull();
+    const api = await openAdmin(page);
+    await openEditForm(page, item.id);
+    await fillItemForm(page, { notes: "Fits the standard probe." });
+    await saveItem(page);
+
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized");
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "Fits the standard probe." });
+    expect(stored(api, item.id).category_id).toBeNull();
+  });
+
+  test("a save that changes nothing sends nothing: it says 'No changes to save.', keeps the form open and puts the keyboard focus on the message", async ({ page }) => {
+    const item = seedItem(IBUPROFEN);
+    const api = await openAdmin(page);
+    const before = { ...stored(api, item.id) };
+    await openEditForm(page, item.id);
+    await saveItem(page);
+
+    const info = page.getByTestId("admin-info");
+    await expect(info).toContainText("No changes to save.");
+    await expect(info).toHaveAttribute("role", "status");
+    await expect(info).toBeFocused();
+    await expect(page.getByTestId("admin-success")).toHaveCount(0);
+    await expect(page.getByTestId("admin-error")).toHaveCount(0);
+    await expect(page.getByTestId(`admin-saved-${item.id}`)).toHaveCount(0);
+    await expect(page.getByTestId("admin-form")).toBeVisible();
+    expect(writes(api)).toEqual([]); // not even a request that repeats what is already stored
+    expect(stored(api, item.id)).toEqual(before);
+
+    // The message belongs to the form as it was: the moment something is typed it goes, and the save then works normally
+    await fillItemForm(page, { notes: "Now there is something to save" });
+    await expect(info).toHaveCount(0);
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Pain & Fever");
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "Now there is something to save" });
+    expect(writes(api)).toEqual([`PUT /api/medications/${item.id}`]);
+  });
+
+  test("typing the same values again, or the same values with spaces around them, counts as no change", async ({ page }) => {
+    const item = seedItem(IBUPROFEN);
+    expect(item).toMatchObject({ supplier_order_number: "0092", threshold: 40, unit: "units" });
+    const api = await openAdmin(page);
+    await openEditForm(page, item.id);
+    await fillItemForm(page, { name: `  ${item.name}  `, supplier: " 0092 ", threshold: "40", unit: " units ", stock: String(item.stock) });
+    await saveItem(page);
+
+    await expect(page.getByTestId("admin-info")).toContainText("No changes to save.");
+    expect(writes(api)).toEqual([]);
+    expect(stored(api, item.id).name).toBe(item.name);
+  });
+
+  test("an unnamed item can be completed with nothing else changed: the save carries only its empty name, marks it reviewed and changes nothing else", async ({ page }) => {
+    const unnamed = buildMedications().find((m) => m.is_unnamed);
+    if (!unnamed) throw new Error("the fixtures have no unnamed item");
+    const api = await openAdmin(page);
+    const before = { ...stored(api, unnamed.id) };
+    expect(before).toMatchObject({ name: null, is_unnamed: true, category_id: null, stock: 0 });
+
+    await page.getByTestId(`admin-complete-${unnamed.id}`).click();
+    await expect(page.getByRole("heading", { name: `Complete unnamed item: ${unnamed.barcode}` })).toBeFocused();
+    await saveItem(page);
+
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized · Supplier order no.: Not set");
+    await expect(page.getByTestId("admin-info")).toHaveCount(0); // it is a save, not "no changes"
+    expect(lastBody(api, "PUT", PUT_ITEM(unnamed.id))).toEqual({ name: null });
+    const after = stored(api, unnamed.id);
+    expect(after.is_unnamed).toBe(false); // the save is the review
+    expect({ ...after, is_unnamed: before.is_unnamed, updated_at: before.updated_at }).toEqual(before);
+    await expect(page.getByTestId("admin-unnamed-section")).toHaveCount(0);
+    await expect(page.getByTestId(`admin-row-${unnamed.id}`)).not.toContainText("Needs review");
+    expect(writes(api)).toEqual([`PUT /api/medications/${unnamed.id}`]);
+  });
+
+  test("an unnamed item that only gets a category is saved with just that category", async ({ page }) => {
+    const unnamed = buildMedications().find((m) => m.is_unnamed);
+    if (!unnamed) throw new Error("the fixtures have no unnamed item");
+    const api = await openAdmin(page);
+    await page.getByTestId(`admin-complete-${unnamed.id}`).click();
+    await chooseCategory(page, ANTIBIOTICS);
+    await saveItem(page);
+
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Antibiotics");
+    expect(lastBody(api, "PUT", PUT_ITEM(unnamed.id))).toEqual({ category_id: categoryId(2) });
+    expect(stored(api, unnamed.id)).toMatchObject({ name: null, is_unnamed: false, category_id: categoryId(2) });
+  });
+
+  test("'No changes to save.' goes away as soon as the form changes: by choosing another category, and by creating one", async ({ page }) => {
+    const item = seedItem(IBUPROFEN);
+    const api = await openAdmin(page);
+    await openEditForm(page, item.id);
+    const info = page.getByTestId("admin-info");
+
+    await saveItem(page);
+    await expect(info).toContainText("No changes to save.");
+    await chooseCategory(page, ANTIBIOTICS);
+    await expect(info).toHaveCount(0); // the message described the form as it was
+
+    // Back on the category the item holds, the form is "as stored" again: saving says so again
+    await chooseCategory(page, PAIN_AND_FEVER);
+    await saveItem(page);
+    await expect(info).toContainText("No changes to save.");
+    expect(writes(api)).toEqual([]);
+
+    // Creating a category inline changes the form as well (it selects the new category)
+    await chooseCategory(page, CREATE_NEW);
+    await page.getByTestId("new-category-input").fill("Vaccines");
+    await page.getByTestId("new-category-save").click();
+    await expect(page.getByTestId("category-note")).toContainText("was created and selected");
+    await expect(info).toHaveCount(0);
+    expect(writes(api)).toEqual(["POST /api/categories"]); // the category exists now; the item itself has not been saved
+
+    await saveItem(page);
+    const vaccines = api.categories.find((c) => c.name === "Vaccines");
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Vaccines");
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ category_id: vaccines?.id });
   });
 });
 
@@ -441,16 +627,18 @@ test.describe("Admin: the supplier order number", () => {
     }
   });
 
-  test("the supplier field takes at most 64 characters and keeps surrounding spaces out of the stored code", async ({ page }) => {
+  test("the supplier field allows at most 64 characters but never cuts what was typed, and keeps surrounding spaces out of the stored code", async ({ page }) => {
     const item = seedItem(ASPIRIN);
     const api = await openAdmin(page);
     await openEditForm(page, item.id);
 
     const field = page.getByTestId("supplier-order-number-input");
     await field.fill("X".repeat(80));
-    expect((await field.inputValue()).length).toBeLessThanOrEqual(64);
+    await expect(field).toHaveValue("X".repeat(80)); // all of it is still there: the limit is a message, not a clipped box
+    await expect(page.getByTestId("problem-supplier-order-number")).toContainText("maximum 64 characters");
 
     await field.fill("  AB  12 ");
+    await expect(page.getByTestId("problem-supplier-order-number")).toHaveCount(0);
     await saveItem(page);
     await expect(page.getByTestId("admin-success")).toBeVisible();
     expect(stored(api, item.id).supplier_order_number).toBe("AB  12"); // ends trimmed, inner characters untouched
@@ -552,6 +740,306 @@ test.describe("Admin: the supplier order number", () => {
     await expect(page.getByTestId(`admin-barcode-${item.id}`).locator("dd")).toHaveText("0011223344");
     await expect(page.getByTestId(`admin-supplier-${item.id}`)).toContainText("Supplier order no.");
     await expect(page.getByTestId(`admin-supplier-${item.id}`).locator("dd")).toHaveText("SUP-0011223344-X");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 2b. Text that is too long is never cut short silently (nothing may look saved that is not exactly what was typed).
+//     The supplier order number, the unit and the new category's name used to be clipped by an input's `maxlength`: a pasted
+//     70-character code was saved as its first 64 characters and reported as "Saved". The limits are still enforced, but now
+//     the person is told, next to the field, and nothing is saved until the text fits.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+test.describe("Admin: text that is too long is never cut short silently", () => {
+  test("a 70-character supplier order number pasted into the field is kept whole, flagged next to the field, and is not saved", async ({ page }) => {
+    const item = seedItem(ASPIRIN);
+    const api = await openAdmin(page);
+    await openEditForm(page, item.id);
+    const field = page.getByTestId("supplier-order-number-input");
+    const problem = page.getByTestId("problem-supplier-order-number");
+    const pasted = "0123456789".repeat(7);
+    expect(pasted).toHaveLength(70);
+
+    await pasteInto(page, "supplier-order-number-input", pasted);
+    await expect(field).toHaveValue(pasted); // every character is still there: nothing was cut off
+    expect(await field.getAttribute("maxlength")).toBeNull();
+    await expect(problem).toBeVisible();
+    await expect(problem).toContainText("too long (maximum 64 characters)");
+    await expect(field).toHaveAttribute("aria-invalid", "true");
+    await expect(field).toHaveAccessibleDescription(/maximum 64 characters/);
+
+    // Pressing Save does not send it, and takes the person to the field with the message
+    await saveItem(page);
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue(pasted);
+    await expect(problem).toBeVisible();
+    await expect(page.getByTestId("admin-success")).toHaveCount(0);
+    await expect(page.getByTestId("admin-form")).toBeVisible();
+    expect(writes(api)).toEqual([]);
+    expect(stored(api, item.id).supplier_order_number).toBeNull();
+
+    // Shortening it by hand to 64 characters clears the message, and then it saves as exactly those characters
+    const shortened = pasted.slice(0, 64);
+    await field.fill(shortened);
+    await expect(problem).toHaveCount(0);
+    await expect(field).not.toHaveAttribute("aria-invalid", "true");
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toContainText(`Supplier order no.: ${shortened}`);
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id)).supplier_order_number).toBe(shortened);
+    expect(stored(api, item.id).supplier_order_number).toBe(shortened);
+  });
+
+  // The limit is on characters as a person counts them (the server counts code points), and on the text without the spaces around it.
+  const SUPPLIER_LENGTHS: ReadonlyArray<{ title: string; text: string; fits: boolean }> = [
+    { title: "exactly 64 characters", text: `X-${"7".repeat(62)}`, fits: true },
+    { title: "64 characters with spaces around them", text: ` X-${"7".repeat(62)}  `, fits: true },
+    { title: "65 characters", text: `X-${"7".repeat(63)}`, fits: false },
+    { title: "64 emoji (128 UTF-16 units, but 64 characters)", text: "💊".repeat(64), fits: true },
+    { title: "65 emoji", text: "💊".repeat(65), fits: false },
+  ];
+
+  for (const length of SUPPLIER_LENGTHS) {
+    test(`a supplier order number of ${length.title} is ${length.fits ? "accepted and saved exactly" : "flagged and not saved"}`, async ({ page }) => {
+      const item = seedItem(ASPIRIN);
+      const api = await openAdmin(page);
+      await openEditForm(page, item.id);
+      await pasteInto(page, "supplier-order-number-input", length.text);
+      await expect(page.getByTestId("supplier-order-number-input")).toHaveValue(length.text); // never clipped on its way in
+
+      await saveItem(page);
+      if (length.fits) {
+        await expect(page.getByTestId("admin-success")).toBeVisible();
+        await expect(page.getByTestId("problem-supplier-order-number")).toHaveCount(0);
+        expect(stored(api, item.id).supplier_order_number).toBe(length.text.trim());
+      } else {
+        await expect(page.getByTestId("problem-supplier-order-number")).toContainText("maximum 64 characters");
+        await expect(page.getByTestId("admin-success")).toHaveCount(0);
+        expect(writes(api)).toEqual([]);
+        expect(stored(api, item.id).supplier_order_number).toBeNull();
+      }
+    });
+  }
+
+  test("a 61-character name pasted into the new-category box is kept whole, flagged next to the box, and no category is created", async ({ page }) => {
+    const item = seedItem(ASPIRIN);
+    const api = await openAdmin(page);
+    await openEditForm(page, item.id);
+    await chooseCategory(page, CREATE_NEW);
+    const input = page.getByTestId("new-category-input");
+    const problem = page.getByTestId("problem-new-category");
+    const pasted = "Vaccines and other things that need the cold chain".padEnd(61, "!");
+    expect(pasted).toHaveLength(61);
+    const categoriesBefore = api.categories.length;
+
+    await pasteInto(page, "new-category-input", pasted);
+    await expect(input).toHaveValue(pasted);
+    expect(await input.getAttribute("maxlength")).toBeNull();
+    await expect(problem).toBeVisible();
+    await expect(problem).toContainText("too long (maximum 60 characters)");
+    await expect(input).toHaveAttribute("aria-invalid", "true");
+    await expect(input).toHaveAccessibleDescription(/maximum 60 characters/);
+
+    // Neither the button nor the Enter key creates anything, and the typed text stays where it is
+    await page.getByTestId("new-category-save").click();
+    await expect(input).toBeFocused();
+    await input.press("Enter");
+    await expect(input).toHaveValue(pasted);
+    await expect(problem).toBeVisible();
+    expect(api.requestsTo("POST", /\/api\/categories$/)).toHaveLength(0);
+    expect(api.categories).toHaveLength(categoriesBefore);
+    await expect(page.getByTestId("category-note")).toHaveCount(0);
+
+    // At 60 characters the message goes and the category is created under exactly that name
+    const fits = pasted.slice(0, 60);
+    await input.fill(fits);
+    await expect(problem).toHaveCount(0);
+    await page.getByTestId("new-category-save").click();
+    await expect(page.getByTestId("category-note")).toContainText("was created and selected");
+    expect(api.categories.some((c) => c.name === fits)).toBe(true);
+    expect(api.requestsTo("POST", /\/api\/categories$/)).toHaveLength(1);
+  });
+
+  test("a 41-character unit pasted into a new item is kept whole, flagged next to the field, and the item is not created", async ({ page }) => {
+    const api = await openAdmin(page);
+    const before = api.medications.length;
+    await openNewItemForm(page);
+    await fillItemForm(page, { name: "Unit too long item", barcode: "0099001150" });
+    const field = page.getByTestId("unit-input");
+    const problem = page.getByTestId("problem-unit");
+    const pasted = "u".repeat(41);
+
+    await pasteInto(page, "unit-input", pasted);
+    await expect(field).toHaveValue(pasted);
+    expect(await field.getAttribute("maxlength")).toBeNull();
+    await expect(problem).toContainText("too long (maximum 40 characters)");
+    await expect(field).toHaveAttribute("aria-invalid", "true");
+
+    await saveItem(page);
+    await expect(field).toBeFocused();
+    await expect(field).toHaveValue(pasted);
+    await expect(page.getByTestId("admin-success")).toHaveCount(0);
+    expect(writes(api)).toEqual([]);
+    expect(api.medications).toHaveLength(before);
+
+    const fits = pasted.slice(0, 40);
+    await field.fill(fits);
+    await expect(problem).toHaveCount(0);
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    expect(storedByBarcode(api, "0099001150").unit).toBe(fits);
+  });
+
+  test("a stored unit that is longer than 40 characters does not stop the item from being edited: the unit is not the person's change", async ({ page }) => {
+    const item = seedItem(ASPIRIN);
+    const longUnit = "W".repeat(45);
+    const api = await openAdmin(page, { medications: buildMedications().map((m) => (m.id === item.id ? { ...m, unit: longUnit } : m)) });
+    await openEditForm(page, item.id);
+    await expect(page.getByTestId("unit-input")).toHaveValue(longUnit);
+    await expect(page.getByTestId("problem-unit")).toHaveCount(0); // nobody asked to change it
+
+    await fillItemForm(page, { notes: "Edited next to a long unit" });
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "Edited next to a long unit" });
+    expect(stored(api, item.id).unit).toBe(longUnit);
+  });
+
+  test("the barcode field sets no length limit of its own: a 200-character barcode is kept whole and sent whole", async ({ page }) => {
+    const api = await openAdmin(page);
+    await openNewItemForm(page);
+    const barcode = "7".repeat(200);
+
+    await fillItemForm(page, { name: "Very long barcode item" });
+    await pasteInto(page, "barcode-input", barcode);
+    const field = page.getByTestId("barcode-input");
+    await expect(field).toHaveValue(barcode);
+    expect(await field.getAttribute("maxlength")).toBeNull();
+    await expect(field).not.toHaveAttribute("aria-invalid", "true");
+
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    expect(lastBody(api, "POST", POST_ITEM).barcode).toBe(barcode);
+    expect(storedByBarcode(api, barcode).name).toBe("Very long barcode item");
+  });
+
+  test("when two fields are too long, Save takes the keyboard to the first one on the page, then to the next once that one fits", async ({ page }) => {
+    const item = seedItem(ASPIRIN);
+    const api = await openAdmin(page);
+    await openEditForm(page, item.id);
+    await pasteInto(page, "unit-input", "u".repeat(41));
+    await pasteInto(page, "supplier-order-number-input", "S".repeat(65));
+    await expect(page.getByTestId("problem-unit")).toBeVisible(); // both messages are there before anything is pressed
+    await expect(page.getByTestId("problem-supplier-order-number")).toBeVisible();
+
+    await saveItem(page);
+    await expect(page.getByTestId("supplier-order-number-input")).toBeFocused(); // higher up the form than the unit
+
+    await page.getByTestId("supplier-order-number-input").fill("S".repeat(64));
+    await expect(page.getByTestId("problem-supplier-order-number")).toHaveCount(0);
+    await expect(page.getByTestId("problem-unit")).toBeVisible();
+    await saveItem(page);
+    await expect(page.getByTestId("unit-input")).toBeFocused();
+    expect(writes(api)).toEqual([]); // nothing was sent while a field was too long
+
+    await page.getByTestId("unit-input").fill("u".repeat(40));
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ unit: "u".repeat(40), supplier_order_number: "S".repeat(64) });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 2c. Typing in the item form does not re-render the list. Every keystroke changes the page's form state, and the rows below
+//     the form used to render again each time: with 1,500 items that cost about half a second per key. The rows are memoized
+//     now. This test counts renders instead of milliseconds, so it cannot be flaky: it asks React itself which rows did work.
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+type RowRenderCounter = { counting: boolean; commits: number; rowRenders: number };
+
+/**
+ * Puts a minimal React DevTools hook on the page before it loads. React calls it after every commit, and a component that
+ * really rendered (instead of being skipped) carries the PerformedWork flag: that is how the profiler counts renders. A list
+ * row is recognised by the props only it has (med, onEdit, onDelete), so no class name or markup is involved.
+ */
+async function installRowRenderCounter(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    type Fiber = { flags: number; memoizedProps: unknown; child: Fiber | null; sibling: Fiber | null };
+    const counter: RowRenderCounter = { counting: false, commits: 0, rowRenders: 0 };
+    (window as unknown as { __rowRenderCounter: RowRenderCounter }).__rowRenderCounter = counter;
+    const isRow = (props: unknown): boolean =>
+      typeof props === "object" && props !== null && "med" in props && "onEdit" in props && "onDelete" in props;
+    let nextRendererId = 1;
+    const hook = {
+      supportsFiber: true,
+      isDisabled: false,
+      renderers: new Map<number, unknown>(),
+      inject(renderer: unknown): number {
+        const id = nextRendererId++;
+        hook.renderers.set(id, renderer);
+        return id;
+      },
+      onCommitFiberRoot(_rendererId: number, root: { current: Fiber }): void {
+        if (!counter.counting) return;
+        counter.commits += 1;
+        const pending: Fiber[] = [root.current];
+        for (let fiber = pending.pop(); fiber !== undefined; fiber = pending.pop()) {
+          if ((fiber.flags & 1) !== 0 && isRow(fiber.memoizedProps)) counter.rowRenders += 1; // 1 = PerformedWork
+          if (fiber.sibling) pending.push(fiber.sibling);
+          if (fiber.child) pending.push(fiber.child);
+        }
+      },
+      onCommitFiberUnmount(): void {},
+      onPostCommitFiberRoot(): void {},
+      onScheduleFiberRoot(): void {},
+      checkDCE(): void {},
+    };
+    Object.defineProperty(window, "__REACT_DEVTOOLS_GLOBAL_HOOK__", { value: hook, configurable: true, writable: true });
+  });
+}
+
+/** Runs `action` while counting, then returns how many commits happened and how many list rows rendered during it. */
+async function countRowRenders(page: Page, action: () => Promise<void>): Promise<{ commits: number; rowRenders: number }> {
+  await page.evaluate(() => {
+    const counter = (window as unknown as { __rowRenderCounter: RowRenderCounter }).__rowRenderCounter;
+    counter.commits = 0;
+    counter.rowRenders = 0;
+    counter.counting = true;
+  });
+  await action();
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  return page.evaluate(() => {
+    const counter = (window as unknown as { __rowRenderCounter: RowRenderCounter }).__rowRenderCounter;
+    counter.counting = false;
+    return { commits: counter.commits, rowRenders: counter.rowRenders };
+  });
+}
+
+test.describe("Admin: typing in the form does not re-render the list", () => {
+  test("24 keystrokes in the Name box render no list row, while saving (which brings in a fresh list) renders every row", async ({ page }) => {
+    const rows = 120;
+    await installRowRenderCounter(page);
+    const api = await openAdmin(page, { medications: buildManyMedications(rows), categories: buildCategories() });
+    const [firstId] = await visibleItemIds(page, "admin-row-");
+    await openEditForm(page, firstId);
+    const typed = "abcdefghijklmnopqrstuvwx";
+    expect(typed).toHaveLength(24);
+
+    const whileTyping = await countRowRenders(page, async () => {
+      await page.getByTestId("name-input").click();
+      await page.keyboard.press("ControlOrMeta+A");
+      await page.keyboard.type(typed, { delay: 0 });
+    });
+    await expect(page.getByTestId("name-input")).toHaveValue(typed);
+    expect(whileTyping.commits, "the page did re-render for the keystrokes (the counter is watching)").toBeGreaterThanOrEqual(typed.length);
+    expect(whileTyping.rowRenders, `rows rendered while typing, out of ${rows} on the page`).toBe(0);
+
+    // The control: the same counter DOES see rows render when they have to. A save replaces the list with the server's answer.
+    const whileSaving = await countRowRenders(page, async () => {
+      await saveItem(page);
+      await expect(page.getByTestId("admin-success")).toBeVisible();
+    });
+    expect(lastBody(api, "PUT", PUT_ITEM(firstId))).toEqual({ name: typed });
+    expect(whileSaving.rowRenders, "rows rendered after a save brought in a fresh list").toBeGreaterThanOrEqual(rows);
   });
 });
 
@@ -698,7 +1186,8 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await saveItem(page);
 
     await expect(page.getByTestId("admin-success")).toBeVisible();
-    expect(lastBody(api, "PUT", PUT_ITEM(item.id)).category_id).toBe(item.category_id);
+    // The category could not even be shown by name, and it is not the person's change: it is not sent at all
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ name: "Acetaminophen 500 mg, tablets (renamed)" });
     expect(stored(api, item.id).category_id).toBe(item.category_id);
     expect(stored(api, item.id).name).toBe("Acetaminophen 500 mg, tablets (renamed)");
   });
@@ -758,6 +1247,29 @@ test.describe("Admin: honest feedback when a save does not work", () => {
       }
     });
   }
+
+  test("after 'saved, but not stored', saving again does not put back what another person changed while the form was open", async ({ page }) => {
+    const item = seedItem(ACETAMINOPHEN); // Pain & Fever, supplier 00417-B, stock 120
+    const api = await openAdmin(page);
+    const sent = await serverIgnoresFields(page, api, { supplier: true });
+    await openEditForm(page, item.id); // the form now holds stock 120 and Pain & Fever
+
+    // Meanwhile a dispense takes the stock down and another person files the item under Antibiotics
+    expect(await dispenseFromAnotherScreen(page, item.id, 20)).toBe(201);
+    stored(api, item.id).category_id = categoryId(2);
+
+    // The person types a supplier order number; the server answers OK but does not store it
+    await fillItemForm(page, { supplier: "NEW-0042" });
+    await saveItem(page);
+    await expect(page.getByTestId("admin-error")).toContainText("The item was saved, but the supplier order number was not stored.");
+    expect(sent).toEqual([{ supplier_order_number: "NEW-0042" }]);
+
+    // Saving again sends the supplier order number and nothing else: the stock and the category the form was opened with are stale
+    await saveItem(page);
+    await expect(page.getByTestId("admin-error")).toContainText("the supplier order number was not stored");
+    expect(sent.at(-1)).toEqual({ supplier_order_number: "NEW-0042" });
+    expect(stored(api, item.id)).toMatchObject({ stock: 100, category_id: categoryId(2), supplier_order_number: "00417-B" });
+  });
 
   test("the same check protects a new item: a dropped category is reported, and saving again updates that item instead of adding a second", async ({ page }) => {
     const api = await openAdmin(page);
@@ -1078,6 +1590,17 @@ test.describe("Admin: the list and the Inventory tab", () => {
     await expect(page.getByTestId(`admin-supplier-${legacy.id}`).locator("dd")).toHaveText("Not set");
   });
 
+  test("the search box names the supplier order number the way every label does, and finds an item by it", async ({ page }) => {
+    const item = seedItem(ACETAMINOPHEN);
+    await openAdmin(page);
+    const search = page.getByTestId("admin-search");
+    await expect(search).toHaveAttribute("placeholder", "Name, barcode or supplier order no.");
+
+    await search.fill("00417-B");
+    await expect(page.getByTestId(`admin-row-${item.id}`)).toBeVisible();
+    expect(await visibleItemIds(page, "admin-row-")).toEqual([item.id]);
+  });
+
   test("each applied filter shows as a removable chip: its x removes only that filter, Clear filters removes them all, and the filter controls follow", async ({ page }) => {
     const items = buildMedications();
     const total = items.length;
@@ -1359,8 +1882,17 @@ test.describe("Admin: unnamed items, new categories and photos", () => {
     await page.getByTestId("new-category-cancel").click();
     await expect(page.getByTestId("new-category-input")).toHaveCount(0);
     expect(await chosenCategory(page)).toBe(PAIN_AND_FEVER); // the item's own category is back, not cleared
+
+    // Nothing else was changed, so there is nothing to save: no request, and the message says so
+    await saveItem(page);
+    await expect(page.getByTestId("admin-info")).toContainText("No changes to save.");
+    expect(api.requestsTo("PUT", PUT_ITEM(item.id))).toHaveLength(0);
+
+    // With another field changed the save goes through, and the category it did not touch stays exactly as it was
+    await fillItemForm(page, { notes: "Saved after cancelling the new category" });
     await saveItem(page);
     await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Pain & Fever");
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "Saved after cancelling the new category" });
     expect(stored(api, item.id).category_id).toBe(categoryId(0));
   });
 
@@ -1669,6 +2201,24 @@ test.describe("Admin: phone width", () => {
     await expectReadableInFull(page.getByTestId("admin-success"), "the saved message with a 113-character name", { minLines: 2 });
   });
 
+  test("the length messages fit a 360px-wide phone: nothing scrolls sideways and each message can be read in full", async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 844 });
+    const item = seedItem(ASPIRIN);
+    await openAdmin(page);
+    await openEditForm(page, item.id);
+
+    await pasteInto(page, "supplier-order-number-input", "0123456789".repeat(7));
+    await pasteInto(page, "unit-input", "u".repeat(41));
+    await expectNoHorizontalScroll(page, "the form with two length messages");
+    await expectReadableInFull(page.getByTestId("problem-supplier-order-number"), "the supplier order number message");
+    await expectReadableInFull(page.getByTestId("problem-unit"), "the unit message");
+
+    await chooseCategory(page, CREATE_NEW);
+    await pasteInto(page, "new-category-input", "C".repeat(61));
+    await expectNoHorizontalScroll(page, "the new-category box with a length message");
+    await expectReadableInFull(page.getByTestId("problem-new-category"), "the category name message");
+  });
+
   test("buttons and fields are at least 40px tall on a phone", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     const item = seedItem(ACETAMINOPHEN);
@@ -1768,7 +2318,7 @@ test.describe("Admin: loading, partial failures and double clicks", () => {
     await fillItemForm(page, { notes: "edited while the category names were unavailable" });
     await saveItem(page);
     await expect(page.getByTestId("admin-success")).toBeVisible();
-    expect(lastBody(api, "PUT", PUT_ITEM(item.id)).category_id).toBe(item.category_id);
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "edited while the category names were unavailable" });
     expect(stored(api, item.id).category_id).toBe(item.category_id);
 
     await warning.getByRole("button", { name: "Retry" }).click();

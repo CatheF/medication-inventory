@@ -596,6 +596,47 @@ test.describe("editing one field does not overwrite the others", () => {
       "database: the row is the old one with the new note and the stock set in the meantime, nothing else (vendor URL, unit, photo, supplier number, ...)"
     ).toEqual({ ...before, notes: "Keep below 25 C", stock: 10, updated_at: after.updated_at });
   });
+
+  // The twin of the stock test, for the category. The form is opened on "Pain & Fever"; meanwhile another person files the item
+  // under "Antibiotics" (and a dispense takes the stock down). Saving a note must not file it back under "Pain & Fever": the category
+  // is not the person's change, so it must not travel with the save. (The page used to send the category with EVERY save.)
+  for (const shape of SHAPES) {
+    test(`saving a note does not put back a category that changed while the form was open (${shape} ids)`, async ({ page }) => {
+      const mock = await installRichMockApi(page, shape);
+      const before = { ...dbRow(mock, PAIN_ITEM) };
+      const painCategory = categoryNamed(mock, "Pain & Fever");
+      const antibiotics = categoryNamed(mock, "Antibiotics");
+      await openAdmin(page, PAIN_ITEM);
+      await openEdit(page, PAIN_ITEM);
+      await expectFormStartsOn(page, "Pain & Fever");
+
+      // Meanwhile: the database says Antibiotics and stock 7, while the open form still says Pain & Fever and 18.
+      dbRow(mock, PAIN_ITEM).category_id = antibiotics.id;
+      dbRow(mock, PAIN_ITEM).stock = 7;
+      await controlAfterLabel(page, /^Notes/, "textarea").fill("Keep below 25 C");
+      await save(page, "PUT");
+
+      const after = dbRow(mock, PAIN_ITEM);
+      soft(after.notes, "database: the note was saved").toBe("Keep below 25 C");
+      soft(
+        after.category_id,
+        'database: the category must stay "Antibiotics", the one set in the meantime, and not go back to the "Pain & Fever" the open form was holding'
+      ).toBe(antibiotics.id);
+      soft(after.stock, "database: the stock set in the meantime stays").toBe(7);
+      soft(
+        after,
+        "database: the row is the old one with the new note, the category and the stock set in the meantime, nothing else (vendor URL, unit, photo, supplier number, ...)"
+      ).toEqual({ ...before, notes: "Keep below 25 C", category_id: antibiotics.id, stock: 7, updated_at: after.updated_at });
+      soft(
+        sentCategory(savedBody(mock, "PUT"), shape),
+        'the request must not carry the category the form was opened with ("Pain & Fever"): the person did not change it'
+      ).not.toBe(painCategory.id);
+
+      await reloadAdmin(page, PAIN_ITEM);
+      await soft(itemRow(page, PAIN_ITEM), "after a reload the list row shows the category the item really has, Antibiotics").toContainText("Antibiotics", SETTLED);
+      await soft(itemRow(page, PAIN_ITEM), "after a reload the list row no longer shows the old category").not.toContainText("Pain & Fever", SETTLED);
+    });
+  }
 });
 
 // What the owner lost trust over: a save that did not work looked as if it had. Three ways a save can fail to store the work, and
