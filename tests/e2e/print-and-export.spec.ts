@@ -4,7 +4,7 @@
 //   * the same workbook opened by LibreOffice (csv and pdf) as a third opinion.
 // The browser talks to the mock API in tests/e2e/helpers/mock-api.ts, so no database is involved. Synthetic data only.
 // Tools that are missing make the affected tests skip with the tool's name in the reason; nothing passes vacuously.
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import path from "node:path";
 import { expect, test } from "@playwright/test";
 import type { Browser, Page, TestInfo } from "@playwright/test";
@@ -12,22 +12,27 @@ import type { Medication } from "@/lib/db";
 import { buildManyMedications, buildMedications, FORMULA_NAMES, TRICKY_SUPPLIER_NUMBERS, UNUSUAL_NAMES } from "../helpers/fixtures";
 import {
   LIBREOFFICE,
+  PAGE_MARGIN_PT,
   POPPLER,
   PYTHON_OPENPYXL,
   cellText,
+  darkestInBoxes,
+  findRules,
   inspectXlsx,
   libreOfficeConvert,
   makeScratch,
+  median,
   parseCsv,
   pdfInfo,
   pdfTextPages,
+  pdfWords,
   readPrintedTable,
   renderPage,
   rasterStats,
   xlsxTable,
 } from "./helpers/print-export-artifacts";
-import type { PrintedPage, PrintedRow, XlsxReport } from "./helpers/print-export-artifacts";
-import { collectPageProblems, openOrderSheet, readPreview, renderedOutsideSheet, savePdf } from "./helpers/print-export-page";
+import type { PageRules, PrintedPage, PrintedRow, XlsxReport } from "./helpers/print-export-artifacts";
+import { collectPageProblems, openOrderSheet, openOrderSheetUnready, readPreview, renderedOutsideSheet, savePdf, setDraftRows } from "./helpers/print-export-page";
 import type { DraftSeed, PreviewReading } from "./helpers/print-export-page";
 
 // Dates print in the browser's language ("Nov 5, 2026"); pin it so the checks do not depend on the machine's locale.
@@ -42,6 +47,19 @@ const PAPERS: readonly Paper[] = [
   { key: "a4", label: "A4", width: 595, height: 842, wrongFormat: "Letter" },
 ];
 const ROW_COUNTS = [1, 45, 120] as const;
+
+// What "a readable print layout" means in numbers (the sheet is meant to be read, written on and filed on real paper):
+// pdftotext reports each word as a box about 1.12 times the type size tall (8 pt type: 8.9 pt), so a box of 8.8 pt or more is 8 pt type
+// or larger, the usual smallest comfortable size. Today's smallest text (the 9 pt footer and page numbers) has a 10 pt box.
+const MIN_TEXT_BOX_HEIGHT_PT = 8.8;
+// The page promises "an empty box to fill in by hand": a row must be at least 7.5 mm (21.3 pt) tall, room for handwriting.
+const MIN_ROW_PITCH_PT = (7.5 / 25.4) * 72;
+// Paper is not wasted: on average at least this many item rows per page (plain sheets of 45 and 120 rows; today's layout fits 15 or more,
+// so ordinary tweaks to padding or type size pass, while rows that are several times too tall do not).
+const MIN_ROWS_PER_PAGE = 10;
+
+const XLSX_PATH = /\/api\/order-sheet\/xlsx$/;
+const BASE_HEADERS = ["Item", "Supplier order no.", "Order qty", "Unit"];
 
 const TITLE = "Supply order";
 const PREPARED_BY = "J. Rivera";
@@ -150,6 +168,14 @@ async function withFreshPage<T>(browser: Browser, testInfo: TestInfo, fn: (page:
   }
 }
 
+/** Sixty items with short names and short codes: every row is a single line of text, so its height is the least a row can be. */
+function shortItems(): Medication[] {
+  return Array.from({ length: 60 }, (_, i) => {
+    const n = String(i + 1).padStart(2, "0");
+    return item(29001 + i, { name: `Gauze pad ${n}`, supplier_order_number: `G-${n}` });
+  });
+}
+
 /**
  * Sixty rows of very different heights, up to six lines tall (a long name and a 30 to 64 character code that wraps), with varying
  * heights so that page breaks fall at different heights inside rows, on every paper size.
@@ -166,18 +192,19 @@ function tallItems(): Medication[] {
   });
 }
 
-type Variant = "plain" | "wide" | "tall";
+type Variant = "plain" | "wide" | "tall" | "short";
 type PdfArtifact = { file: string; paper: Paper; rows: DraftSeed["rows"]; expected: Expected[]; preview: PreviewReading };
 
 /**
  * The sheet as a real PDF: the paper is chosen through the UI, then the browser prints it (page.pdf, print media).
- * plain = the default four columns; wide = on-hand and barcode columns switched on; tall = 40 rows of about five lines each.
+ * plain = the default four columns; wide = on-hand and barcode columns switched on; tall = 60 rows of up to six lines each;
+ * short = 60 single-line rows.
  */
 function pdfArtifact(browser: Browser, testInfo: TestInfo, paper: Paper, count: number, variant: Variant = "plain"): Promise<PdfArtifact> {
   return once(`pdf-${paper.key}-${count}-${variant}`, () =>
     withFreshPage(browser, testInfo, async (page) => {
-      const medications = variant === "tall" ? tallItems() : pdfInventory();
-      const rows = variant === "tall" ? medications.map((m, i) => ({ id: m.id, ...typedFor(i) })) : pdfRows(count);
+      const medications = variant === "tall" ? tallItems() : variant === "short" ? shortItems() : pdfInventory();
+      const rows = variant === "tall" || variant === "short" ? medications.map((m, i) => ({ id: m.id, ...typedFor(i) })) : pdfRows(count);
       await openOrderSheet(page, {
         medications,
         draft: {
@@ -199,6 +226,62 @@ function pdfArtifact(browser: Browser, testInfo: TestInfo, paper: Paper, count: 
 }
 
 const printedPages = (art: PdfArtifact): PrintedPage[] => readPrintedTable(art.file, FOOTER);
+
+/**
+ * Ten letters I, ten W, ten l, ten M and ten zeros, used as item name, supplier number and (with two I added) barcode of five rows:
+ * in a monospace face all five print equally wide, in a proportional face they cannot.
+ */
+const MONO_STRINGS = ["IIIIIIIIII", "WWWWWWWWWW", "llllllllll", "MMMMMMMMMM", "0000000000"];
+
+function monoArtifact(browser: Browser, testInfo: TestInfo): Promise<{ file: string }> {
+  return once("mono", () =>
+    withFreshPage(browser, testInfo, async (page) => {
+      const medications = MONO_STRINGS.map((s, i) => item(30001 + i, { name: s, supplier_order_number: s, barcode: `${s}II` }));
+      await openOrderSheet(page, { medications, draft: { rows: medications.map((m) => ({ id: m.id })), showBarcode: true } });
+      const file = path.join(scratch().dir, "mono.pdf");
+      await savePdf(page, file);
+      return { file };
+    })
+  );
+}
+
+// ── Looking at the page as a picture: cell borders and ink ───────────────────────────────────────────────────────────
+
+const RENDER_DPI = 150;
+
+/** One page of the PDF rendered in grayscale, and the long straight dark lines on it: the table's cell borders. */
+function pageRules(file: string, pageNumber: number): PageRules {
+  return findRules(renderPage(file, pageNumber, { dpi: RENDER_DPI, gray: true, dir: scratch().dir }), RENDER_DPI);
+}
+
+// A cell's text starts this far (points) to the right of the cell's left border: padding 7 px + half the border.
+const TEXT_INSET_PT = 5.65;
+
+type CellSides = { top: boolean; bottom: boolean; left: boolean; right: boolean };
+
+/**
+ * Which sides of one printed cell have a border line. The cell is found from the text around it (the row's words, the
+ * neighbouring rows, the column heading's left edge); each side is a rule from the picture of the page that lies where that side
+ * has to be and covers the whole side.
+ */
+function cellSides(page: PrintedPage, rules: PageRules, rowIndex: number, column: number): CellSides {
+  const row = page.rows[rowIndex];
+  const above = rowIndex > 0 ? page.rows[rowIndex - 1].bottom : (page.headingBottom ?? row.top - 30);
+  const below = rowIndex + 1 < page.rows.length ? page.rows[rowIndex + 1].top : row.bottom + 14;
+  const leftEdge = page.columnLefts[column] - TEXT_INSET_PT;
+  const rightEdge = column + 1 < page.columnLefts.length ? page.columnLefts[column + 1] - TEXT_INSET_PT : page.width - PAGE_MARGIN_PT;
+  const horizontalBetween = (lo: number, hi: number): boolean =>
+    rules.horizontal.some((h) => h.pos > lo && h.pos < hi && h.from <= leftEdge + 3 && h.to >= rightEdge - 3);
+  const verticalAt = (x: number): boolean => rules.vertical.some((v) => Math.abs(v.pos - x) <= 3.5 && v.from <= row.top && v.to >= row.bottom);
+  return { top: horizontalBetween(above, row.top), bottom: horizontalBetween(row.bottom, below), left: verticalAt(leftEdge), right: verticalAt(rightEdge) };
+}
+
+/** Width in points of the text of one printed cell (first letter to last letter). */
+function cellWidth(row: PrintedRow, label: string): number {
+  const words = row.cellWords[label] ?? [];
+  if (words.length === 0) throw new Error(`no text in the "${label}" cell`);
+  return Math.max(...words.map((w) => w.x1)) - Math.min(...words.map((w) => w.x0));
+}
 
 // Text that belongs to the app around the sheet (navigation, builder, buttons, notices). None of it may reach the paper.
 const NOT_ON_PAPER: string[] = [
@@ -344,6 +427,30 @@ test.describe("Print media: only the sheet prints", () => {
   });
 });
 
+test.describe("What the page tells staff", () => {
+  test("it says plainly that nothing is ordered, emailed or changed and that quantity and on-hand are separate, and its sections follow reading order", async ({ page }) => {
+    await openOrderSheet(page, { medications: buildMedications(), draft: { rows: [{ id: 100 }] } });
+    await expect(page.getByTestId("sheet-disclaimer")).toContainText("Preparing, printing or exporting this sheet does not place an order, email anyone, or change stock.");
+    await expect(page.getByText("On-hand stock and order quantity are separate. Order quantity and unit are typed by staff; nothing is calculated.")).toBeVisible();
+
+    const top = async (locator: ReturnType<Page["locator"]>): Promise<number> => {
+      const box = await locator.boundingBox();
+      if (!box) throw new Error("element has no box on screen");
+      return box.y;
+    };
+    const positions = [
+      await top(page.getByRole("heading", { level: 1, name: "Order sheet" })),
+      await top(page.getByTestId("sheet-disclaimer")),
+      await top(page.getByRole("heading", { name: /^Items on this sheet/ })),
+      await top(page.getByRole("heading", { name: "Sheet details" })),
+      await top(page.getByRole("heading", { name: "Print or download" })),
+      await top(page.getByRole("heading", { name: "Preview of the printed sheet" })),
+    ];
+    expect(positions, "heading, disclaimer, builder, options, actions, preview: top to bottom").toEqual([...positions].sort((a, b) => a - b));
+    expect(new Set(positions).size).toBe(positions.length);
+  });
+});
+
 // ══ 2. The printed sheet as REAL PDFs (poppler) ═══════════════════════════════════════════════════════════════
 
 test.describe("Printed PDF (read back with poppler)", () => {
@@ -406,7 +513,9 @@ test.describe("Printed PDF (read back with poppler)", () => {
       test("tall rows (several lines each) are never split across two pages: every page break falls between rows", async ({ browser }, testInfo) => {
         const art = await pdfArtifact(browser, testInfo, paper, 60, "tall");
         const pages = printedPages(art);
-        expect(pages.length, "60 tall rows need several pages, so page breaks do fall inside rows if they are allowed to").toBeGreaterThan(5);
+        // Not a magic page count: 60 rows that are several lines tall need many pages, so many page breaks fall where a row would
+        // be cut if rows were allowed to split. Three pages is far below what these rows need and far above what one page holds.
+        expect(pages.length, "60 tall rows need several pages, so page breaks do fall inside rows if they are allowed to").toBeGreaterThanOrEqual(3);
         for (const p of pages) expect(p.headings, `page ${p.page}`).toEqual(["Item", "Supplier order no.", "Order qty", "Unit"]);
         expect(pages.flatMap((p) => p.rows).map(printedCells), "each row is printed whole, exactly once").toEqual(art.expected.map(expectedCells));
         for (const p of pages) {
@@ -523,8 +632,124 @@ test.describe("Printed PDF (read back with poppler)", () => {
         });
         expect(art.preview.headers).toEqual(["Item", "Supplier order no.", "Order qty", "Unit", "On hand", "Barcode"]);
       });
+
+      test("the text is large enough to read: item rows are set in 8 pt type or larger (median), and so is every word anywhere on the paper (smallest), at 1, 45 and 120 rows", async ({ browser }, testInfo) => {
+        for (const count of ROW_COUNTS) {
+          const art = await pdfArtifact(browser, testInfo, paper, count);
+          const rowHeights = printedPages(art).flatMap((p) => p.rows.flatMap((r) => r.words.map((w) => w.y1 - w.y0)));
+          const allHeights = pdfWords(art.file).flatMap((p) => p.words.map((w) => w.y1 - w.y0));
+          expect(rowHeights.length, `${count} rows: item-row words measured`).toBeGreaterThan(count * 3);
+          expect(median(rowHeights), `${count} rows: median height of a word in the item rows (points)`).toBeGreaterThanOrEqual(MIN_TEXT_BOX_HEIGHT_PT);
+          expect(Math.min(...allHeights), `${count} rows: height of the smallest word on the paper, headings, footer and page numbers included (points)`).toBeGreaterThanOrEqual(MIN_TEXT_BOX_HEIGHT_PT);
+        }
+      });
+
+      test("rows are tall enough to write in (7.5 mm or more) and the table runs from margin to margin: the browser did not shrink the sheet to fit", async ({ browser }, testInfo) => {
+        const short = await pdfArtifact(browser, testInfo, paper, 60, "short");
+        const pitches: number[] = [];
+        for (const p of printedPages(short)) {
+          p.rows.forEach((row, i) => {
+            const next = p.rows[i + 1];
+            // a one-line row is as tall as its cell padding and one line of type: the distance to the next row's text is its height
+            if (next && row.lines === 1) pitches.push(next.top - row.top);
+          });
+        }
+        expect(pitches.length, "60 one-line rows: row heights measured").toBeGreaterThan(40);
+        expect(Math.min(...pitches), "height of the shortest row (points)").toBeGreaterThanOrEqual(MIN_ROW_PITCH_PT);
+        const art = await pdfArtifact(browser, testInfo, paper, 45);
+        for (const p of printedPages(art)) {
+          const verticals = pageRules(art.file, p.page).vertical.filter((v) => v.to - v.from > 40).map((v) => v.pos);
+          expect(verticals.length, `page ${p.page}: vertical borders found`).toBeGreaterThanOrEqual(p.headings.length + 1);
+          expect(Math.min(...verticals), `page ${p.page}: the table's left border sits on the left margin`).toBeGreaterThan(PAGE_MARGIN_PT - 2.5);
+          expect(Math.min(...verticals), `page ${p.page}: the table's left border sits on the left margin`).toBeLessThan(PAGE_MARGIN_PT + 2.5);
+          expect(Math.max(...verticals), `page ${p.page}: the table's right border reaches the right margin`).toBeGreaterThan(p.width - PAGE_MARGIN_PT - 3.5);
+          expect(Math.max(...verticals), `page ${p.page}: the table's right border reaches the right margin`).toBeLessThan(p.width - PAGE_MARGIN_PT + 1);
+        }
+      });
+
+      test("paper is used sensibly: one row is one page, and 45 and 120 rows average at least 10 item rows per page", async ({ browser }, testInfo) => {
+        for (const count of ROW_COUNTS) {
+          const art = await pdfArtifact(browser, testInfo, paper, count);
+          const pages = pdfInfo(art.file).pages;
+          if (count === 1) {
+            expect(pages, "a one-row sheet fits on one page").toBe(1);
+          } else {
+            expect(count / pages, `${count} rows on ${pages} pages: item rows per page`).toBeGreaterThanOrEqual(MIN_ROWS_PER_PAGE);
+          }
+        }
+      });
+
+      test("every cell is a bordered box on all four sides, so blank Order qty and Unit cells are empty boxes to fill in by hand", async ({ browser }, testInfo) => {
+        for (const count of [1, 45] as const) {
+          const art = await pdfArtifact(browser, testInfo, paper, count);
+          let blankCells = 0;
+          for (const p of printedPages(art)) {
+            const rules = pageRules(art.file, p.page);
+            p.rows.forEach((row, rowIndex) => {
+              p.headings.forEach((label, column) => {
+                const blank = (row.cells[label] ?? "").trim() === "";
+                if (blank) blankCells += 1;
+                expect(cellSides(p, rules, rowIndex, column), `${count} rows, page ${p.page}, row ${rowIndex + 1}, "${label}"${blank ? " (blank)" : ""}`).toEqual({
+                  top: true,
+                  bottom: true,
+                  left: true,
+                  right: true,
+                });
+              });
+            });
+          }
+          expect(blankCells, `${count} rows: blank cells checked`).toBeGreaterThanOrEqual(count === 1 ? 2 : 20);
+        }
+      });
+
+      test("the text is solid black: every printed word has near-black ink, so nothing fades on a black-and-white or draft-mode printer", async ({ browser }, testInfo) => {
+        const art = await pdfArtifact(browser, testInfo, paper, 45);
+        const pages = pdfWords(art.file);
+        const darkest: number[] = [];
+        pages.forEach((p, i) => {
+          const raster = renderPage(art.file, i + 1, { dpi: RENDER_DPI, gray: true, dir: scratch().dir });
+          // a hair inside each word box, so the cell borders around the text are not part of the measurement
+          darkest.push(...darkestInBoxes(raster, RENDER_DPI, p.words.map((w) => ({ x0: w.x0 + 0.3, x1: w.x1 - 0.3, y0: w.y0 + 0.3, y1: w.y1 - 0.3 }))));
+        });
+        expect(darkest.length, "words measured").toBeGreaterThan(100);
+        const sorted = [...darkest].sort((a, b) => a - b);
+        expect(median(darkest), "darkest pixel of a typical word (0 = black, 255 = paper)").toBeLessThanOrEqual(30);
+        expect(sorted[Math.floor(sorted.length * 0.95)], "darkest pixel of the 95th-percentile word (0 = black, 255 = paper)").toBeLessThanOrEqual(60);
+      });
+
+      test("with notes typed, no page holds only the notes: every page of a 1 to 40 row sheet has item rows, so the notes stay with the last item", async ({ page }) => {
+        test.setTimeout(240_000);
+        const meds = buildManyMedications(45);
+        await openOrderSheet(page, { medications: meds, draft: { rows: [{ id: meds[0].id }], title: TITLE, preparedBy: PREPARED_BY, notes: NOTES, paper: paper.key } });
+        const orphans: string[] = [];
+        for (let count = 1; count <= 40; count += 1) {
+          await setDraftRows(page, meds.slice(0, count).map((m) => m.id));
+          const file = path.join(scratch().dir, `sweep-${paper.key}-${count}.pdf`);
+          await savePdf(page, file);
+          const pages = readPrintedTable(file, FOOTER);
+          for (const p of pages) {
+            if (p.rows.length === 0) orphans.push(`${count} rows: page ${p.page} of ${pages.length} has no item rows (it carries ${p.notes ? "the notes" : "nothing"} and ${p.footer ? "the footer" : "no footer"})`);
+          }
+          rmSync(file, { force: true });
+        }
+        expect(orphans, "sheets that end with a page that has no item rows").toEqual([]);
+      });
     });
   }
+
+  test("supplier numbers and barcodes are set in a monospace face (every character the same width), item names are not", async ({ browser }, testInfo) => {
+    const { file } = await monoArtifact(browser, testInfo);
+    const rows = readPrintedTable(file, FOOTER).flatMap((p) => p.rows);
+    expect(rows.map((r) => r.cells["Item"]), "the five rows that were printed").toEqual(MONO_STRINGS);
+    const spread = (label: string): number => {
+      const widths = rows.map((r) => cellWidth(r, label));
+      return Math.max(...widths) - Math.min(...widths);
+    };
+    // ten letters I, ten letters W, ten l, ten M and ten zeros: equally wide only if every character has the same width
+    expect(spread("Supplier order no."), "widest minus narrowest supplier number (points)").toBeLessThan(1.5);
+    expect(spread("Barcode"), "widest minus narrowest barcode (points)").toBeLessThan(1.5);
+    expect(spread("Item"), "control: the same strings as item names are in a proportional face, so their widths differ").toBeGreaterThan(40);
+  });
 });
 
 // ══ 3. Empty and invalid sheets ═══════════════════════════════════════════════════════════════════════════════
@@ -579,7 +804,7 @@ test.describe("Empty and invalid sheets", () => {
     expect(preview.emptyMessage).toBe("No items on this order sheet");
   });
 
-  test("an invalid order quantity disables Print and Download with a reason, and the printed sheet marks it '?' instead of silently dropping it", async ({ page }) => {
+  test("an invalid order quantity disables Print and Download with a reason; with print media the paper explains the '?' marker, and fixing the quantity re-enables both", async ({ page }) => {
     await openOrderSheet(page, { medications: buildMedications(), draft: { rows: [{ id: 100, qty: "5", unit: "box" }, { id: 101 }] } });
     await page.getByTestId("qty-input-101").fill("12abc");
     await expect(page.getByTestId("export-xlsx")).toBeDisabled();
@@ -593,20 +818,59 @@ test.describe("Empty and invalid sheets", () => {
     await page.emulateMedia({ media: "print" });
     await expect(page.getByTestId("print-invalid-note")).toBeVisible();
     await expect(page.getByTestId("print-qty-marker")).toBeVisible();
-    if (POPPLER.available) {
-      const file = path.join(scratch().dir, "invalid-qty.pdf");
-      await savePdf(page, file);
-      const pages = readPrintedTable(file, FOOTER);
-      const rows = pages.flatMap((p) => p.rows);
-      expect(rows.map((r) => (r.cells["Order qty"] ?? "").trim())).toEqual(["5", "?"]);
-      expect(pdfTextPages(file, "raw").join("\n").replace(/\s+/g, " ")).toContain("Some quantities are not valid numbers");
-    }
     await page.emulateMedia({ media: "screen" });
 
     await page.getByTestId("qty-input-101").fill("12");
     await expect(page.getByTestId("export-xlsx")).toBeEnabled();
     await expect(page.getByTestId("print-button")).toBeEnabled();
     await expect(page.getByTestId("invalid-qty-summary")).toHaveCount(0);
+  });
+
+  test("if a sheet with an invalid quantity is printed anyway (Ctrl+P), the PDF marks that quantity '?' and says why, instead of silently dropping it", async ({ page }) => {
+    test.skip(!POPPLER.available, POPPLER.reason);
+    await openOrderSheet(page, { medications: buildMedications(), draft: { rows: [{ id: 100, qty: "5", unit: "box" }, { id: 101 }] } });
+    await page.getByTestId("qty-input-101").fill("12abc");
+    await expect(page.getByTestId("invalid-qty-summary")).toBeVisible();
+    const file = path.join(scratch().dir, "invalid-qty.pdf");
+    await savePdf(page, file);
+    const rows = readPrintedTable(file, FOOTER).flatMap((p) => p.rows);
+    expect(rows.map((r) => (r.cells["Order qty"] ?? "").trim())).toEqual(["5", "?"]);
+    expect(pdfTextPages(file, "raw").join("\n").replace(/\s+/g, " ")).toContain("Some quantities are not valid numbers");
+  });
+});
+
+// Ctrl/Cmd+P works whatever the page is showing. Before the inventory has loaded, or when it could not be loaded, there is no sheet
+// to print; the paper must say so instead of coming out blank (a blank page looks like a printer fault, or like an empty order).
+test.describe("Printing before the inventory is ready", () => {
+  test.skip(!POPPLER.available, POPPLER.reason);
+  const SAVED_DRAFT: DraftSeed = { rows: [{ id: 100, qty: "3", unit: "box" }] };
+
+  async function printedText(page: Page, fileName: string): Promise<string> {
+    const file = path.join(scratch().dir, fileName);
+    await savePdf(page, file);
+    expect(pdfInfo(file).pages, "the browser printed something").toBeGreaterThanOrEqual(1);
+    return pdfTextPages(file, "raw").join("\n").replace(/\s+/g, " ").trim();
+  }
+
+  test("when the inventory could not be loaded, printing does not give a blank page: the paper says the inventory is not available", async ({ page }) => {
+    await openOrderSheetUnready(page, { medications: buildMedications(), draft: SAVED_DRAFT, state: "error" });
+    const text = await printedText(page, "unready-error.pdf");
+    expect(text, "what the paper says").not.toBe("");
+    expect(text, "what the paper says").toMatch(/inventory/i);
+  });
+
+  test("while the inventory is still loading, printing does not give a blank page: the paper says the inventory is loading", async ({ page }) => {
+    await openOrderSheetUnready(page, { medications: buildMedications(), draft: SAVED_DRAFT, state: "loading" });
+    const text = await printedText(page, "unready-loading.pdf");
+    expect(text, "what the paper says").not.toBe("");
+    expect(text, "what the paper says").toMatch(/inventory/i);
+  });
+
+  test("control: the same page prints the sheet as soon as the slow inventory has arrived, so the blank pages above come from the loading and error states themselves", async ({ page }) => {
+    const { release } = await openOrderSheetUnready(page, { medications: buildMedications(), draft: SAVED_DRAFT, state: "loading" });
+    release();
+    await expect(page.getByTestId("sheet-preview")).toBeVisible();
+    expect(await printedText(page, "unready-after.pdf"), "once loaded, the sheet itself prints").toContain("Acetaminophen 500 mg, tablets");
   });
 });
 
@@ -767,18 +1031,50 @@ test.describe("Excel export (openpyxl)", () => {
     expect(notes?.value).toBe('Line one\nLine two, with a "quote"');
   });
 
-  test("a date typed in the Date box is the date on the sheet: preview, file name and workbook agree", async ({ page }) => {
-    await openOrderSheet(page, { medications: buildMedications(), draft: { rows: [{ id: 100 }] } });
+});
+
+// These checks need the browser first and the workbook second: the browser half (what the page shows, which file name the download
+// has, what the request says) always runs, the workbook half needs python3 + openpyxl and is reported as SKIPPED without them.
+test.describe("Excel export options and defaults", () => {
+  const ONLY_ONE_COLUMN = [
+    { label: "On hand", testId: "show-on-hand", flags: { showOnHand: true, showBarcode: false } },
+    { label: "Barcode", testId: "show-barcode", flags: { showOnHand: false, showBarcode: true } },
+  ] as const;
+
+  for (const option of ONLY_ONE_COLUMN) {
+    test(`ticking only "${option.label}" adds only that column: the export request, the preview and the workbook all agree`, async ({ page }) => {
+      const meds = buildMedications();
+      const rows = [100, 101, 126].map((id) => ({ id, qty: "10", unit: "box" }));
+      const api = await openOrderSheet(page, { medications: meds, draft: { rows } });
+      await page.getByTestId(option.testId).check();
+      expect((await readPreview(page)).headers, "the printed sheet").toEqual([...BASE_HEADERS, option.label]);
+
+      const { file } = await downloadXlsx(page, `only-${option.testId}.xlsx`);
+      const body = api.requestsTo("POST", XLSX_PATH)[0].body as Record<string, unknown>;
+      expect({ showOnHand: body.showOnHand, showBarcode: body.showBarcode }, "the flags in the export request").toEqual(option.flags);
+
+      test.skip(!PYTHON_OPENPYXL.available, PYTHON_OPENPYXL.reason);
+      const table = xlsxTable(inspectXlsx(file));
+      expect(table.headers, "the workbook").toEqual(["No.", "Item", "Supplier order no.", "Order qty", "Unit", option.label]);
+      const expected = expectedFor(meds, rows).map((e) => (option.label === "On hand" ? e.onHand : e.barcode));
+      expect(table.rows.map((r) => cellText(r[option.label]))).toEqual(expected);
+    });
+  }
+
+  test("a date typed in the Date box is the date on the sheet: preview, file name, export request and workbook agree", async ({ page }) => {
+    const api = await openOrderSheet(page, { medications: buildMedications(), draft: { rows: [{ id: 100 }] } });
     await page.getByTestId("sheet-date").fill("2026-12-24");
     await expect.poll(async () => (await readPreview(page)).dateLine).toBe("Date: Dec 24, 2026");
     const { file, suggestedName } = await downloadXlsx(page, "chosen-date.xlsx");
     expect(suggestedName).toBe("order-sheet-2026-12-24.xlsx");
+    expect((api.requestsTo("POST", XLSX_PATH)[0].body as { date: string }).date).toBe("2026-12-24");
+    test.skip(!PYTHON_OPENPYXL.available, PYTHON_OPENPYXL.reason);
     expect(xlsxTable(inspectXlsx(file)).preamble.find((c) => c.ref === "B2")?.value).toBe("2026-12-24");
   });
 
   test("a new sheet has no barcode or on-hand column and Letter paper; quantity and unit are never invented, not even by Add all low-stock items", async ({ page }) => {
     const meds = buildMedications();
-    await openOrderSheet(page, { medications: meds, draft: null });
+    const api = await openOrderSheet(page, { medications: meds, draft: null });
     await expect(page.getByTestId("paper-letter")).toBeChecked();
     await expect(page.getByTestId("show-on-hand")).not.toBeChecked();
     await expect(page.getByTestId("show-barcode")).not.toBeChecked();
@@ -799,11 +1095,18 @@ test.describe("Excel export (openpyxl)", () => {
       await expect(page.getByTestId(`unit-input-${id}`), `unit for item ${id}`).toHaveValue("");
     }
     const preview = await readPreview(page);
-    expect(preview.headers).toEqual(["Item", "Supplier order no.", "Order qty", "Unit"]);
+    expect(preview.headers).toEqual(BASE_HEADERS);
     expect(preview.rows.every((r) => r[2] === "" && r[3] === ""), "printed quantity and unit cells are empty").toBe(true);
 
-    const table = xlsxTable(inspectXlsx((await downloadXlsx(page, "low-stock.xlsx")).file));
-    expect(table.headers).toEqual(["No.", "Item", "Supplier order no.", "Order qty", "Unit"]);
+    const { file } = await downloadXlsx(page, "low-stock.xlsx");
+    const body = api.requestsTo("POST", XLSX_PATH)[0].body as { showOnHand: boolean; showBarcode: boolean; rows: Array<{ id: number; qty: string; unit: string }> };
+    expect({ showOnHand: body.showOnHand, showBarcode: body.showBarcode }, "a new sheet exports no on-hand or barcode column").toEqual({ showOnHand: false, showBarcode: false });
+    expect(body.rows.map((r) => r.id).sort((a, b) => a - b)).toEqual([...wanted].sort((a, b) => a - b));
+    expect(body.rows.every((r) => r.qty === "" && r.unit === ""), "no quantity or unit is sent that staff did not type").toBe(true);
+
+    test.skip(!PYTHON_OPENPYXL.available, PYTHON_OPENPYXL.reason);
+    const table = xlsxTable(inspectXlsx(file));
+    expect(table.headers).toEqual(["No.", ...BASE_HEADERS]);
     expect(table.rows.map((r) => cellText(r["Item"])).sort()).toEqual(expectedFor(meds, [...wanted].map((id) => ({ id }))).map((e) => e.name).sort());
     expect(table.rows.map((r) => r["Order qty"].value), "no quantity was calculated from stock or thresholds").toEqual(table.rows.map(() => null));
     expect(table.rows.map((r) => r["Unit"].value)).toEqual(table.rows.map(() => null));
@@ -812,16 +1115,17 @@ test.describe("Excel export (openpyxl)", () => {
   test.describe("default date", () => {
     test.use({ timezoneId: "Pacific/Auckland" });
 
-    test("a sheet with no chosen date uses today's LOCAL date everywhere: date box, preview, file name and workbook", async ({ page }) => {
+    test("a sheet with no chosen date uses today's LOCAL date everywhere: date box, preview, file name, export request and workbook", async ({ page }) => {
       // 20:00 UTC on 9 March is 09:00 on 10 March in Auckland: a UTC-based "today" would say the 9th.
       await page.clock.setFixedTime(new Date("2026-03-09T20:00:00Z"));
-      await openOrderSheet(page, { medications: buildMedications(), draft: { rows: [{ id: 100 }], date: null } });
+      const api = await openOrderSheet(page, { medications: buildMedications(), draft: { rows: [{ id: 100 }], date: null } });
       await expect(page.getByTestId("sheet-date")).toHaveValue("2026-03-10");
       expect((await readPreview(page)).dateLine).toBe("Date: Mar 10, 2026");
       const { file, suggestedName } = await downloadXlsx(page, "local-date.xlsx");
       expect(suggestedName).toBe("order-sheet-2026-03-10.xlsx");
-      const date = xlsxTable(inspectXlsx(file)).preamble.find((c) => c.ref === "B2");
-      expect(date?.value).toBe("2026-03-10");
+      expect((api.requestsTo("POST", XLSX_PATH)[0].body as { date: string }).date).toBe("2026-03-10");
+      test.skip(!PYTHON_OPENPYXL.available, PYTHON_OPENPYXL.reason);
+      expect(xlsxTable(inspectXlsx(file)).preamble.find((c) => c.ref === "B2")?.value).toBe("2026-03-10");
     });
   });
 });
@@ -934,7 +1238,6 @@ test.describe("Formula and HTML injection", () => {
 
 // ══ 6. Export errors through the UI ═════════════════════════════════════════════════════════════════════════════
 
-const XLSX_PATH = /\/api\/order-sheet\/xlsx$/;
 const THREE_ROWS: DraftSeed = { rows: [{ id: 100, qty: "2", unit: "box" }, { id: 101 }, { id: 102, qty: "4", unit: "case" }] };
 
 test.describe("Export errors", () => {
@@ -984,11 +1287,29 @@ test.describe("Export errors", () => {
     await expect(page.getByTestId("export-error")).toHaveCount(0);
     const retry = api.requestsTo("POST", XLSX_PATH)[1];
     expect((retry.body as { rows: Array<{ id: number }> }).rows.map((r) => r.id), "the retry sends only items that still exist").toEqual([100]);
-    if (PYTHON_OPENPYXL.available) {
-      const file = path.join(scratch().dir, "after-422.xlsx");
-      await download.saveAs(file);
-      expect(xlsxTable(inspectXlsx(file)).rows.map((r) => cellText(r["Item"]))).toEqual(["Acetaminophen 500 mg, tablets"]);
-    }
+    // the rest needs python3 + openpyxl; without them the test is reported as skipped (never as passed)
+    test.skip(!PYTHON_OPENPYXL.available, PYTHON_OPENPYXL.reason);
+    const file = path.join(scratch().dir, "after-422.xlsx");
+    await download.saveAs(file);
+    expect(xlsxTable(inspectXlsx(file)).rows.map((r) => cellText(r["Item"]))).toEqual(["Acetaminophen 500 mg, tablets"]);
+  });
+
+  test("a 422 that names missing items shows how many and offers Retry, even when this page still lists them (the server's view and the page's can differ for a moment)", async ({ page }) => {
+    const api = await openOrderSheet(page, { medications: buildMedications(), draft: THREE_ROWS });
+    api.failNext({
+      method: "POST",
+      path: XLSX_PATH,
+      status: 422,
+      body: { error: "2 item(s) on the order sheet are no longer in the inventory.", missingIds: [101, 102] },
+    });
+    await page.getByTestId("export-xlsx").click();
+    const alert = page.getByTestId("export-error");
+    await expect(alert).toBeVisible();
+    await expect(alert).toContainText("2 items on the sheet are no longer in the inventory. Remove them and try again.");
+    await expect(page.getByTestId("export-xlsx")).toBeEnabled();
+    await Promise.all([page.waitForEvent("download"), alert.getByRole("button", { name: "Retry" }).click()]);
+    await expect(page.getByTestId("export-success")).toBeVisible();
+    await expect(page.getByTestId("export-error")).toHaveCount(0);
   });
 
   test("a network failure says the server can't be reached, offers Retry, and the button works again", async ({ page }) => {
@@ -1017,6 +1338,39 @@ test.describe("Export errors", () => {
     await expect(page.getByTestId("export-success")).toBeVisible();
   });
 
+  test("a 200 answer with the spreadsheet content type but no content is reported as an empty file, never saved as a 0-byte download", async ({ page }) => {
+    await openOrderSheet(page, { medications: buildMedications(), draft: THREE_ROWS });
+    let answers = 0;
+    // registered after the mock, so it runs first: the first answer is an empty "spreadsheet", later requests go on to the mock
+    await page.route("**/api/order-sheet/xlsx", async (route) => {
+      answers += 1;
+      if (answers > 1) return route.fallback();
+      return route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+          "content-disposition": 'attachment; filename="order-sheet-2026-11-05.xlsx"',
+        },
+        body: "",
+      });
+    });
+    let downloads = 0;
+    page.on("download", () => (downloads += 1));
+    await page.getByTestId("export-xlsx").click();
+    const alert = page.getByTestId("export-error");
+    await expect(alert).toContainText(/empty file/i);
+    await expect(alert.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(page.getByTestId("export-success")).toHaveCount(0);
+    await expect(page.getByTestId("export-xlsx")).toBeEnabled();
+    expect(downloads, "no file was saved for the empty answer").toBe(0);
+
+    const [download] = await Promise.all([page.waitForEvent("download"), alert.getByRole("button", { name: "Retry" }).click()]);
+    expect(download.suggestedFilename()).toBe("order-sheet-2026-11-05.xlsx");
+    await expect(page.getByTestId("export-success")).toBeVisible();
+    await expect(page.getByTestId("export-error")).toHaveCount(0);
+    expect(answers).toBe(2);
+  });
+
   test("a 400 from the server shows the server's own explanation", async ({ page }) => {
     const api = await openOrderSheet(page, { medications: buildMedications(), draft: THREE_ROWS });
     api.failNext({ method: "POST", path: XLSX_PATH, status: 400, body: { error: "Notes can be at most 1000 characters.", field: "notes" } });
@@ -1040,13 +1394,85 @@ test.describe("Export errors", () => {
     const downloadPromise = page.waitForEvent("download");
     await page.getByTestId("export-xlsx").click();
     await expect(page.getByTestId("export-xlsx")).toBeDisabled();
-    await expect(page.getByText("Creating the Excel file…")).toBeVisible();
+    // the progress text is a live region, so a screen reader announces it
+    await expect(page.getByRole("status").filter({ hasText: "Creating the Excel file…" })).toBeVisible();
     expect(hits).toBe(1);
     release();
     await downloadPromise;
     await expect(page.getByTestId("export-success")).toBeVisible();
     await expect(page.getByTestId("export-xlsx")).toBeEnabled();
     expect(hits).toBe(1);
+  });
+});
+
+// ══ 6b. Keyboard and focus ═════════════════════════════════════════════════════════════════════════════════════════
+
+test.describe("Keyboard and focus around Print and Download", () => {
+  const printCalls = (page: Page): Promise<number | undefined> => page.evaluate(() => (window as Window & { __printCalls?: number }).__printCalls);
+
+  test("both buttons work from the keyboard: Enter and Space press Print, Tab moves on to Download, Enter and Space press that", async ({ page }) => {
+    await page.addInitScript(() => {
+      const w = window as Window & { __printCalls?: number };
+      w.__printCalls = 0;
+      w.print = () => {
+        w.__printCalls = (w.__printCalls ?? 0) + 1;
+      };
+    });
+    const api = await openOrderSheet(page, { medications: buildMedications(), draft: THREE_ROWS });
+    const exportButton = page.getByTestId("export-xlsx");
+
+    await page.getByTestId("print-button").focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => printCalls(page)).toBe(1);
+    await page.keyboard.press("Space");
+    await expect.poll(() => printCalls(page)).toBe(2);
+
+    await page.keyboard.press("Tab");
+    await expect(exportButton, "Tab from Print lands on Download").toBeFocused();
+    const [byEnter] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Enter")]);
+    expect(byEnter.suggestedFilename()).toBe("order-sheet-2026-11-05.xlsx");
+    await expect(page.getByTestId("export-success")).toBeVisible();
+    await exportButton.focus();
+    const [bySpace] = await Promise.all([page.waitForEvent("download"), page.keyboard.press("Space")]);
+    expect(bySpace.suggestedFilename()).toBe("order-sheet-2026-11-05.xlsx");
+    expect(api.requestsTo("POST", XLSX_PATH), "one request per press").toHaveLength(2);
+  });
+
+  test("after a successful download keyboard focus is back on the Download button (a disabled button drops focus while the file is made)", async ({ page }) => {
+    await openOrderSheet(page, { medications: buildMedications(), draft: THREE_ROWS });
+    await page.getByTestId("export-xlsx").focus();
+    await Promise.all([page.waitForEvent("download"), page.keyboard.press("Enter")]);
+    await expect(page.getByTestId("export-success")).toBeVisible();
+    await expect(page.getByTestId("export-xlsx")).toBeFocused();
+  });
+
+  test("after a failed download keyboard focus moves to the error message, Retry is the next Tab stop, and Enter on it recovers with focus back on Download", async ({ page }) => {
+    const api = await openOrderSheet(page, { medications: buildMedications(), draft: THREE_ROWS });
+    api.failNext({ method: "POST", path: XLSX_PATH, status: 503, body: { error: "Can’t reach the database." } });
+    await page.getByTestId("export-xlsx").focus();
+    await page.keyboard.press("Enter");
+    const alert = page.getByTestId("export-error");
+    await expect(alert).toBeVisible();
+    await expect(alert, "the message takes the keyboard focus, so it is read out and nothing is lost").toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(alert.getByRole("button", { name: "Retry" })).toBeFocused();
+    await Promise.all([page.waitForEvent("download"), page.keyboard.press("Enter")]);
+    await expect(page.getByTestId("export-success")).toBeVisible();
+    await expect(page.getByTestId("export-error")).toHaveCount(0);
+    await expect(page.getByTestId("export-xlsx"), "the Retry button is gone; focus is not lost to the page").toBeFocused();
+  });
+
+  test("dismissing the error message with the keyboard puts focus back on the Download button", async ({ page }) => {
+    const api = await openOrderSheet(page, { medications: buildMedications(), draft: THREE_ROWS });
+    api.failNext({ method: "POST", path: XLSX_PATH, status: 503, body: { error: "Can’t reach the database." } });
+    await page.getByTestId("export-xlsx").focus();
+    await page.keyboard.press("Enter");
+    const alert = page.getByTestId("export-error");
+    await expect(alert).toBeFocused();
+    await alert.getByRole("button", { name: "Dismiss" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("export-error")).toHaveCount(0);
+    await expect(page.getByTestId("export-xlsx")).toBeFocused();
   });
 });
 
@@ -1097,6 +1523,8 @@ test.describe("Side effects", () => {
       { id: 101, qty: "6", unit: "case" },
     ]);
     expect(Object.keys(body).sort()).toEqual(["date", "notes", "preparedBy", "rows", "showBarcode", "showOnHand", "title"]);
+    // only "Show on-hand" was ticked above: each flag says exactly what was chosen (swapping them would put stock where barcodes belong)
+    expect({ showOnHand: body.showOnHand, showBarcode: body.showBarcode }).toEqual({ showOnHand: true, showBarcode: false });
     expect(api.requests.filter((r) => /transactions|import|upload|categories/.test(r.path) && r.method !== "GET")).toEqual([]);
     expect(outside, "requests to any other site").toEqual([]);
     expect(problems.filter((p) => p.startsWith("[pageerror]"))).toEqual([]);
@@ -1124,14 +1552,16 @@ test.describe("Side effects", () => {
         })
       );
     });
-    await openOrderSheet(page, { medications: meds, draft: null });
+    const api = await openOrderSheet(page, { medications: meds, draft: null });
     const preview = await readPreview(page);
     expect(preview.rows.map((r) => r[0])).toEqual(["Acetaminophen 500 mg, tablets", "Ibuprofen 200 mg, tablets"]);
     expect(preview.rows[0][2], "the first entry wins").toBe("1");
-    if (PYTHON_OPENPYXL.available) {
-      const { file } = await downloadXlsx(page, "dedupe.xlsx");
-      expect(xlsxTable(inspectXlsx(file)).rows).toHaveLength(2);
-    }
+    const { file } = await downloadXlsx(page, "dedupe.xlsx");
+    // the export request carries one row per item, whatever the stored draft says
+    expect((api.requestsTo("POST", XLSX_PATH)[0].body as { rows: Array<{ id: number }> }).rows.map((r) => r.id)).toEqual([100, 101]);
+    // the rest needs python3 + openpyxl; without them the test is reported as skipped (never as passed)
+    test.skip(!PYTHON_OPENPYXL.available, PYTHON_OPENPYXL.reason);
+    expect(xlsxTable(inspectXlsx(file)).rows).toHaveLength(2);
   });
 });
 

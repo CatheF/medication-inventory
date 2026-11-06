@@ -9,26 +9,33 @@
 //   current UI : E2E_BASE_URL=http://127.0.0.1:3100 CHROMIUM_PATH=... npx playwright test tests/e2e/category-assignment-regression.spec.ts --reporter=list
 //   original UI: E2E_BASE_URL=http://127.0.0.1:3101 CHROMIUM_PATH=... npx playwright test tests/e2e/category-assignment-regression.spec.ts --reporter=list
 //
-// Verified result of the two runs (18 tests):
-//   current UI  : 18 passed.
-//   original UI : 7 failed, 11 passed. Failing: the five uuid tests that pick, change or create a category (or open the long
-//                 list), which all show `category_id: null` in the request, `null` in the database and no category after a
-//                 reload; the "pick" check (the dropdown snaps back to "no category" and the page prints "NaN"); the stale
-//                 stock overwrite; and the accepted-but-not-stored save, which the original answers by closing the form and
-//                 saying "Medication updated.". Passing on the original: the three uuid controls (a stock-only edit passes the
-//                 untouched uuid string straight through, so it never hits Number(); choosing "no category" really clears it)
-//                 and all eight bigint twins, because Number("3") is 3. That split is what pins the bug on the id type.
+// Verified result of the two runs (20 tests):
+//   current UI  : 20 passed.
+//   original UI : 9 failed, 11 passed. Failing: the five uuid tests that assign, change or create a category, keep the pick on
+//                 screen, or use the long searchable list (`category_id: null` in the request, `null` in the database and no
+//                 category after a reload; the dropdown snaps back to "no category" and the page prints "NaN"); the stale stock
+//                 overwrite; and the three failed-save tests (the original puts its messages in a plain div without role="alert",
+//                 its dropdown forgets the pick, and for a save that stored nothing it closes the form and says "Medication
+//                 updated."). Passing on the original: the three uuid controls (a stock-only edit passes the untouched uuid string
+//                 straight through, so it never hits Number(); choosing "no category" really clears it) and all eight bigint twins
+//                 (also with the filled-in fixture rows below), because Number("3") is 3. That split is what pins the bug on the id type.
 //
 // How a failure is made trustworthy: everything the test needs in order to *reach* the behavior (the page loaded, the item is
 // listed, the edit form opened, the form started on the item's real category, the save request was answered) is a hard
 // assertion, so a broken harness or a changed layout fails loudly as "could not get there". The outcomes the owner cares
 // about (what the save request carried, what the database holds, what the page shows after a reload) are SOFT assertions
 // with messages in plain words, so one failing run lists every symptom instead of stopping at the first. Assertions that
-// say something did NOT happen are only made after a settled state was observed, so they cannot pass before the page reacts.
+// say something did NOT happen are only made after a settled state was observed, so they cannot pass before the page reacts
+// (and, where the page could act later on a timer, after the page's clock was moved forward: see the accepted-but-not-stored test).
+//
+// Two more things that keep it honest. (1) The rows the tests edit have EVERY optional field filled in (notes, vendor URL, a unit
+// other than "units", a photo, a supplier number) and the whole row is compared after each save: on a plain fixture row, wiping
+// those fields is invisible. (2) When the page never shows the list because the app server itself is broken (the Next.js
+// development overlay, its "This page couldn't load" page), the test fails at once and says so, instead of reporting a missing row.
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { Category, Medication } from "@/lib/db";
 import { installMockApi, type MockApi } from "./helpers/mock-api";
-import { buildCategories, categoryId, type IdShape } from "../helpers/fixtures";
+import { buildCategories, buildMedications, categoryId, type IdShape } from "../helpers/fixtures";
 
 const SHAPES: readonly IdShape[] = ["uuid", "bigint"];
 
@@ -40,6 +47,43 @@ const NEW_ITEM_BARCODE = "0049000012345";
 
 const SAVE_PUT = /\/api\/medications\/\d+$/;
 const SAVE_POST = /\/api\/medications$/;
+
+/** What a page must not say after a save that did not succeed: the current build's "Saved. Category: ..." or the original's "Medication updated." */
+const SUCCESS_WORDING = /(^|\s)Saved\.|Medication (updated|added)\./;
+
+const PHOTO = `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#94a3b8"/></svg>')}`;
+
+/**
+ * The fixture items with EVERY optional field filled in: notes, vendor URL, a unit other than the default "units", a photo (and
+ * the supplier order number the fixtures already give the first one). A save that is about the category or the stock must leave
+ * all of them alone, and that can only be seen when they hold something: on a row where they are null or default, wiping them
+ * changes nothing a comparison could notice.
+ */
+const PAIN_ITEM_EXTRAS = {
+  notes: "Store in the locked cabinet",
+  vendor_url: "https://supplier.example.invalid/ibuprofen-200",
+  unit: "tablets",
+  photo_url: PHOTO,
+} as const;
+const LEGACY_ITEM_EXTRAS = {
+  notes: "Single-use covers for the oral thermometer",
+  vendor_url: "https://supplier.example.invalid/probe-covers",
+  unit: "boxes",
+  photo_url: PHOTO,
+} as const;
+
+function richMedications(shape: IdShape): Medication[] {
+  return buildMedications({ shape }).map((m): Medication => {
+    if (m.name === PAIN_ITEM) return { ...m, ...PAIN_ITEM_EXTRAS };
+    if (m.name === LEGACY_ITEM) return { ...m, ...LEGACY_ITEM_EXTRAS };
+    return m;
+  });
+}
+
+/** The mock database for a test: rich rows for the two items the tests edit. */
+function installRichMockApi(page: Page, shape: IdShape, extra: { categories?: Category[] } = {}): Promise<MockApi> {
+  return installMockApi(page, { shape, medications: richMedications(shape), ...extra });
+}
 
 /** Failed expectations are recorded and the test carries on, so a failing run reports every symptom. */
 const soft = expect.configure({ soft: true });
@@ -163,6 +207,17 @@ async function chooseCategory(page: Page, name: string): Promise<void> {
   await page.getByRole("option", { name, exact: true }).click();
 }
 
+/**
+ * With 11 or more categories the current page offers a searchable list (a text input with options) instead of a plain dropdown
+ * (SPEC.md section 2.10). The long-list test is only worth anything if it really drives that control, and chooseCategory would
+ * quietly fall back to a plain dropdown if the page stopped switching, so this is asserted, not just recorded. Soft, so a failing
+ * run still lists every other symptom.
+ */
+async function expectSearchableCategoryList(page: Page, categoryCount: number): Promise<void> {
+  const native = await isNativeSelect(categoryField(page));
+  soft(native, `with ${categoryCount} categories the Category field must be the searchable list (a text input with options), not a plain dropdown`).toBe(false);
+}
+
 /** Pick the "no category" entry ("— No category —" on the original page, "— Uncategorized —" on the current one). */
 async function chooseNoCategory(page: Page): Promise<void> {
   const field = categoryField(page);
@@ -180,12 +235,59 @@ async function chooseNoCategory(page: Page): Promise<void> {
 // ── Page flows ─────────────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Why the page cannot work, when it shows the app server's own failure instead of the app: the Next.js development overlay
+ * ("Build Error", "Runtime Error": somebody saved a file that does not compile) or the "This page couldn't load" crash page.
+ * Null when the page looks normal. Telling this apart from "the row never showed up" keeps a broken development server from
+ * being read as a category regression, and fails in a moment instead of after the 30 s wait.
+ */
+async function serverFailureOnPage(page: Page): Promise<string | null> {
+  try {
+    const overlay = page.locator("nextjs-portal").getByRole("dialog", { name: /error/i });
+    if ((await overlay.count()) > 0) {
+      const text = (await overlay.first().innerText()).replace(/\s+/g, " ").trim();
+      return `the Next.js error overlay is showing: ${text.slice(0, 300)}`;
+    }
+    const crash = page.getByRole("heading", { name: /This page couldn.t load|Application error/i });
+    if ((await crash.count()) > 0) return `the app's crash page is showing: "${(await crash.first().innerText()).trim()}"`;
+  } catch {
+    // The page is navigating or closing: nothing can be said about it right now.
+  }
+  return null;
+}
+
+/**
+ * Waits until the item's row is on the page. This is a polled condition (no sleep), and it gives up at once, with the reason,
+ * when the page turns out to be the app server's own failure page. The generous timeout covers a cold compile of /admin on the
+ * dev server.
+ */
+async function waitForRow(page: Page, itemName: string): Promise<void> {
+  const row = itemRow(page, itemName);
+  let observed = "the row is not there yet";
+  await expect
+    .poll(
+      async () => {
+        try {
+          if (await row.isVisible()) return (observed = "ready");
+        } catch {
+          // The page is navigating: look again.
+        }
+        const failure = await serverFailureOnPage(page);
+        return (observed = failure === null ? "the row is not there yet" : `server failure: ${failure}`);
+      },
+      { timeout: 30_000, intervals: [100, 250, 500], message: `the list row of "${itemName}" should show up on the page` }
+    )
+    .not.toBe("the row is not there yet");
+  if (observed !== "ready") {
+    throw new Error(`The page never reached the item list, and the cause is the app server, not the category feature (${observed})`);
+  }
+}
+
+/**
  * Waits for the item's row and checks that the locator found ONE row (one Edit button). Row-text assertions below are only
  * meaningful when the locator did not resolve to a bigger container that happens to hold other items' text too.
  */
 async function expectOneRowFor(page: Page, itemName: string): Promise<void> {
-  // The generous timeout covers a cold compile of /admin on the dev server.
-  await expect(itemRow(page, itemName)).toBeVisible({ timeout: 30_000 });
+  await waitForRow(page, itemName);
   await expect(
     itemRow(page, itemName).getByRole("button", { name: "Edit", exact: true }),
     `the row locator for "${itemName}" must resolve to a single list row, not to a container of several rows`
@@ -249,7 +351,18 @@ async function waitUntilSaveSettled(page: Page): Promise<void> {
   await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
 }
 
-/** The three things the owner cares about after a category was saved: the request, the database, the page after a reload. */
+/**
+ * Every field of the row except the ones the test changed on purpose. Compared as a whole row so that a field nobody looked at
+ * (notes, vendor URL, unit, photo, supplier order number, threshold, barcode, name) cannot be wiped or rewritten unnoticed.
+ */
+function expectOnlyTheseChanged(mock: MockApi, itemName: string, before: Medication, changed: ReadonlyArray<keyof Medication>, label: string): void {
+  const restored = Object.fromEntries(changed.map((key) => [key, before[key]]));
+  // `updated_at` moves with every save, so it is never part of the comparison.
+  const expected: Medication = { ...dbRow(mock, itemName), ...restored, updated_at: before.updated_at };
+  soft(expected, `database: ${label}: nothing but ${changed.join(" and ")} changed (name, barcode, unit, threshold, notes, vendor URL, photo, supplier number, ...)`).toEqual(before);
+}
+
+/** The things the owner cares about after a category was saved: the request, the database, the page right away and after a reload. */
 async function expectCategorySaved(args: {
   page: Page;
   mock: MockApi;
@@ -270,7 +383,13 @@ async function expectCategorySaved(args: {
   // (2) what the database holds
   soft(dbRow(mock, itemName).category_id, `database: "${itemName}" must hold the category "${categoryName}" after saving`).toBe(category.id);
 
-  // (3) what the page shows after a reload, in the list and when the item is opened again
+  // (3) what the page shows right after saving, before any reload (the list must not wait for a refresh to show the new category)
+  await soft(itemRow(page, itemName), `right after saving (no reload) the list row of "${itemName}" shows the category "${categoryName}"`).toContainText(
+    categoryName,
+    SETTLED
+  );
+
+  // (4) what the page shows after a reload, in the list and when the item is opened again
   await reloadAdmin(page, itemName);
   await soft(itemRow(page, itemName), `after a reload the list row of "${itemName}" shows the category "${categoryName}"`).toContainText(
     categoryName,
@@ -292,7 +411,8 @@ for (const shape of SHAPES) {
   // what makes the uuid failures specific to the id type and not a flaw of the test.
   test.describe(`category assignment with ${shape} category ids`, () => {
     test("picking a category for an item that has none sends the category id, stores it, and still shows it after a reload", async ({ page }) => {
-      const mock = await installMockApi(page, { shape });
+      const mock = await installRichMockApi(page, shape);
+      const before = { ...dbRow(mock, LEGACY_ITEM) };
       await openAdmin(page, LEGACY_ITEM);
       await openEdit(page, LEGACY_ITEM);
       await expectFormStartsOn(page, NONE);
@@ -300,11 +420,13 @@ for (const shape of SHAPES) {
       await chooseCategory(page, "First Aid");
       await save(page, "PUT");
 
+      expectOnlyTheseChanged(mock, LEGACY_ITEM, before, ["category_id"], "picking a category");
       await expectCategorySaved({ page, mock, shape, method: "PUT", itemName: LEGACY_ITEM, categoryName: "First Aid" });
     });
 
     test("changing the category of a categorized item replaces it and does not leave the item without one", async ({ page }) => {
-      const mock = await installMockApi(page, { shape });
+      const mock = await installRichMockApi(page, shape);
+      const before = { ...dbRow(mock, PAIN_ITEM) };
       await openAdmin(page, PAIN_ITEM);
       await openEdit(page, PAIN_ITEM);
       await expectFormStartsOn(page, "Pain & Fever");
@@ -312,13 +434,19 @@ for (const shape of SHAPES) {
       await chooseCategory(page, "Antibiotics");
       await save(page, "PUT");
 
+      expectOnlyTheseChanged(mock, PAIN_ITEM, before, ["category_id"], "changing the category");
       await expectCategorySaved({ page, mock, shape, method: "PUT", itemName: PAIN_ITEM, categoryName: "Antibiotics" });
       await soft(itemRow(page, PAIN_ITEM), "the item no longer shows its old category").not.toContainText("Pain & Fever", SETTLED);
     });
 
     test("editing only the stock of an item that already has a category keeps the category and every other field", async ({ page }) => {
-      const mock = await installMockApi(page, { shape });
+      // The item has notes, a vendor URL, a unit, a photo and a supplier number, so losing any of them shows in the comparison below.
+      const mock = await installRichMockApi(page, shape);
       const before = { ...dbRow(mock, PAIN_ITEM) };
+      expect(
+        [before.notes, before.vendor_url, before.photo_url, before.supplier_order_number, before.unit],
+        "scenario check: the item starts with every optional field filled in"
+      ).toEqual([PAIN_ITEM_EXTRAS.notes, PAIN_ITEM_EXTRAS.vendor_url, PAIN_ITEM_EXTRAS.photo_url, "0092", PAIN_ITEM_EXTRAS.unit]);
       const painCategory = categoryNamed(mock, "Pain & Fever");
       await openAdmin(page, PAIN_ITEM);
       await openEdit(page, PAIN_ITEM);
@@ -331,10 +459,7 @@ for (const shape of SHAPES) {
       const after = dbRow(mock, PAIN_ITEM);
       soft(after.stock, "database: the new stock was saved").toBe(77);
       soft(after.category_id, "database: the category survived a stock-only edit").toBe(painCategory.id);
-      soft(
-        { ...after, stock: before.stock, updated_at: before.updated_at },
-        "database: nothing except the stock changed (name, barcode, unit, threshold, notes, supplier number, category)"
-      ).toEqual(before);
+      expectOnlyTheseChanged(mock, PAIN_ITEM, before, ["stock"], "a stock-only edit");
 
       await reloadAdmin(page, PAIN_ITEM);
       await soft(itemRow(page, PAIN_ITEM), "after a reload the list row still shows the category").toContainText("Pain & Fever", SETTLED);
@@ -345,7 +470,7 @@ for (const shape of SHAPES) {
     });
 
     test("editing only the stock of a legacy item without a category saves it, keeps it uncategorized, and it stays editable", async ({ page }) => {
-      const mock = await installMockApi(page, { shape });
+      const mock = await installRichMockApi(page, shape);
       const before = { ...dbRow(mock, LEGACY_ITEM) };
       await openAdmin(page, LEGACY_ITEM);
       await openEdit(page, LEGACY_ITEM);
@@ -358,7 +483,7 @@ for (const shape of SHAPES) {
       const after = dbRow(mock, LEGACY_ITEM);
       soft(after.stock, "database: the new stock was saved").toBe(150);
       soft(after.category_id, "database: the legacy item is still uncategorized (null), not a broken value").toBeNull();
-      soft({ ...after, stock: before.stock, updated_at: before.updated_at }, "database: nothing except the stock changed").toEqual(before);
+      expectOnlyTheseChanged(mock, LEGACY_ITEM, before, ["stock"], "a stock-only edit of a legacy item");
 
       await reloadAdmin(page, LEGACY_ITEM);
       await openEdit(page, LEGACY_ITEM);
@@ -370,7 +495,7 @@ for (const shape of SHAPES) {
     test("choosing the empty category entry clears the category, and only the category (the control that proves the test is not blind)", async ({
       page,
     }) => {
-      const mock = await installMockApi(page, { shape });
+      const mock = await installRichMockApi(page, shape);
       const before = { ...dbRow(mock, PAIN_ITEM) };
       await openAdmin(page, PAIN_ITEM);
       await openEdit(page, PAIN_ITEM);
@@ -381,9 +506,7 @@ for (const shape of SHAPES) {
 
       const after = dbRow(mock, PAIN_ITEM);
       soft(after.category_id, "database: the user asked for no category, so the item holds none").toBeNull();
-      soft({ ...after, category_id: before.category_id, updated_at: before.updated_at }, "database: nothing except the category changed").toEqual(
-        before
-      );
+      expectOnlyTheseChanged(mock, PAIN_ITEM, before, ["category_id"], "clearing the category");
 
       await reloadAdmin(page, PAIN_ITEM);
       await openEdit(page, PAIN_ITEM);
@@ -432,14 +555,19 @@ for (const shape of SHAPES) {
     test("with many categories (a long list) picking one still sends its id, stores it, and shows it after a reload", async ({ page }) => {
       const categories = manyCategories(shape);
       expect(categories.length, "the long-list scenario needs 11 or more categories").toBeGreaterThanOrEqual(11);
-      const mock = await installMockApi(page, { shape, categories });
+      const mock = await installRichMockApi(page, shape, { categories });
+      const before = { ...dbRow(mock, LEGACY_ITEM) };
       await openAdmin(page, LEGACY_ITEM);
       await openEdit(page, LEGACY_ITEM);
       await expectFormStartsOn(page, NONE);
+      // The control follows from the NUMBER of categories, not from the id shape: the uuid run asserts it, and the bigint twin stays a
+      // clean control for the original page (which has no searchable list and still saves a bigint id correctly).
+      if (shape === "uuid") await expectSearchableCategoryList(page, categories.length);
 
       await chooseCategory(page, "Respiratory");
       await save(page, "PUT");
 
+      expectOnlyTheseChanged(mock, LEGACY_ITEM, before, ["category_id"], "picking a category from the long list");
       await expectCategorySaved({ page, mock, shape, method: "PUT", itemName: LEGACY_ITEM, categoryName: "Respiratory" });
     });
   });
@@ -447,7 +575,8 @@ for (const shape of SHAPES) {
 
 test.describe("editing one field does not overwrite the others", () => {
   test("saving a note does not put back a stock count that changed while the form was open", async ({ page }) => {
-    const mock = await installMockApi(page, { shape: "uuid" });
+    const mock = await installRichMockApi(page, "uuid");
+    const before = { ...dbRow(mock, PAIN_ITEM) };
     const painCategory = categoryNamed(mock, "Pain & Fever");
     await openAdmin(page, PAIN_ITEM);
     await openEdit(page, PAIN_ITEM);
@@ -462,14 +591,89 @@ test.describe("editing one field does not overwrite the others", () => {
     soft(after.notes, "database: the note was saved").toBe("Keep below 25 C");
     soft(after.stock, "database: the stock must stay at 10, the number set in the meantime, not go back to the 18 the open form was holding").toBe(10);
     soft(after.category_id, "database: the category survived a notes-only edit").toBe(painCategory.id);
+    soft(
+      after,
+      "database: the row is the old one with the new note and the stock set in the meantime, nothing else (vendor URL, unit, photo, supplier number, ...)"
+    ).toEqual({ ...before, notes: "Keep below 25 C", stock: 10, updated_at: after.updated_at });
   });
 });
 
-test.describe("a save the server accepted but did not store", () => {
-  // The original page answered such a save with "Medication updated." and closed the form, which is why the owner lost trust:
-  // everything looked fine and the category was gone. Here the server answers 200 with the row exactly as it still is.
-  test("the page does not treat the save as finished: the form stays open with the user's changes", async ({ page }) => {
-    const mock = await installMockApi(page, { shape: "uuid" });
+// What the owner lost trust over: a save that did not work looked as if it had. Three ways a save can fail to store the work, and
+// in all three the page must (a) say so where it can be heard, (b) keep the form open with what the user chose and typed, (c) not
+// use the words of a successful save. These are read only after the page finished reacting to the answer (waitUntilSaveSettled).
+test.describe("a save that did not succeed", () => {
+  const SERVER_ERROR = "Unexpected database error.";
+  const TYPED_NOTE = "Replace the box when it is half empty";
+
+  /** The user's work after a failed save: the form is still open with the pick and the note, and nothing says "Saved". */
+  async function expectWorkKept(page: Page): Promise<void> {
+    await soft(itemForm(page), "the form stays open: the save did not succeed, so the user's work must not be thrown away").toBeVisible(SETTLED);
+    await soft
+      .poll(() => shownCategory(categoryField(page)), { message: 'the form still shows the category the user picked ("First Aid")', ...SETTLED })
+      .toBe("First Aid");
+    await soft(controlAfterLabel(page, /^Notes/, "textarea"), "the form still holds the note the user typed").toHaveValue(TYPED_NOTE, SETTLED);
+    await soft(page.locator("body"), "the page must not use the words of a successful save").not.toContainText(SUCCESS_WORDING, {
+      ...SETTLED,
+      useInnerText: true,
+    });
+  }
+
+  /** Opens the legacy item, picks a category and types a note: the work that a failed save must not lose. */
+  async function startEditing(page: Page, mock: MockApi): Promise<Medication> {
+    const before = { ...dbRow(mock, LEGACY_ITEM) };
+    await openAdmin(page, LEGACY_ITEM);
+    await openEdit(page, LEGACY_ITEM);
+    await expectFormStartsOn(page, NONE);
+    await chooseCategory(page, "First Aid");
+    await controlAfterLabel(page, /^Notes/, "textarea").fill(TYPED_NOTE);
+    return before;
+  }
+
+  test("a save the server rejects (HTTP 500) shows its message as an alert, keeps the form open with the user's work, and stores nothing", async ({ page }) => {
+    const mock = await installRichMockApi(page, "uuid");
+    mock.failNext({ method: "PUT", path: SAVE_PUT, status: 500, body: { error: SERVER_ERROR } });
+    const before = await startEditing(page, mock);
+
+    expect(await pressSave(page, "PUT"), "scenario check: the server answered the save with HTTP 500").toBe(500);
+    await waitUntilSaveSettled(page);
+
+    await soft(page.locator("body"), `the server's message "${SERVER_ERROR}" is shown on the page`).toContainText(SERVER_ERROR, { ...SETTLED, useInnerText: true });
+    await soft(
+      page.getByRole("alert").filter({ hasText: SERVER_ERROR }),
+      `the server's message is exposed as an alert (role="alert"), so it is announced and not only printed`
+    ).toBeVisible(SETTLED);
+    await expectWorkKept(page);
+    soft(dbRow(mock, LEGACY_ITEM), "database: a failed save changed nothing").toEqual(before);
+  });
+
+  test("a save that cannot reach the server shows an alert that says so, keeps the form open with the user's work, and stores nothing", async ({ page }) => {
+    const mock = await installRichMockApi(page, "uuid");
+    mock.failNext({ method: "PUT", path: SAVE_PUT, networkError: true });
+    const before = await startEditing(page, mock);
+
+    // A network failure has no HTTP answer to wait for: wait for the request to fail instead.
+    const failed = page.waitForEvent("requestfailed", (r) => r.method() === "PUT" && SAVE_PUT.test(new URL(r.url()).pathname));
+    await itemForm(page).locator('button[type="submit"]').click();
+    await failed;
+    await waitUntilSaveSettled(page);
+
+    await soft(
+      page.getByRole("alert").filter({ hasText: /network|connect|reach|offline|internet/i }),
+      'an alert says that the server could not be reached (role="alert", mentioning the connection)'
+    ).toBeVisible(SETTLED);
+    await expectWorkKept(page);
+    soft(dbRow(mock, LEGACY_ITEM), "database: a save that never arrived changed nothing").toEqual(before);
+  });
+
+  // The original page answered a save that was accepted but did not store the category with "Medication updated." and closed the
+  // form, which is why the owner lost trust: everything looked fine and the category was gone. Here the server answers 200 with
+  // the row exactly as it still is.
+  test("a save the server accepted (HTTP 200) without storing the category warns about it, keeps the form open with the user's work, and does not say it saved", async ({ page }) => {
+    // A page could also close the form a moment AFTER it warned (a timer), and a check made at one instant cannot see that. The page's
+    // clock is therefore installed (time still flows normally) and moved forward below, which fires every timer the page set while
+    // it was handling the answer, without waiting for real time.
+    await page.clock.install();
+    const mock = await installRichMockApi(page, "uuid");
     await page.route(SAVE_PUT, async (route) => {
       if (route.request().method() !== "PUT") {
         await route.fallback();
@@ -477,19 +681,23 @@ test.describe("a save the server accepted but did not store", () => {
       }
       await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(dbRow(mock, LEGACY_ITEM)) });
     });
+    const before = await startEditing(page, mock);
 
-    await openAdmin(page, LEGACY_ITEM);
-    await openEdit(page, LEGACY_ITEM);
-    await expectFormStartsOn(page, NONE);
-    await chooseCategory(page, "First Aid");
-
-    expect(await pressSave(page, "PUT"), "the server accepts the save (HTTP 200) without storing the category").toBe(200);
+    expect(await pressSave(page, "PUT"), "scenario check: the server accepts the save (HTTP 200) without storing the category").toBe(200);
     await waitUntilSaveSettled(page);
 
-    expect(dbRow(mock, LEGACY_ITEM).category_id, "scenario check: the database really holds no category").toBeNull();
+    soft(dbRow(mock, LEGACY_ITEM), "scenario check: the database really changed nothing").toEqual(before);
+    // Positive evidence first: an alert that is about the category is on the page. It cannot be there "too early" the way an
+    // absent form or an absent success message can.
     await soft(
-      itemForm(page),
-      "the form stays open: the category the user picked was not stored, so the page must not act as if the save was complete"
+      page.getByRole("alert").filter({ hasText: /category/i }),
+      'an alert (role="alert") tells the user that the category was not stored'
+    ).toBeVisible(SETTLED);
+    await page.clock.runFor(5_000);
+    await expectWorkKept(page);
+    await soft(
+      page.getByRole("alert").filter({ hasText: /category/i }),
+      "the warning is still there after the page's timers have run (it must not clear itself or hand over to a success message)"
     ).toBeVisible(SETTLED);
   });
 });

@@ -6,17 +6,30 @@
 // starts from fresh synthetic data (tests/helpers/fixtures.ts) and does not depend on any other test.
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import type { Category, Medication } from "@/lib/db";
-import { CATEGORY_NAMES, TRICKY_SUPPLIER_NUMBERS, buildCategories, buildMedications, categoryId, fakeUuid, type IdShape } from "../helpers/fixtures";
+import {
+  CATEGORY_NAMES,
+  TRICKY_SUPPLIER_NUMBERS,
+  buildCategories,
+  buildManyMedications,
+  buildMedications,
+  categoryId,
+  fakeUuid,
+  type IdShape,
+} from "../helpers/fixtures";
 import { installMockApi } from "./helpers/mock-api";
 import {
   POST_ITEM,
   PUT_ITEM,
   SLOW_MS,
+  adminRowIdsInOrder,
   categoryChoices,
   chooseCategory,
+  chosenAdminFilter,
   chosenCategory,
   dispenseFromAnotherScreen,
   expectNoHorizontalScroll,
+  expectOrderSheetUntouched,
+  expectReadableInFull,
   fillItemForm,
   filterAdminByCategory,
   gotoAdmin,
@@ -51,6 +64,12 @@ const IBUPROFEN = "Ibuprofen 200 mg"; // Pain & Fever, supplier 0092, stock 18
 const ASPIRIN = "Aspirin 81 mg"; // Pain & Fever, no supplier order number
 const AMOXICILLIN = "Amoxicillin 500 mg"; // Antibiotics, supplier AMX-500
 const THERMOMETER_COVERS = "Thermometer probe covers"; // legacy item: no category, no supplier number
+
+/** Tiny inline pictures (data URLs load without a network): one for an item's photo, one that "another screen" replaces it with. */
+const svgPhoto = (fill: string): string =>
+  `data:image/svg+xml;utf8,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="${fill}"/></svg>`)}`;
+const PHOTO_ORIGINAL = svgPhoto("#94a3b8");
+const PHOTO_ELSEWHERE = svgPhoto("#0ea5e9");
 
 function seedItem(namePrefix: string, shape: IdShape = "uuid"): Medication {
   const found = buildMedications({ shape }).find((m) => m.name?.startsWith(namePrefix));
@@ -87,8 +106,11 @@ test.describe("Admin: the category survives create and edit", () => {
         barcode: "0099001122",
         supplier: "00417-B",
         category: ANTIBIOTICS,
+        unit: "bottles",
         stock: "7",
         threshold: "3",
+        vendorUrl: "https://supplier.example/syrup",
+        notes: "Shake well before use",
       });
 
       // What the person is told
@@ -104,11 +126,25 @@ test.describe("Admin: the category survives create and edit", () => {
       expect(body.supplier_order_number).toBe("00417-B");
       expect(body.barcode).toBe("0099001122");
 
-      // What was stored
+      // What was stored: exactly what was typed. Not a different stock (a stray stock movement would change it), nothing dropped.
       const created = storedByBarcode(api, "0099001122");
-      expect(created.category_id).toBe(categoryId(2, shape));
-      expect(created.supplier_order_number).toBe("00417-B");
-      expect(created.name).toBe("Test syrup, 100 mL");
+      expect(created).toMatchObject({
+        name: "Test syrup, 100 mL",
+        barcode: "0099001122",
+        supplier_order_number: "00417-B",
+        category_id: categoryId(2, shape),
+        unit: "bottles",
+        stock: 7,
+        threshold: 3,
+        vendor_url: "https://supplier.example/syrup",
+        notes: "Shake well before use",
+        photo_url: null,
+        is_unnamed: false,
+      });
+
+      // Creating an item is ONE write: no stock movement, no upload, no export, and nothing lands on the order sheet by itself
+      expect(writes(api)).toEqual(["POST /api/medications"]);
+      await expectOrderSheetUntouched(page, "after creating an item");
 
       // What the list shows
       await expect(page.getByTestId(`admin-row-${created.id}`)).toContainText("Test syrup, 100 mL");
@@ -121,8 +157,10 @@ test.describe("Admin: the category survives create and edit", () => {
 
     test(`a category picked when creating an item is still selected after a reload and after reopening the item (${shape} ids)`, async ({ page }) => {
       const api = await openAdmin(page, { shape });
-      await createItem(page, { name: "Reload check item", barcode: "0099001123", supplier: "00417-B", category: ANTIBIOTICS });
+      await createItem(page, { name: "Reload check item", barcode: "0099001123", supplier: "00417-B", category: ANTIBIOTICS, stock: "5", threshold: "2" });
       const created = storedByBarcode(api, "0099001123");
+      expect(created).toMatchObject({ name: "Reload check item", supplier_order_number: "00417-B", category_id: categoryId(2, shape), stock: 5, threshold: 2 });
+      expect(writes(api)).toEqual(["POST /api/medications"]);
 
       await reloadAdmin(page);
       await expect(page.getByTestId(`admin-category-${created.id}`)).toContainText("Antibiotics");
@@ -150,6 +188,8 @@ test.describe("Admin: the category survives create and edit", () => {
       expect(stored(api, item.id).category_id).toBe(categoryId(2, shape));
       await expect(page.getByTestId(`admin-category-${item.id}`)).toContainText("Antibiotics");
       await expect(page.getByTestId(`admin-category-${item.id}`)).not.toContainText(PAIN_AND_FEVER);
+      expect(writes(api)).toEqual([`PUT /api/medications/${item.id}`]);
+      await expectOrderSheetUntouched(page, "after changing a category");
 
       await reloadAdmin(page);
       await openEditForm(page, item.id);
@@ -161,10 +201,13 @@ test.describe("Admin: the category survives create and edit", () => {
     const item = seedItem(IBUPROFEN);
     const api = await openAdmin(page, {
       medications: buildMedications().map((m) =>
-        m.id === item.id ? { ...m, notes: "Keep in the blue cabinet", vendor_url: "https://supplier.example/ibuprofen", unit: "bottles" } : m
+        m.id === item.id
+          ? { ...m, notes: "Keep in the blue cabinet", vendor_url: "https://supplier.example/ibuprofen", unit: "bottles", photo_url: PHOTO_ORIGINAL }
+          : m
       ),
     });
     const before = { ...stored(api, item.id) };
+    expect(before.photo_url).toBe(PHOTO_ORIGINAL);
 
     await openEditForm(page, item.id);
     await fillItemForm(page, { name: "Ibuprofen 200 mg, tablets (store brand)" });
@@ -181,6 +224,7 @@ test.describe("Admin: the category survives create and edit", () => {
     expect("supplier_order_number" in lastBody(api, "PUT", PUT_ITEM(item.id))).toBe(false);
     // The save changed this one item and nothing else: no stock movement, no export, no upload.
     expect(writes(api)).toEqual([`PUT /api/medications/${item.id}`]);
+    await expectOrderSheetUntouched(page, "after an edit");
   });
 
   test("values that changed on another screen while the form was open are not overwritten by an unrelated edit", async ({ page }) => {
@@ -204,6 +248,89 @@ test.describe("Admin: the category survives create and edit", () => {
     expect(after.category_id).toBe(categoryId(0));
   });
 
+  // TASK 1: editing one field must not overwrite the item's other data. Each field is edited ALONE on a form that was opened
+  // BEFORE another screen changed every other field: only the edited field may differ from what the database held at that moment.
+  // (The category is left out of "changed elsewhere" on purpose: the page always sends the form's category, SPEC 3.2.)
+  const CHANGED_ELSEWHERE = {
+    name: "Ibuprofen 200 mg (renamed on another screen)",
+    barcode: "0066778899",
+    unit: "strips",
+    threshold: 33,
+    vendor_url: "https://supplier.example/changed-elsewhere",
+    notes: "Written on another screen",
+    supplier_order_number: "ZZ-7",
+    photo_url: PHOTO_ELSEWHERE,
+  } satisfies Partial<Medication>;
+
+  const SINGLE_FIELD_EDITS: ReadonlyArray<{ title: string; typed: Parameters<typeof fillItemForm>[1]; changes: Partial<Medication> }> = [
+    { title: "name", typed: { name: "Typed name" }, changes: { name: "Typed name" } },
+    { title: "barcode", typed: { barcode: "0044556677" }, changes: { barcode: "0044556677" } },
+    { title: "unit", typed: { unit: "boxes" }, changes: { unit: "boxes" } },
+    { title: "low-stock threshold", typed: { threshold: "45" }, changes: { threshold: 45 } },
+    { title: "vendor URL", typed: { vendorUrl: "https://supplier.example/typed" }, changes: { vendor_url: "https://supplier.example/typed" } },
+    { title: "notes", typed: { notes: "Typed note" }, changes: { notes: "Typed note" } },
+    { title: "supplier order number", typed: { supplier: "TYPED-1" }, changes: { supplier_order_number: "TYPED-1" } },
+    { title: "stock", typed: { stock: "77" }, changes: { stock: 77 } },
+    { title: "category", typed: { category: ANTIBIOTICS }, changes: { category_id: categoryId(2) } },
+  ];
+
+  for (const edit of SINGLE_FIELD_EDITS) {
+    test(`editing only the ${edit.title} keeps every other field as it is now, including what another screen changed while the form was open`, async ({ page }) => {
+      const item = seedItem(IBUPROFEN);
+      const api = await openAdmin(page, {
+        medications: buildMedications().map((m) =>
+          m.id === item.id
+            ? { ...m, photo_url: PHOTO_ORIGINAL, vendor_url: "https://supplier.example/ibuprofen", notes: "Keep in the blue cabinet", unit: "bottles" }
+            : m
+        ),
+      });
+      await openEditForm(page, item.id); // the form now holds the original values
+
+      // Another screen changes everything except what the person is about to edit (stock through a real dispense)
+      const edited = Object.keys(edit.changes);
+      for (const [key, value] of Object.entries(CHANGED_ELSEWHERE)) {
+        if (!edited.includes(key)) Object.assign(stored(api, item.id), { [key]: value });
+      }
+      const dispensedElsewhere = !edited.includes("stock");
+      if (dispensedElsewhere) expect(await dispenseFromAnotherScreen(page, item.id, 7)).toBe(201);
+      const elsewhere = { ...stored(api, item.id) };
+      expect(elsewhere.stock).toBe(dispensedElsewhere ? 11 : 18);
+
+      await fillItemForm(page, edit.typed);
+      await saveItem(page);
+      await expect(page.getByTestId("admin-success")).toBeVisible();
+
+      // The database holds what another screen left there, plus the one thing that was edited. Nothing else moved.
+      expect({ ...stored(api, item.id), updated_at: "" }).toEqual({ ...elsewhere, ...edit.changes, is_unnamed: false, updated_at: "" });
+      expect(writes(api)).toEqual([...(dispensedElsewhere ? ["POST /api/transactions"] : []), `PUT /api/medications/${item.id}`]);
+      await expectOrderSheetUntouched(page, `after editing only the ${edit.title}`);
+    });
+  }
+
+  test("a new item saved without choosing a category is stored without one: the form starts on Uncategorized and remembers nothing from earlier items", async ({ page }) => {
+    const api = await openAdmin(page);
+    await openNewItemForm(page);
+    expect(await chosenCategory(page), "nothing is pre-selected on the very first open").toBe(UNCATEGORIZED);
+
+    await fillItemForm(page, { name: "Plain gauze roll", barcode: "0099001140" });
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized · Supplier order no.: Not set");
+    expect(lastBody(api, "POST", POST_ITEM).category_id).toBeNull(); // an explicit "no category", not a guess
+    const plain = storedByBarcode(api, "0099001140");
+    expect(plain.category_id).toBeNull();
+    await expect(page.getByTestId(`admin-category-${plain.id}`)).toContainText("Uncategorized");
+
+    // An item that DOES get a category does not make the next new-item form pick that category as well
+    await createItem(page, { name: "Plain syrup", barcode: "0099001141", category: ANTIBIOTICS });
+    expect(storedByBarcode(api, "0099001141").category_id).toBe(categoryId(2));
+    await openNewItemForm(page);
+    expect(await chosenCategory(page)).toBe(UNCATEGORIZED);
+    await fillItemForm(page, { name: "Plain tape", barcode: "0099001142" });
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized");
+    expect(storedByBarcode(api, "0099001142").category_id).toBeNull();
+  });
+
   test("an item without a category (legacy) is listed, opens as Uncategorized and can be edited without gaining or losing a category", async ({ page }) => {
     const item = seedItem(THERMOMETER_COVERS);
     expect(item.category_id).toBeNull();
@@ -223,6 +350,7 @@ test.describe("Admin: the category survives create and edit", () => {
     expect(stored(api, item.id).notes).toBe("Fits the standard probe.");
     await expect(page.getByTestId(`admin-category-${item.id}`)).toContainText("Uncategorized");
     await expect(page.locator("body")).not.toContainText("NaN");
+    expect(writes(api)).toEqual([`PUT /api/medications/${item.id}`]);
   });
 
   test("choosing Uncategorized saves an explicit 'no category' that survives a reload", async ({ page }) => {
@@ -237,6 +365,7 @@ test.describe("Admin: the category survives create and edit", () => {
     await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized");
     expect(lastBody(api, "PUT", PUT_ITEM(item.id)).category_id).toBeNull();
     expect(stored(api, item.id).category_id).toBeNull();
+    expect(writes(api)).toEqual([`PUT /api/medications/${item.id}`]);
 
     await reloadAdmin(page);
     await expect(page.getByTestId(`admin-category-${item.id}`)).toContainText("Uncategorized");
@@ -262,7 +391,7 @@ test.describe("Admin: the category survives create and edit", () => {
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Admin: the supplier order number", () => {
-  for (const code of ["00417-B", "0092", "AX-1182/4"]) {
+  for (const code of ["00417-B", "0092", "AX-1182/4", "Ab-12c/9"]) {
     test(`the supplier order number ${code} comes back exactly as typed after saving and reloading`, async ({ page }) => {
       const item = seedItem(ASPIRIN); // starts without a supplier order number
       expect(item.supplier_order_number).toBeNull();
@@ -286,11 +415,15 @@ test.describe("Admin: the supplier order number", () => {
     });
   }
 
-  test("codes that spreadsheets mangle (zeros, 1E5, dates, formulas, 20 digits, 64 characters) are kept exactly", async ({ page }) => {
+  test("codes that spreadsheets and text tools mangle (zeros, 1E5, dates, formulas, 20 digits, mixed case, 64 characters) are kept exactly", async ({ page }) => {
     const longest = `MVI-${"0".repeat(60)}`; // exactly 64 characters, the largest code the field takes
     expect(longest).toHaveLength(64);
-    const codes = [...TRICKY_SUPPLIER_NUMBERS, longest];
-    const items = buildMedications().slice(0, codes.length);
+    const mixedCase = ["Ab-12c/9", "sku-Ab-7x"]; // lower and upper case letters side by side: case-folding either way changes them
+    const codes = [...TRICKY_SUPPLIER_NUMBERS, ...mixedCase, longest];
+    // Items that hold none of these codes yet, so every round really changes the supplier number (a round that re-typed the
+    // value an item already had would send nothing and prove nothing).
+    const items = buildMedications().filter((m) => !codes.includes(m.supplier_order_number ?? ""));
+    expect(items.length).toBeGreaterThanOrEqual(codes.length);
     const api = await openAdmin(page);
 
     for (const [index, code] of codes.entries()) {
@@ -298,6 +431,7 @@ test.describe("Admin: the supplier order number", () => {
       await fillItemForm(page, { supplier: code });
       await saveItem(page);
       await expect(page.getByTestId("admin-success")).toBeVisible();
+      expect(lastBody(api, "PUT", PUT_ITEM(items[index].id)).supplier_order_number, `sent code for "${code}"`).toBe(code);
       expect(stored(api, items[index].id).supplier_order_number, `stored code for "${code}"`).toBe(code);
     }
 
@@ -357,8 +491,10 @@ test.describe("Admin: the supplier order number", () => {
     await createItem(page, { name: "Nitrile gloves XL [GLV-XL-99]", barcode: "0098765432" });
     const created = storedByBarcode(api, "0098765432");
     expect(created.supplier_order_number).toBeNull();
+    expect(created.category_id).toBeNull(); // no category was chosen and none was invented
     expect(created.name).toBe("Nitrile gloves XL [GLV-XL-99]");
     expect("supplier_order_number" in lastBody(api, "POST", POST_ITEM)).toBe(false);
+    expect(writes(api)).toEqual(["POST /api/medications"]);
     await expect(page.getByTestId(`admin-supplier-${created.id}`).locator("dd")).toHaveText("Not set");
     await expect(page.getByTestId("admin-success")).toContainText("Supplier order no.: Not set");
 
@@ -369,6 +505,8 @@ test.describe("Admin: the supplier order number", () => {
     await expect(page.getByTestId("admin-success")).toBeVisible();
     expect(stored(api, created.id).name).toBe("Nitrile gloves XL [GLV-XL-99]");
     expect(stored(api, created.id).supplier_order_number).toBeNull();
+    expect(writes(api)).toEqual(["POST /api/medications", `PUT /api/medications/${created.id}`]);
+    await expectOrderSheetUntouched(page, "after creating and editing an item");
   });
 
   test("barcode and supplier order number are two labelled fields with their own help text, and their values never mix", async ({ page }) => {
@@ -487,6 +625,10 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Antibiotics · Supplier order no.: 00417-B");
     expect(api.medications.filter((m) => m.barcode === "0099001125")).toHaveLength(1);
     expect(api.medications).toHaveLength(before + 1);
+    // Nothing was typed in the number fields, so the stock stays 0: a stray stock movement would show up here.
+    expect(storedByBarcode(api, "0099001125")).toMatchObject({ name: "Create retry item", supplier_order_number: "00417-B", category_id: categoryId(2), stock: 0 });
+    expect(writes(api)).toEqual(["POST /api/medications", "POST /api/medications"]); // the refused try and the one that worked: nothing else
+    await expectOrderSheetUntouched(page, "after a create that was refused once");
   });
 
   test("a save that cannot reach the server says so, keeps what was typed and never shows Saved", async ({ page }) => {
@@ -542,6 +684,7 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await saveItem(page);
     await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Uncategorized · Supplier order no.: Not set");
     expect(storedByBarcode(api, "0099001126").category_id).toBeNull();
+    expect(writes(api)).toEqual(["POST /api/categories", "POST /api/medications"]); // the refused category, then the item
   });
 
   test("while the category list cannot be read, editing another field keeps the item's category", async ({ page }) => {
@@ -631,6 +774,7 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await expect(page.getByTestId("admin-error")).toContainText("The item was saved, but the category was not stored.");
     expect(api.requestsTo("POST", POST_ITEM)).toHaveLength(1);
     expect(api.medications.filter((m) => m.barcode === "0099001127")).toHaveLength(1);
+    expect(writes(api)).toEqual(["POST /api/medications", `PUT /api/medications/${storedByBarcode(api, "0099001127").id}`]);
   });
 
   test("before the database migration, saving without touching the supplier field works and entering one shows the migration message", async ({ page }) => {
@@ -683,6 +827,8 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await expect(page.getByTestId("admin-success")).toHaveCount(0);
     expect(api.medications.some((m) => m.barcode === "0077002")).toBe(false);
     expect(api.medications).toHaveLength(before + 1);
+    expect(storedByBarcode(api, "0077001")).toMatchObject({ name: "Pre-migration item", category_id: categoryId(0), supplier_order_number: null });
+    expect(writes(api)).toEqual(["POST /api/medications", "POST /api/medications"]); // the one that worked and the one the database refused
   });
 
   test("an empty barcode is stopped in the form before anything is sent", async ({ page }) => {
@@ -827,8 +973,8 @@ function expectedIds(items: readonly Medication[], filter: { categoryId?: string
 type ListScenario = { label: string; category?: string; search?: string };
 
 const LIST_SCENARIOS: readonly ListScenario[] = [
-  { label: "one category", category: ANTIBIOTICS },
-  { label: "the first category", category: PAIN_AND_FEVER },
+  // Every category the fixtures have (six) and Uncategorized, each filtered on both screens and compared with the oracle
+  ...CATEGORY_NAMES.map((name): ListScenario => ({ label: `the category ${name}`, category: name })),
   { label: "Uncategorized", category: "Uncategorized" },
   { label: "a search by name", search: "amox" },
   { label: "a search by supplier order number", search: "00417" },
@@ -884,17 +1030,21 @@ test.describe("Admin: the list and the Inventory tab", () => {
 
   test("an item saved with a new category in Admin appears under that category on the Inventory tab", async ({ page }) => {
     const item = seedItem(THERMOMETER_COVERS);
-    await openAdmin(page);
+    const api = await openAdmin(page);
     await openEditForm(page, item.id);
     await chooseCategory(page, "First Aid");
     await saveItem(page);
     await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: First Aid");
+    await expectOrderSheetUntouched(page, "after saving an item in Admin");
 
     await page.goto("/?tab=inventory", { waitUntil: "domcontentloaded", timeout: 120_000 });
     await expect(page.getByTestId("inventory-summary")).toBeVisible({ timeout: SLOW_MS });
     const firstAid = page.getByTestId(`group-${categoryId(3)}`);
     await expect(firstAid.getByTestId(`item-card-${item.id}`)).toBeVisible();
     await expect(page.getByTestId("group-uncategorized").getByTestId(`item-card-${item.id}`)).toHaveCount(0);
+    await expect(page.getByTestId("order-bar")).toHaveCount(0); // saving in Admin put nothing on the order sheet
+    await expect(page.getByTestId(`order-checkbox-${item.id}`)).not.toBeChecked();
+    expect(writes(api)).toEqual([`PUT /api/medications/${item.id}`]);
   });
 
   test("the category filter lists every category with the number of items it holds", async ({ page }) => {
@@ -926,6 +1076,160 @@ test.describe("Admin: the list and the Inventory tab", () => {
 
     await expect(page.getByTestId(`admin-category-${legacy.id}`)).toContainText("Uncategorized");
     await expect(page.getByTestId(`admin-supplier-${legacy.id}`).locator("dd")).toHaveText("Not set");
+  });
+
+  test("each applied filter shows as a removable chip: its x removes only that filter, Clear filters removes them all, and the filter controls follow", async ({ page }) => {
+    const items = buildMedications();
+    const total = items.length;
+    await openAdmin(page);
+    const summary = page.getByTestId("admin-summary");
+    const search = page.getByTestId("admin-search");
+    const chips = page.getByTestId("active-filters");
+
+    // Ground truth from the fixtures: the category alone, the search alone and both together are three different lists
+    const both = expectedIds(items, { categoryId: categoryId(0), search: "tablets" });
+    const searchOnly = expectedIds(items, { search: "tablets" });
+    const categoryOnly = expectedIds(items, { categoryId: categoryId(0) });
+    expect(new Set([both.length, searchOnly.length, categoryOnly.length]).size, "the three lists must differ, or a stuck filter would go unnoticed").toBe(3);
+    const applyBoth = async (): Promise<void> => {
+      await filterAdminByCategory(page, PAIN_AND_FEVER);
+      await search.fill("tablets");
+      await expect(summary).toContainText(`Showing ${both.length} of ${total} items`);
+    };
+
+    // Nothing filtered: no chips, no Clear filters link, every item
+    await expect(chips).toHaveCount(0);
+    await expect(page.getByTestId("admin-clear-filters")).toHaveCount(0);
+    expect(await visibleItemIds(page, "admin-row-")).toHaveLength(total);
+
+    // Both on: one chip for each, saying what it is, in the order the summary names them
+    await applyBoth();
+    await expect(page.getByTestId("active-filter-category")).toHaveText("Category: Pain & Fever");
+    await expect(page.getByTestId("active-filter-search")).toHaveText("Search: “tablets”");
+    await expect(summary).toHaveText(`Showing ${both.length} of ${total} items · Category: Pain & Fever · Search “tablets”`);
+    await expect(page.getByTestId("active-filter-remove-category")).toHaveAccessibleName("Remove filter Category: Pain & Fever");
+    await expect(page.getByTestId("active-filter-remove-search")).toHaveAccessibleName("Remove filter Search: “tablets”");
+    expect(await visibleItemIds(page, "admin-row-")).toEqual(both);
+
+    // The x on the Category chip takes off the category only: the list grows to the search's results
+    await page.getByTestId("active-filter-remove-category").click();
+    await expect(page.getByTestId("active-filter-category")).toHaveCount(0);
+    await expect(page.getByTestId("active-filter-search")).toHaveText("Search: “tablets”");
+    await expect(summary).toHaveText(`Showing ${searchOnly.length} of ${total} items · Search “tablets”`);
+    expect(await visibleItemIds(page, "admin-row-")).toEqual(searchOnly);
+    expect(await chosenAdminFilter(page), "the category control agrees with the chips").toMatch(/^All categories/);
+    await expect(search).toHaveValue("tablets");
+
+    // The x on the Search chip takes off the rest: the whole inventory is back
+    await page.getByTestId("active-filter-remove-search").click();
+    await expect(chips).toHaveCount(0);
+    await expect(search).toHaveValue("");
+    await expect(summary).toHaveText(`Showing all ${total} items.`);
+    expect(await visibleItemIds(page, "admin-row-")).toHaveLength(total);
+
+    // The other way round: the x on the Search chip first leaves the category's whole list
+    await applyBoth();
+    await page.getByTestId("active-filter-remove-search").click();
+    await expect(page.getByTestId("active-filter-search")).toHaveCount(0);
+    await expect(summary).toHaveText(`Showing ${categoryOnly.length} of ${total} items · Category: Pain & Fever`);
+    expect(await visibleItemIds(page, "admin-row-")).toEqual(categoryOnly);
+    await expect(search).toHaveValue("");
+    expect(await chosenAdminFilter(page)).toMatch(/^Pain & Fever/);
+
+    // Clear filters takes off everything at once and puts the cursor in the search box
+    await applyBoth();
+    await page.getByTestId("admin-clear-filters").click();
+    await expect(summary).toHaveText(`Showing all ${total} items.`);
+    await expect(chips).toHaveCount(0);
+    await expect(search).toHaveValue("");
+    expect(await chosenAdminFilter(page)).toMatch(/^All categories/);
+    expect(await visibleItemIds(page, "admin-row-")).toHaveLength(total);
+    await expect(page.getByTestId("admin-clear-filters")).toHaveCount(0);
+    await expect(search).toBeFocused();
+  });
+
+  test("a filter chip can be removed with the keyboard: focus moves to the next chip, then to the search box after the last one", async ({ page }) => {
+    const total = buildMedications().length;
+    await openAdmin(page);
+    await filterAdminByCategory(page, PAIN_AND_FEVER);
+    await page.getByTestId("admin-search").fill("tablets");
+    await expect(page.getByTestId("active-filter-search")).toBeVisible();
+
+    await page.getByTestId("active-filter-remove-category").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("active-filter-category")).toHaveCount(0);
+    await expect(page.getByTestId("active-filter-remove-search")).toBeFocused(); // the neighbouring chip, not the top of the page
+
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("active-filters")).toHaveCount(0);
+    await expect(page.getByTestId("admin-search")).toBeFocused();
+    await expect(page.getByTestId("admin-summary")).toHaveText(`Showing all ${total} items.`);
+  });
+
+  test("with the searchable category filter (11 or more categories) the chip's x and Clear filters reset the filter control as well", async ({ page }) => {
+    const extra: Category[] = ["Vaccines", "Dental", "Eye care", "Lab supplies", "Skin care", "Sutures"].map((name, index) => ({
+      id: fakeUuid(400 + index),
+      name,
+      created_at: null,
+    }));
+    const total = buildMedications().length;
+    await openAdmin(page, { categories: [...buildCategories(), ...extra] });
+    await expect(page.getByTestId("admin-category-filter")).toHaveAttribute("role", "combobox");
+    const summary = page.getByTestId("admin-summary");
+
+    await filterAdminByCategory(page, ANTIBIOTICS);
+    await expect(page.getByTestId("active-filter-category")).toHaveText("Category: Antibiotics");
+    expect(await chosenAdminFilter(page)).toMatch(/^Antibiotics/);
+    await page.getByTestId("active-filter-remove-category").click();
+    await expect(page.getByTestId("active-filters")).toHaveCount(0);
+    expect(await chosenAdminFilter(page), "the searchable control shows All categories again").toMatch(/^All categories/);
+    await expect(summary).toHaveText(`Showing all ${total} items.`);
+
+    await filterAdminByCategory(page, PAIN_AND_FEVER);
+    await expect(page.getByTestId("active-filter-category")).toHaveText("Category: Pain & Fever");
+    await page.getByTestId("admin-clear-filters").click();
+    await expect(page.getByTestId("active-filters")).toHaveCount(0);
+    expect(await chosenAdminFilter(page)).toMatch(/^All categories/);
+    await expect(summary).toHaveText(`Showing all ${total} items.`);
+  });
+
+  test("a realistic inventory of 150 items is listed completely and in name order, never cut short or reversed", async ({ page }) => {
+    const items = [...buildMedications(), ...buildManyMedications(123)]; // 27 + 123 = 150 (the live inventory has 128)
+    await openAdmin(page, { medications: items });
+
+    await expect(page.getByTestId("admin-summary")).toHaveText("Showing all 150 items.");
+    await expect(page.getByRole("heading", { name: /^All Medications/ })).toContainText("(150)");
+    expect(await visibleItemIds(page, "admin-row-")).toHaveLength(150);
+
+    // Named items in natural name order (Item 2 before Item 10), items without a name last, ordered by barcode: computed here, not read from the page
+    const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+    const expectedOrder = [...items]
+      .sort((a, b) => {
+        if (a.name === null) return b.name === null ? collator.compare(a.barcode, b.barcode) : 1;
+        if (b.name === null) return -1;
+        return collator.compare(a.name, b.name);
+      })
+      .map((m) => m.id);
+    expect(await adminRowIdsInOrder(page)).toEqual(expectedOrder);
+  });
+
+  test("a photo that cannot be loaded falls back to the item's initials instead of a broken image, and a photo that loads is shown", async ({ page }) => {
+    const aspirin = seedItem(ASPIRIN); // "Aspirin 81 mg, chewable": initials A8
+    const ibuprofen = seedItem(IBUPROFEN);
+    await page.route("https://photos.invalid/**", (route) => route.abort("failed")); // an address that never answers
+    await openAdmin(page, {
+      medications: buildMedications().map((m) =>
+        m.id === aspirin.id ? { ...m, photo_url: "https://photos.invalid/aspirin.png" } : m.id === ibuprofen.id ? { ...m, photo_url: PHOTO_ORIGINAL } : m
+      ),
+    });
+
+    const broken = page.getByTestId(`admin-row-${aspirin.id}`);
+    await expect(broken).toBeVisible();
+    await expect(broken.locator("img"), "no broken picture is left in the row").toHaveCount(0);
+    await expect(broken.locator('[aria-hidden="true"]').filter({ hasText: /^A8$/ }), "the initials stand in for the picture").toHaveCount(1);
+    await expect(broken).toContainText("Aspirin 81 mg, chewable"); // the name is there either way
+
+    await expect(page.getByTestId(`admin-row-${ibuprofen.id}`).locator("img")).toHaveCount(1);
   });
 
   test("a category with no items, a search with no match and an empty inventory each say what is going on and offer a way out", async ({ page }) => {
@@ -995,6 +1299,8 @@ test.describe("Admin: unnamed items, new categories and photos", () => {
     expect(row.category_id).toBe(categoryId(2));
     expect(row.supplier_order_number).toBe("0092");
     expect(row.barcode).toBe(unnamed.barcode);
+    expect(writes(api)).toEqual([`PUT /api/medications/${unnamed.id}`]);
+    await expectOrderSheetUntouched(page, "after completing an unnamed item");
     await expect(page.getByTestId(`admin-row-${unnamed.id}`)).not.toContainText("Needs review");
     await expect(page.getByTestId(`admin-category-${unnamed.id}`)).toContainText("Antibiotics");
     // The Complete button is gone, so keyboard focus goes to the item's Edit button instead of being lost
@@ -1199,6 +1505,16 @@ test.describe("Admin: keyboard use and focus", () => {
       threshold: 5,
     });
     expect(api.requestsTo("POST", POST_ITEM)).toHaveLength(1);
+    expect(storedByBarcode(api, "0055001122")).toMatchObject({
+      name: "Keyboard test item",
+      supplier_order_number: "AX-1182/4",
+      category_id: categoryId(2),
+      unit: "boxes",
+      stock: 12,
+      threshold: 5,
+    });
+    expect(writes(api)).toEqual(["POST /api/medications"]);
+    await expectOrderSheetUntouched(page, "after saving with the keyboard");
     expect(await focusedElement(page)).toBe("admin-add-button"); // focus is not lost when the form closes
     expect(problems).toEqual([]);
   });
@@ -1318,14 +1634,24 @@ test.describe("Admin: phone width", () => {
       name: "N".repeat(113),
       barcode: "9".repeat(128),
       supplier_order_number: "S".repeat(64),
-      unit: "u".repeat(40),
+      unit: "W".repeat(40),
       category_id: longCategory.id,
       notes: "x".repeat(300),
       vendor_url: `https://supplier.example/${"p".repeat(120)}`,
     };
     const api = await openAdmin(page, { medications: [extreme, ...rest], categories: [longCategory, ...buildCategories()] });
-    await expectNoHorizontalScroll(page, "the list with unbroken long values");
-    await expect(page.getByTestId(`admin-supplier-${extreme.id}`).locator("dd")).toHaveText("S".repeat(64)); // wrapped, not cut off
+    await expectNoHorizontalScroll(page, "the list with unbroken long values"); // no sideways scroll AND nothing cut off by a box
+
+    // Every long value is intact in the page AND readable in full on screen: inside the window, inside every box around it, and
+    // spread over several lines. None of these fits on one 390px line, so a single line would mean it was NOT wrapped.
+    const row = page.getByTestId(`admin-row-${extreme.id}`);
+    const supplierCode = page.getByTestId(`admin-supplier-${extreme.id}`).locator("dd");
+    await expect(supplierCode).toHaveText("S".repeat(64));
+    await expectReadableInFull(supplierCode, "the 64-character supplier order number", { minLines: 2 });
+    await expectReadableInFull(page.locator(`#admin-name-${extreme.id}`), "the 113-character name", { minLines: 2 });
+    await expectReadableInFull(page.getByTestId(`admin-barcode-${extreme.id}`).locator("dd"), "the 128-character barcode", { minLines: 2 });
+    await expectReadableInFull(page.getByTestId(`admin-category-${extreme.id}`), "the 60-character category tag", { minLines: 2 });
+    await expectReadableInFull(row.locator("p", { hasText: "W".repeat(40) }), "the 40-character unit", { minLines: 2 });
 
     await openEditForm(page, extreme.id);
     await expectNoHorizontalScroll(page, "the edit form with unbroken long values");
@@ -1335,6 +1661,12 @@ test.describe("Admin: phone width", () => {
     await saveItem(page);
     await expect(page.getByTestId("admin-error")).toBeVisible();
     await expectNoHorizontalScroll(page, "an error that quotes a very long unbroken message");
+    await expectReadableInFull(page.getByTestId("admin-error"), "the error that quotes a 150-character unbroken message", { minLines: 2 });
+
+    await saveItem(page); // the retry works: the saved message names the 113-character item and its 60-character category
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    await expectNoHorizontalScroll(page, "the saved message with a very long name and category");
+    await expectReadableInFull(page.getByTestId("admin-success"), "the saved message with a 113-character name", { minLines: 2 });
   });
 
   test("buttons and fields are at least 40px tall on a phone", async ({ page }) => {
@@ -1480,6 +1812,42 @@ test.describe("Admin: loading, partial failures and double clicks", () => {
     await expect(page.getByTestId(`admin-row-${item.id}`)).toHaveCount(0); // the list behind the form was refreshed
   });
 
+  test("a list refresh that fails right after a successful save keeps every item on screen, says the list may be out of date, and Retry clears the warning", async ({ page }) => {
+    const item = seedItem(IBUPROFEN);
+    const api = await openAdmin(page);
+    const total = api.medications.length;
+    const message = "Can’t reach the database. Check the connection, and that the Supabase project isn’t paused.";
+    // The save itself works; the list that is read back right after it does not.
+    api.failNext({ method: "GET", path: /\/api\/medications$/, status: 503, body: { error: message } });
+
+    await openEditForm(page, item.id);
+    await fillItemForm(page, { notes: "Saved while the list refresh fails" });
+    await saveItem(page);
+
+    // The save is confirmed, and it really is in the database
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Pain & Fever · Supplier order no.: 0092");
+    expect(stored(api, item.id).notes).toBe("Saved while the list refresh fails");
+
+    // The failed refresh is reported, and the inventory does not look gone
+    const warning = page.getByTestId("admin-refresh-warning");
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText("The list could not be refreshed");
+    await expect(warning).toContainText(message);
+    await expect(warning).toContainText("The list below may be out of date.");
+    await expect(warning.getByRole("button", { name: "Retry" })).toBeVisible();
+    await expect(page.getByTestId("admin-empty")).toHaveCount(0);
+    await expect(page.getByText("No medications yet.")).toHaveCount(0);
+    await expect(page.getByTestId("admin-load-error")).toHaveCount(0);
+    await expect(page.getByTestId("admin-summary")).toHaveText(`Showing all ${total} items.`);
+    expect(await visibleItemIds(page, "admin-row-")).toHaveLength(total);
+    await expect(page.getByTestId(`admin-row-${item.id}`)).toBeVisible();
+
+    await warning.getByRole("button", { name: "Retry" }).click();
+    await expect(warning).toHaveCount(0);
+    await expect(page.getByTestId("admin-summary")).toHaveText(`Showing all ${total} items.`);
+    expect(await visibleItemIds(page, "admin-row-")).toHaveLength(total);
+  });
+
   test("pressing Save twice quickly saves the item once", async ({ page }) => {
     const api = await installMockApi(page, { latencyMs: 600 });
     await gotoAdmin(page);
@@ -1491,5 +1859,125 @@ test.describe("Admin: loading, partial failures and double clicks", () => {
     await expect(page.getByTestId("admin-error")).toHaveCount(0);
     expect(api.requestsTo("POST", POST_ITEM)).toHaveLength(1);
     expect(api.medications.filter((m) => m.barcode === "0099001130")).toHaveLength(1);
+    expect(writes(api)).toEqual(["POST /api/medications"]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 10. Forms never leak into each other; a filtered list follows a category change
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+test.describe("Admin: one form at a time, and a filtered list that follows a change", () => {
+  test("opening another item while a form is open shows that item's own values and saves nothing into the other item", async ({ page }) => {
+    const first = seedItem(IBUPROFEN);
+    const second = seedItem(AMOXICILLIN);
+    const api = await openAdmin(page);
+
+    await openEditForm(page, first.id);
+    await fillItemForm(page, { notes: "typed for ibuprofen only", supplier: "IBU-TYPED", category: ANTIBIOTICS });
+
+    await page.getByTestId(`admin-edit-${second.id}`).click(); // without saving or cancelling the first one
+    await expect(page.getByRole("heading", { name: /^Edit: Amoxicillin/ })).toBeVisible();
+    await expect(page.getByTestId("barcode-input")).toHaveValue(second.barcode);
+    await expect(page.getByTestId("supplier-order-number-input")).toHaveValue("AMX-500");
+    await expect(page.getByTestId("notes-input")).toHaveValue("");
+    expect(await chosenCategory(page)).toBe(ANTIBIOTICS);
+
+    await fillItemForm(page, { notes: "typed for amoxicillin" });
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    expect(stored(api, second.id).notes).toBe("typed for amoxicillin");
+    expect(stored(api, second.id).supplier_order_number).toBe("AMX-500");
+    const untouched = stored(api, first.id);
+    expect(untouched.notes).toBeNull();
+    expect(untouched.supplier_order_number).toBe("0092");
+    expect(untouched.category_id).toBe(categoryId(0));
+    expect(writes(api)).toEqual([`PUT /api/medications/${second.id}`]);
+  });
+
+  test("a cancelled new-item form leaves nothing behind in the next one", async ({ page }) => {
+    const api = await openAdmin(page);
+    const before = api.medications.length;
+
+    await openNewItemForm(page);
+    await fillItemForm(page, { name: "Abandoned draft", barcode: "0099001131", supplier: "DRAFT-1", category: ANTIBIOTICS, notes: "never saved" });
+    await page.getByTestId("cancel-button").click();
+    await expect(page.getByTestId("admin-form")).toHaveCount(0);
+
+    await openNewItemForm(page);
+    await expect(page.getByTestId("name-input")).toHaveValue("");
+    await expect(page.getByTestId("barcode-input")).toHaveValue("");
+    await expect(page.getByTestId("supplier-order-number-input")).toHaveValue("");
+    await expect(page.getByTestId("notes-input")).toHaveValue("");
+    expect(await chosenCategory(page)).toBe(UNCATEGORIZED);
+    expect(api.medications).toHaveLength(before);
+    expect(writes(api)).toEqual([]);
+  });
+
+  test("giving an item a category while the list is filtered to Uncategorized moves it out of the list, updates the count and keeps keyboard focus on the page", async ({ page }) => {
+    const items = buildMedications();
+    const legacy = seedItem(THERMOMETER_COVERS);
+    const uncategorized = items.filter((m) => m.category_id === null).length;
+    const api = await openAdmin(page);
+
+    await filterAdminByCategory(page, "Uncategorized");
+    await expect(page.getByTestId("admin-summary")).toHaveText(`Showing ${uncategorized} of ${items.length} items · Category: Uncategorized`);
+    await expect(page.getByTestId(`admin-row-${legacy.id}`)).toBeVisible();
+
+    await openEditForm(page, legacy.id);
+    await chooseCategory(page, "First Aid");
+    await saveItem(page);
+
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: First Aid");
+    await expect(page.getByTestId(`admin-row-${legacy.id}`)).toHaveCount(0); // it no longer belongs in this list
+    await expect(page.getByTestId("admin-summary")).toHaveText(`Showing ${uncategorized - 1} of ${items.length} items · Category: Uncategorized`);
+    expect(stored(api, legacy.id).category_id).toBe(categoryId(3));
+    expect(await focusedElement(page)).not.toBe("body"); // focus did not fall off the page when the edited row left the list
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+// 11. The searchable category list, keyboard only
+// ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+test.describe("Admin: the searchable category list with the keyboard", () => {
+  test("a category can be found by typing and picked with the keyboard alone, and focus moves on instead of being trapped", async ({ page }) => {
+    const extra: Category[] = ["Vaccines", "Dental", "Eye care", "Lab supplies", "Skin care", "Sutures"].map((name, index) => ({
+      id: fakeUuid(300 + index),
+      name,
+      created_at: null,
+    }));
+    const item = seedItem(ACETAMINOPHEN);
+    const api = await openAdmin(page, { categories: [...buildCategories(), ...extra] });
+
+    await openEditForm(page, item.id);
+    await page.getByTestId("barcode-input").focus();
+    await page.keyboard.press("Tab"); // Supplier order number
+    await page.keyboard.press("Tab"); // Category
+    expect(await focusedElement(page)).toBe("category-select");
+    await expect(page.getByTestId("category-select")).toHaveAttribute("role", "combobox");
+
+    await page.keyboard.type("sut"); // typing replaces the shown name, opens the list and narrows it
+    await expect(page.getByTestId("category-select-listbox").getByRole("option")).toHaveText(["Sutures", CREATE_NEW]);
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    expect(await chosenCategory(page)).toBe("Sutures");
+    expect(api.requestsTo("PUT", PUT_ITEM(item.id))).toHaveLength(0); // Enter in the list never saves the form
+
+    await page.keyboard.press("Tab");
+    expect(await focusedElement(page)).toBe("unit-input"); // Tab leaves the list
+    await page.keyboard.press("Shift+Tab");
+    expect(await focusedElement(page)).toBe("category-select");
+
+    await page.keyboard.press("ArrowDown"); // opens the list again
+    await expect(page.getByTestId("category-select-listbox")).toBeVisible();
+    await page.keyboard.press("Escape"); // closes it and keeps the choice
+    await expect(page.getByTestId("category-select-listbox")).toBeHidden();
+    expect(await chosenCategory(page)).toBe("Sutures");
+
+    await page.getByTestId("save-button").focus();
+    await page.keyboard.press("Enter");
+    await expect(page.getByTestId("admin-success")).toContainText("Saved. Category: Sutures");
+    expect(stored(api, item.id).category_id).toBe(fakeUuid(305));
   });
 });

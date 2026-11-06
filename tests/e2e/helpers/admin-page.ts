@@ -4,6 +4,7 @@
 // application logic: the helpers open pages, drive controls and read what a person (or a request body) can observe.
 import { expect, type Locator, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
+import { STORAGE_KEY as ORDER_SHEET_STORAGE_KEY } from "@/lib/order-sheet/draft";
 import { installMockApi, type MockApi, type MockApiOptions } from "./mock-api";
 
 /** The dev server compiles a route the first time it is asked for it, so the first load of a page is allowed to be slow. */
@@ -25,30 +26,9 @@ export type OpenAdminOptions = MockApiOptions & {
 export async function openAdmin(page: Page, options: OpenAdminOptions = {}): Promise<MockApi> {
   const { beforeLoad, ...mockOptions } = options;
   const api = await installMockApi(page, mockOptions);
-  if (process.env.E2E_SABOTAGE) await applySabotage(page, process.env.E2E_SABOTAGE); // TEMPORARY mutation experiment
   if (beforeLoad) await beforeLoad(api);
   await gotoAdmin(page);
   return api;
-}
-
-// TEMPORARY mutation experiment hook (removed after the run): rewrites item saves on their way to the mock.
-async function applySabotage(page: Page, kind: string): Promise<void> {
-  await page.route("**/api/medications**", async (route) => {
-    const request = route.request();
-    const path = new URL(request.url()).pathname;
-    const isCreate = request.method() === "POST" && path === "/api/medications";
-    const isUpdate = request.method() === "PUT" && /^\/api\/medications\/\d+$/.test(path);
-    if (!isCreate && !isUpdate) return route.fallback();
-    const body = request.postDataJSON() as Record<string, unknown>;
-    const out: Record<string, unknown> = { ...body };
-    if (kind === "drop-category") delete out.category_id;
-    if (kind === "null-category") out.category_id = null;
-    if (kind === "strip-zeros" && typeof out.supplier_order_number === "string") out.supplier_order_number = out.supplier_order_number.replace(/^0+/, "");
-    if (kind === "overwrite-stock" && isUpdate) out.stock = 9999;
-    if (kind === "leak-supplier" && isUpdate && !("supplier_order_number" in out)) out.supplier_order_number = null;
-    if (Object.keys(out).length === 0) out.name = "x";
-    return route.fallback({ postData: JSON.stringify(out) });
-  });
 }
 
 /** Loads /admin (again) on a page that already has the mock installed. Waits for the list's summary line. */
@@ -269,29 +249,114 @@ export function watchRuntimeErrors(page: Page): string[] {
   return problems;
 }
 
-/** How far the page is wider than the window, and which elements stick out. A phone must never scroll sideways. */
-export async function horizontalOverflow(page: Page): Promise<{ overflow: number; offenders: string[] }> {
+/**
+ * How far the page is wider than the window, which elements stick out, and which elements HIDE part of their own content.
+ * A phone must never scroll sideways, and it must never cut a value off either: a container that clips (overflow other than
+ * visible) and holds content wider than itself keeps the page from scrolling while the reader loses the end of the text, so
+ * "no sideways scroll" alone says nothing about long codes being readable. Fields (input, textarea, select) scroll their own
+ * text by design, visually hidden text is hidden on purpose, and a cut with an ellipsis (the filter chips) keeps the whole
+ * text in its title; none of those count.
+ */
+export async function horizontalOverflow(page: Page): Promise<{ overflow: number; offenders: string[]; clipped: string[] }> {
   return page.evaluate(() => {
     const doc = document.documentElement;
     const overflow = Math.max(doc.scrollWidth, document.body.scrollWidth) - doc.clientWidth;
+    const describe = (el: Element): string => `${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}[${el.getAttribute("data-testid") ?? ""}]`;
     const offenders: string[] = [];
     for (const el of Array.from(document.body.querySelectorAll("*"))) {
       if (el.closest(".sr-only") || el.closest("[hidden]")) continue;
       const box = el.getBoundingClientRect();
       if (box.width === 0 || box.height === 0) continue;
       if (box.right > doc.clientWidth + 0.5 || box.left < -0.5) {
-        offenders.push(`${el.tagName.toLowerCase()}${el.id ? `#${el.id}` : ""}[${el.getAttribute("data-testid") ?? ""}] ${Math.round(box.left)}..${Math.round(box.right)}`);
+        offenders.push(`${describe(el)} ${Math.round(box.left)}..${Math.round(box.right)}`);
         if (offenders.length >= 8) break;
       }
     }
-    return { overflow, offenders };
+    const clipped: string[] = [];
+    for (const el of [doc, document.body, ...Array.from(document.body.querySelectorAll("*"))]) {
+      if (!(el instanceof HTMLElement)) continue;
+      if (el.closest(".sr-only")) continue;
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) continue;
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      if (style.overflowX === "visible" || style.textOverflow === "ellipsis") continue;
+      if (el.scrollWidth > el.clientWidth + 1) {
+        clipped.push(`${describe(el)} holds ${el.scrollWidth}px of content in a ${el.clientWidth}px box that cuts it off`);
+        if (clipped.length >= 8) break;
+      }
+    }
+    return { overflow, offenders, clipped };
   });
 }
 
 export async function expectNoHorizontalScroll(page: Page, where: string): Promise<void> {
-  const { overflow, offenders } = await horizontalOverflow(page);
+  const { overflow, offenders, clipped } = await horizontalOverflow(page);
   expect(overflow, `${where}: the page is ${overflow}px wider than the window`).toBeLessThanOrEqual(0);
   expect(offenders, `${where}: elements outside the window`).toEqual([]);
+  expect(clipped, `${where}: content that is cut off instead of wrapped`).toEqual([]);
+}
+
+export type TextFit = {
+  /** Visible lines the text occupies (a value that does not fit on one line is only readable when this is above 1). */
+  lines: number;
+  left: number;
+  right: number;
+  viewportWidth: number;
+  /** Ancestors that cut the text off: a box that clips (overflow other than visible) and ends before the text does. */
+  cutOffBy: string[];
+};
+
+/**
+ * Where the TEXT of an element really is on screen: how many lines it fills, how far left and right they reach, and which
+ * clipping ancestors end before the text does. It measures the text itself (every text node, line by line), so a value that
+ * is intact in the DOM but cut off by a container is told apart from one that wraps and can be read in full.
+ */
+export async function textFit(locator: Locator): Promise<TextFit> {
+  return locator.evaluate((el) => {
+    const rects: DOMRect[] = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      if ((node.textContent ?? "").trim() === "") continue;
+      if (node.parentElement?.closest(".sr-only")) continue; // visually hidden text is not on screen
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      for (const rect of Array.from(range.getClientRects())) if (rect.width > 0 && rect.height > 0) rects.push(rect);
+    }
+    const describe = (e: Element): string => `${e.tagName.toLowerCase()}${e.id ? `#${e.id}` : ""}[${e.getAttribute("data-testid") ?? ""}]`;
+    const left = rects.length > 0 ? Math.min(...rects.map((r) => r.left)) : 0;
+    const right = rects.length > 0 ? Math.max(...rects.map((r) => r.right)) : 0;
+    const cutOffBy: string[] = [];
+    for (let ancestor: Element | null = el; ancestor !== null; ancestor = ancestor.parentElement) {
+      if (getComputedStyle(ancestor).overflowX === "visible") continue;
+      const box = ancestor.getBoundingClientRect();
+      if (rects.length > 0 && (right > box.right + 0.5 || left < box.left - 0.5)) {
+        cutOffBy.push(`${describe(ancestor)} ends at ${Math.round(box.right)}px, the text reaches ${Math.round(right)}px`);
+      }
+    }
+    return {
+      lines: new Set(rects.map((r) => Math.round(r.top))).size,
+      left,
+      right,
+      viewportWidth: document.documentElement.clientWidth,
+      cutOffBy,
+    };
+  });
+}
+
+/**
+ * Proves that a long value is READABLE IN FULL: its text sits inside the window, no clipping ancestor ends before it, and
+ * (when `minLines` is given) it wraps over at least that many lines. Give `minLines` only for a value that cannot fit on
+ * one line at this width: one line then means it was not wrapped.
+ */
+export async function expectReadableInFull(locator: Locator, what: string, options: { minLines?: number } = {}): Promise<void> {
+  const fit = await textFit(locator);
+  expect(fit.right, `${what}: no text was measured`).toBeGreaterThan(0);
+  expect(fit.cutOffBy, `${what}: cut off instead of wrapped`).toEqual([]);
+  expect(fit.left, `${what}: starts left of the window`).toBeGreaterThanOrEqual(-0.5);
+  expect(fit.right, `${what}: runs past the right edge of the window (${fit.viewportWidth}px)`).toBeLessThanOrEqual(fit.viewportWidth + 0.5);
+  if (options.minLines !== undefined) {
+    expect(fit.lines, `${what}: should wrap over ${options.minLines}+ lines but sits on ${fit.lines}`).toBeGreaterThanOrEqual(options.minLines);
+  }
 }
 
 /** True when the focused control shows some visible focus indicator (an outline or a ring). */
@@ -322,4 +387,53 @@ export async function filterAdminByCategory(page: Page, name: string): Promise<v
   }
   await control.click();
   await page.getByRole("option", { name: label }).click();
+}
+
+/** The label the Admin list's category filter shows right now ("All categories (27)", "Antibiotics (3)"), native select or combobox. */
+export async function chosenAdminFilter(page: Page): Promise<string> {
+  const control = page.getByTestId("admin-category-filter");
+  return clean(
+    await control.evaluate((el) => {
+      if (el instanceof HTMLSelectElement) return el.selectedOptions[0]?.textContent ?? "";
+      if (el instanceof HTMLInputElement) return el.value;
+      return "";
+    })
+  );
+}
+
+/** The ids of the Admin list's rows in the order they appear on screen (top to bottom). */
+export async function adminRowIdsInOrder(page: Page): Promise<number[]> {
+  return page.locator('[data-testid^="admin-row-"]').evaluateAll((elements) =>
+    elements
+      .map((el) => (el.getAttribute("data-testid") ?? "").slice("admin-row-".length))
+      .filter((rest) => /^\d+$/.test(rest))
+      .map(Number)
+  );
+}
+
+// ── The order sheet is only ever filled by a person (SPEC 3.3: nothing is added automatically) ─────
+
+/** How many items the browser's saved order-sheet draft holds. 0 when nothing was saved. Reads the key the app really uses. */
+export async function orderSheetDraftRows(page: Page): Promise<number> {
+  return page.evaluate((key) => {
+    let raw: string | null = null;
+    try {
+      raw = window.localStorage.getItem(key);
+    } catch {
+      return 0;
+    }
+    if (raw === null) return 0;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      const rows = typeof parsed === "object" && parsed !== null ? (parsed as { rows?: unknown }).rows : undefined;
+      return Array.isArray(rows) ? rows.length : 0;
+    } catch {
+      return 0;
+    }
+  }, ORDER_SHEET_STORAGE_KEY);
+}
+
+/** Saving or creating an item must not put anything on the order sheet. */
+export async function expectOrderSheetUntouched(page: Page, when: string): Promise<void> {
+  expect(await orderSheetDraftRows(page), `${when}: the item was put on the order sheet without anyone asking`).toBe(0);
 }

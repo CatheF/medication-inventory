@@ -130,7 +130,18 @@ export function pdfWords(file: string): PdfPageWords[] {
 /** 14 mm, the page margin the order sheet asks for with @page { margin: 14mm }, in points. */
 export const PAGE_MARGIN_PT = (14 / 25.4) * 72;
 
-export type PrintedRow = { cells: Record<string, string> };
+export type PrintedRow = {
+  cells: Record<string, string>;
+  /** the words of each cell with their boxes (points), by column heading */
+  cellWords: Record<string, PdfWord[]>;
+  /** every word of the row with its box (points) */
+  words: PdfWord[];
+  /** top of the first line of text and bottom of the last one, in points from the top of the page */
+  top: number;
+  bottom: number;
+  /** how many lines of text the tallest cell of the row needs */
+  lines: number;
+};
 export type PrintedPage = {
   page: number;
   width: number;
@@ -139,6 +150,10 @@ export type PrintedPage = {
   preamble: string;
   /** the column headings found on this page, in order; empty when the page has no heading row */
   headings: string[];
+  /** left edge of the text of each column heading (points), in the same order as `headings` */
+  columnLefts: number[];
+  /** bottom of the heading row's text (points); null when the page has no heading row */
+  headingBottom: number | null;
   rows: PrintedRow[];
   /** the sheet footer line(s) printed under the rows ("title · date") */
   footer: string;
@@ -163,6 +178,18 @@ const HEADING_LABELS: Array<{ label: string; first: string }> = [
 
 function squash(text: string): string {
   return text.replace(/\s+/g, "");
+}
+
+/** Distinct text lines among some words: words whose tops are within 3 points of each other share a line. */
+function countLines(words: PdfWord[]): number {
+  const tops = [...words].map((w) => w.y0).sort((a, b) => a - b);
+  let lines = 0;
+  let last = -Infinity;
+  for (const top of tops) {
+    if (top - last > 3) lines += 1;
+    last = top;
+  }
+  return lines;
 }
 
 function joinCell(words: PdfWord[]): string {
@@ -248,17 +275,34 @@ export function readPrintedTable(file: string, footerText: string): PrintedPage[
           continue;
         }
         const cells: Record<string, string> = {};
+        const cellWords: Record<string, PdfWord[]> = {};
         const perColumn: PdfWord[][] = lefts.map(() => []);
         for (const w of cluster) perColumn[columnOf(w)].push(w);
         lefts.forEach((l, i) => {
           cells[l.label] = joinCell(perColumn[i]);
+          cellWords[l.label] = perColumn[i];
           const limit = i + 1 < lefts.length ? lefts[i + 1].left - 1 : p.width - PAGE_MARGIN_PT + 1;
           for (const w of perColumn[i]) if (w.x1 > limit) wordsPastColumn.push(w);
         });
-        rows.push({ cells });
+        rows.push({ cells, cellWords, words: cluster, top: Math.min(...cluster.map((w) => w.y0)), bottom: Math.max(...cluster.map((w) => w.y1)), lines: countLines(cluster) });
       }
     }
-    return { page: index + 1, width: p.width, height: p.height, preamble, headings, rows, footer, notes, wordsOutsideMargins, overlappingWords, wordsPastColumn };
+    const headingBottom = headingIndex >= 0 ? Math.max(...clusters[headingIndex].map((w) => w.y1)) : null;
+    return {
+      page: index + 1,
+      width: p.width,
+      height: p.height,
+      preamble,
+      headings,
+      columnLefts: lefts.map((l) => l.left),
+      headingBottom,
+      rows,
+      footer,
+      notes,
+      wordsOutsideMargins,
+      overlappingWords,
+      wordsPastColumn,
+    };
   });
 }
 
@@ -322,6 +366,89 @@ export function rasterStats(raster: Raster, chromaTolerance = 10): RasterStats {
     }
   }
   return { pixels: width * height, markedPixels: marked, chromaticPixels: chromatic };
+}
+
+/** A straight dark line on a rendered page, in points: `pos` is its centre across the page, `from`..`to` its extent along it. */
+export type Rule = { pos: number; from: number; to: number };
+export type PageRules = { horizontal: Rule[]; vertical: Rule[] };
+
+/**
+ * The long straight dark lines on a grayscale page render: the cell borders of the printed table. Runs of dark pixels
+ * (darker than `darkBelow`, default 150 of 255) at least `minLengthPt` long (default 24) are lines; lines drawn several
+ * pixels thick are merged into one. Text never forms such a run (a letter stem is about 8 points tall), so every rule
+ * returned is a border. The positions are in points from the top-left corner of the page.
+ */
+export function findRules(raster: Raster, dpi: number, options: { darkBelow?: number; minLengthPt?: number } = {}): PageRules {
+  if (raster.channels !== 1) throw new Error("findRules needs a grayscale render (pdftoppm -gray)");
+  const { width, height, data } = raster;
+  const darkBelow = options.darkBelow ?? 150;
+  const minPixels = Math.max(2, Math.round(((options.minLengthPt ?? 24) / 72) * dpi));
+  const toPt = (pixels: number): number => (pixels / dpi) * 72;
+
+  type Group = { first: number; last: number; from: number; to: number };
+  const scan = (lines: number, length: number, isDark: (line: number, along: number) => boolean): Rule[] => {
+    const finished: Group[] = [];
+    let open: Group[] = [];
+    for (let line = 0; line < lines; line += 1) {
+      const runs: Array<[number, number]> = [];
+      let start = -1;
+      for (let along = 0; along <= length; along += 1) {
+        const on = along < length && isDark(line, along);
+        if (on && start < 0) start = along;
+        if (!on && start >= 0) {
+          if (along - start >= minPixels) runs.push([start, along - 1]);
+          start = -1;
+        }
+      }
+      const next: Group[] = [];
+      for (const [from, to] of runs) {
+        const touching = open.find((g) => g.last === line - 1 && from <= g.to && to >= g.from);
+        if (touching) {
+          touching.last = line;
+          touching.from = Math.min(touching.from, from);
+          touching.to = Math.max(touching.to, to);
+          next.push(touching);
+        } else {
+          next.push({ first: line, last: line, from, to });
+        }
+      }
+      for (const g of open) if (!next.includes(g)) finished.push(g);
+      open = next;
+    }
+    finished.push(...open);
+    return finished.map((g) => ({ pos: toPt((g.first + g.last + 1) / 2), from: toPt(g.from), to: toPt(g.to + 1) })).sort((a, b) => a.pos - b.pos);
+  };
+
+  return {
+    horizontal: scan(height, width, (y, x) => data[y * width + x] < darkBelow),
+    vertical: scan(width, height, (x, y) => data[y * width + x] < darkBelow),
+  };
+}
+
+/**
+ * For each word box (points), the darkest pixel inside it on a grayscale render: 0 is solid black ink, 255 is paper. Black text
+ * has a near-black pixel in every word; text printed in a light gray has none, whatever else is on the page.
+ */
+export function darkestInBoxes(raster: Raster, dpi: number, boxes: ReadonlyArray<{ x0: number; y0: number; x1: number; y1: number }>): number[] {
+  if (raster.channels !== 1) throw new Error("darkestInBoxes needs a grayscale render (pdftoppm -gray)");
+  const { width, height, data } = raster;
+  const toPx = (pt: number): number => (pt / 72) * dpi;
+  return boxes.map((box) => {
+    const x0 = Math.max(0, Math.floor(toPx(box.x0)));
+    const x1 = Math.min(width - 1, Math.ceil(toPx(box.x1)));
+    const y0 = Math.max(0, Math.floor(toPx(box.y0)));
+    const y1 = Math.min(height - 1, Math.ceil(toPx(box.y1)));
+    let darkest = 255;
+    for (let y = y0; y <= y1; y += 1) for (let x = x0; x <= x1; x += 1) darkest = Math.min(darkest, data[y * width + x]);
+    return darkest;
+  });
+}
+
+export function median(values: readonly number[]): number {
+  if (values.length === 0) throw new Error("median of nothing");
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
 // ── XLSX (python3 + openpyxl + raw XML) ──────────────────────────────────────────────────────────────────────────

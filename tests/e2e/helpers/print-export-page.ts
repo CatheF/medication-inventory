@@ -68,6 +68,62 @@ export async function openOrderSheet(page: Page, options: OpenOptions): Promise<
   return api;
 }
 
+/**
+ * Opens /order-sheet with a saved draft while the inventory is NOT available: "error" = every GET /api/medications answers
+ * 503, "loading" = the answer is held back until `release()` is called. Resolves once the page shows that state (the load-error
+ * notice or the loading skeleton). The sheet preview does not exist in either state.
+ */
+export async function openOrderSheetUnready(
+  page: Page,
+  options: { medications: Medication[]; draft: DraftSeed; state: "error" | "loading" }
+): Promise<{ api: MockApi; release: () => void }> {
+  const api = await installMockApi(page, { medications: options.medications });
+  await page.addInitScript(
+    ([key, value]) => {
+      try {
+        if (window.localStorage.getItem(key) === null) window.localStorage.setItem(key, value);
+      } catch {
+        /* storage unavailable: the test will fail on its own assertions */
+      }
+    },
+    [DRAFT_KEY, draftJson(options.draft)] as const
+  );
+  let release: () => void = () => undefined;
+  if (options.state === "error") {
+    api.failNext({ method: "GET", path: /\/api\/medications$/, status: 503, body: { error: "Can’t reach the database." }, times: 50 });
+  } else {
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // registered after the mock, so it runs first and hands the request on to the mock once the gate opens
+    await page.route("**/api/medications", async (route) => {
+      await gate;
+      await route.fallback();
+    });
+  }
+  await page.goto("/order-sheet", { waitUntil: "load", timeout: 120_000 });
+  await expect(page.getByTestId(options.state === "error" ? "sheet-error" : "sheet-loading")).toBeVisible({ timeout: 60_000 });
+  return { api, release };
+}
+
+/**
+ * Replaces the rows of the saved draft with `ids` (blank quantity and unit) and tells the open page, the way a second tab
+ * does. Much faster than reloading the page for every row count. The window event "medinventory:orderDraft" is the
+ * documented same-tab update signal of the draft store (SPEC 2.8). Resolves once the builder lists exactly these rows.
+ */
+export async function setDraftRows(page: Page, ids: number[]): Promise<void> {
+  await page.evaluate(
+    ([key, rowIds]) => {
+      const draft = JSON.parse(window.localStorage.getItem(key) ?? "{}") as Record<string, unknown>;
+      draft.rows = rowIds.map((id) => ({ id, qty: "", unit: "" }));
+      window.localStorage.setItem(key, JSON.stringify(draft));
+      window.dispatchEvent(new Event("medinventory:orderDraft"));
+    },
+    [DRAFT_KEY, ids] as const
+  );
+  await expect(page.locator("[data-testid^=sheet-row-]")).toHaveCount(ids.length);
+}
+
 export type PreviewReading = {
   title: string;
   dateLine: string;

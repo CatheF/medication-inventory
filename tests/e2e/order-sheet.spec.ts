@@ -5,10 +5,12 @@
 // Every /api/* call is answered by tests/e2e/helpers/mock-api.ts (no database), with synthetic data only.
 // Run: E2E_BASE_URL=http://127.0.0.1:3100 CHROMIUM_PATH=<chromium> npx playwright test tests/e2e/order-sheet.spec.ts
 import fs from "node:fs";
-import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expect, type Locator, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
 import { buildCategories, buildMedications } from "../helpers/fixtures";
 import { readXlsx, type XlsxWorkbook } from "../helpers/xlsx-reader";
+// `test` with an automatic extra: a FAILED test also says so when the app server was showing its error overlay (see the helper).
+import { test } from "./helpers/app-server-guard";
 import { installMockApi, type MockApi } from "./helpers/mock-api";
 
 // Without an action timeout a missing control would wait for the whole test timeout; this keeps failures quick and readable.
@@ -40,6 +42,7 @@ const AMOXICILLIN = fixture(/^Amoxicillin/); // Antibiotics, supplier AMX-500, p
 const AZITHROMYCIN = fixture(/^Azithromycin/); // Antibiotics, low
 const NITROFURANTOIN = fixture(/^Nitrofurantoin/); // Antibiotics, out of stock, no supplier number
 const THERMOMETER = fixture(/^Thermometer/); // uncategorized, no supplier number
+const MULTIVITAMIN = fixture(/^Multi-vitamin/); // uncategorized, a 115-character name and a 37-character supplier number
 
 function categoryIdByName(name: string): string {
   const found = CATEGORIES.find((c) => c.name === name);
@@ -118,6 +121,11 @@ async function readDraft(page: Page): Promise<StoredDraft | null> {
     }
   }, STORAGE_KEY);
   return raw === null ? null : (JSON.parse(raw) as StoredDraft);
+}
+
+/** The saved rows reduced to what staff typed (item, quantity, unit): the remembered item name is not what these tests are about. */
+async function typedRows(page: Page): Promise<Array<{ id: number; qty: string; unit: string }>> {
+  return ((await readDraft(page))?.rows ?? []).map(({ id, qty, unit }) => ({ id, qty, unit }));
 }
 
 async function sheetRowIds(page: Page): Promise<number[]> {
@@ -338,6 +346,37 @@ test.describe("Order sheet: choosing what goes on it", () => {
     await expect(page.getByText(/No items match/)).toBeVisible();
   });
 
+  test("when the categories cannot be read (the live defect: an empty list, no error) a search result says 'Category unavailable', never 'Uncategorized'; a really uncategorized item still says so", async ({
+    page,
+  }) => {
+    await installMockApi(page, { categoriesBlocked: true }); // GET /api/categories answers 200 with []
+    await openSheet(page);
+    await page.getByTestId("add-search").fill("cetirizine");
+    const categorized = page.getByTestId(`add-result-${CETIRIZINE.id}`);
+    await expect(categorized).toContainText("Category unavailable");
+    await expect(categorized).not.toContainText("Uncategorized");
+    await expect(categorized).not.toContainText("Allergy & Cold"); // no name is made up either
+
+    await page.getByTestId("add-search").fill("thermometer");
+    await expect(page.getByTestId(`add-result-${THERMOMETER.id}`)).toContainText("Uncategorized");
+    await expect(page.getByTestId(`add-result-${THERMOMETER.id}`)).not.toContainText("Category unavailable");
+  });
+
+  test("when the category request fails with an error a search result says 'Category unavailable', never 'Uncategorized'", async ({ page }) => {
+    const mock = await installMockApi(page);
+    mock.failNext({ method: "GET", path: /\/api\/categories$/, status: 500, body: { error: "Unexpected database error." } });
+    await openSheet(page);
+    // the failing request has been answered (it is the one the page made), so the label below is the failed state, not "loading"
+    await expect.poll(() => mock.requestsTo("GET", /\/api\/categories$/).length).toBeGreaterThan(0);
+    await page.getByTestId("add-search").fill("cetirizine");
+    const categorized = page.getByTestId(`add-result-${CETIRIZINE.id}`);
+    await expect(categorized).toContainText("Category unavailable");
+    await expect(categorized).not.toContainText("Uncategorized");
+
+    await page.getByTestId("add-search").fill("thermometer");
+    await expect(page.getByTestId(`add-result-${THERMOMETER.id}`)).toContainText("Uncategorized");
+  });
+
   test("the sheet's search lists at most 8 matches and says how many more there are", async ({ page }) => {
     await installMockApi(page);
     await openSheet(page);
@@ -521,28 +560,43 @@ test.describe("Order sheet: choosing what goes on it", () => {
     await expect(orderBar(page)).not.toContainText("hidden");
   });
 
-  test("'Add all' on a category adds only what that category shows under the current filters, says how many, and Undo takes off exactly those", async ({
+  test("'Add all' on a category adds only what that category shows under the current filters, says how many, and Undo takes off exactly those and nothing that was on the sheet before", async ({
     page,
   }) => {
     await installMockApi(page);
+    // Cetirizine is on the sheet before anything else happens, with a quantity and unit typed by staff. It is plenty in stock,
+    // so the Low filter below hides it: "Add all" and "Undo" must both leave it alone.
+    await seedDraft(page, [{ id: CETIRIZINE.id, qty: "7", unit: "box" }]);
     await openInventory(page);
+    await expect(page.getByTestId(`order-checkbox-${CETIRIZINE.id}`)).toBeChecked();
     await page.getByTestId("stock-filter-low").click(); // Antibiotics then shows Azithromycin and Nitrofurantoin only
+    await expect(page.getByTestId(`order-checkbox-${CETIRIZINE.id}`)).toHaveCount(0); // hidden by the filter, still on the sheet
+    await expect(orderBar(page)).toContainText("1 item on the order sheet");
+    await expect(orderBar(page)).toContainText("1 hidden by current filters");
     const antibiotics = categoryIdByName("Antibiotics");
     await page.getByTestId(`group-add-all-${antibiotics}`).click();
 
     await expect(page.getByTestId("bulk-status")).toContainText("Added 2 items from Antibiotics to the order sheet.");
-    await expect(orderBar(page)).toContainText("2 items on the order sheet");
+    await expect(orderBar(page)).toContainText("3 items on the order sheet"); // the earlier row plus the two that were added
     await expect(page.getByTestId(`order-checkbox-${AZITHROMYCIN.id}`)).toBeChecked();
     await expect(page.getByTestId(`order-checkbox-${NITROFURANTOIN.id}`)).toBeChecked();
-    expect((await readDraft(page))?.rows.map((r) => r.id).sort()).toEqual([AZITHROMYCIN.id, NITROFURANTOIN.id].sort());
+    const afterAdd = await typedRows(page);
+    expect(afterAdd[0]).toEqual({ id: CETIRIZINE.id, qty: "7", unit: "box" }); // the earlier row keeps its place and its typed values
+    expect(afterAdd.slice(1).map((r) => r.id).sort()).toEqual([AZITHROMYCIN.id, NITROFURANTOIN.id].sort());
+    expect(afterAdd.slice(1).every((r) => r.qty === "" && r.unit === "")).toBe(true); // the new rows start empty
 
     await page.getByTestId("bulk-undo").click();
-    await expect(page.getByTestId("bulk-status")).toContainText("Undid adding 2 items.");
+    await expect(page.getByTestId("bulk-status")).toContainText("Undid adding 2 items."); // 2, not 3: only what "Add all" added
     await expect(page.getByTestId(`order-checkbox-${AZITHROMYCIN.id}`)).not.toBeChecked();
-    expect((await readDraft(page))?.rows ?? []).toEqual([]);
-    // Amoxicillin (plenty in stock, hidden by the filter) was never added
+    await expect(page.getByTestId(`order-checkbox-${NITROFURANTOIN.id}`)).not.toBeChecked();
+    await expect(orderBar(page)).toContainText("1 item on the order sheet");
+    expect(await typedRows(page)).toEqual([{ id: CETIRIZINE.id, qty: "7", unit: "box" }]);
+
+    // with the filter off again the earlier item is still ticked; Amoxicillin (plenty in stock, hidden by the filter) never was
     await page.getByTestId("stock-filter-all").click();
+    await expect(page.getByTestId(`order-checkbox-${CETIRIZINE.id}`)).toBeChecked();
     await expect(page.getByTestId(`order-checkbox-${AMOXICILLIN.id}`)).not.toBeChecked();
+    await expect(orderBar(page)).toContainText("1 item on the order sheet");
   });
 
   test("two-step 'Clear sheet' asks first, keeps everything on Keep items or Escape, and clears only the rows on confirm (no browser pop-up)", async ({
@@ -669,6 +723,35 @@ test.describe("Order sheet: choosing what goes on it", () => {
 
     await navSheetLink(page).click();
     await expect(page).toHaveURL(/\/order-sheet$/);
+    await expect(page.getByTestId("sheet-empty")).toBeVisible();
+    expect(inventorySnapshot(mock)).toBe(before);
+    expect(writes(mock)).toEqual([]);
+  });
+
+  test("'Clear' in the Inventory order bar clears the WHOLE sheet, including ticked items the current filters hide; the question names every item, and nothing stays ticked once the filters are off", async ({
+    page,
+  }) => {
+    const mock = await installMockApi(page);
+    const before = inventorySnapshot(mock);
+    await seedDraft(page, [{ id: CETIRIZINE.id, qty: "3", unit: "case" }, { id: AMOXICILLIN.id }]);
+    await openInventory(page);
+    await page.getByTestId(`category-chip-${categoryIdByName("Antibiotics")}`).click(); // hides Cetirizine, which stays on the sheet
+    await expect(page.getByTestId(`order-checkbox-${CETIRIZINE.id}`)).toHaveCount(0);
+    await expect(orderBar(page)).toContainText("2 items on the order sheet");
+    await expect(orderBar(page)).toContainText("1 hidden by current filters");
+
+    await page.getByTestId("order-bar-clear").click();
+    // the question is about the whole sheet (2), not about the one row that happens to be on screen
+    await expect(orderBar(page)).toContainText("Remove all 2 items from the order sheet?");
+    await page.getByTestId("order-bar-clear-confirm").click();
+
+    await expect(orderBar(page)).toHaveCount(0); // no rows left: the bar is gone, not "1 item (1 hidden)"
+    expect(await typedRows(page)).toEqual([]);
+    await expect(page.getByTestId(`order-checkbox-${AMOXICILLIN.id}`)).not.toBeChecked();
+    await page.getByTestId("clear-filters").click();
+    await expect(page.locator('[data-testid^="order-checkbox-"]:checked')).toHaveCount(0); // the hidden one was cleared too
+    await expect(navSheetLink(page)).toHaveAccessibleName("Order sheet");
+    await navSheetLink(page).click();
     await expect(page.getByTestId("sheet-empty")).toBeVisible();
     expect(inventorySnapshot(mock)).toBe(before);
     expect(writes(mock)).toEqual([]);
@@ -883,6 +966,54 @@ test.describe("Order sheet: quantities and units are typed by staff and kept apa
     }
   });
 
+  test("on a 360 px phone the whole order sheet page fits the screen width, with a 115-character name, 64-character code, long typed text, an error message and both optional columns on, and every control stays on screen", async ({
+    page,
+  }) => {
+    const long64 = `0042-${"ABCDEFGHIJ".repeat(5)}-LONGCODE`;
+    const codeItem = mk(8601, "Item with the longest supplier order number allowed", { supplier_order_number: long64, barcode: "9".repeat(40) });
+    await page.setViewportSize({ width: 360, height: 800 });
+    await installMockApi(page, { medications: [...MEDS, codeItem] });
+    // the missing row (99 999) shows its own message; the others are a short name, the longest name and the longest code
+    await seedDraft(page, [{ id: IBUPROFEN.id }, { id: MULTIVITAMIN.id }, { id: codeItem.id }, { id: THERMOMETER.id }, { id: 99_999 }]);
+    await openSheet(page);
+    await page.getByTestId("show-on-hand").check();
+    await page.getByTestId("show-barcode").check();
+    await page.getByTestId(`unit-input-${MULTIVITAMIN.id}`).fill("cases of 24 bottles, assorted flavors");
+    await page.getByTestId(`qty-input-${IBUPROFEN.id}`).fill("12 boxes"); // not a valid quantity: its message is a whole sentence
+    await page.getByTestId("sheet-title").fill("A long sheet title for the autumn clinic supply order, second delivery");
+    await page.getByTestId("sheet-notes").fill("Please deliver to the side door of the clinic building and call on arrival. ".repeat(3));
+    await expect(row(page, IBUPROFEN).getByRole("alert")).toBeVisible();
+
+    const widths = await page.evaluate(() => ({
+      window: window.innerWidth,
+      scroll: document.documentElement.scrollWidth,
+      client: document.documentElement.clientWidth, // what is left of the window after a classic scroll bar, if the browser draws one
+    }));
+    expect(widths.window).toBe(360); // precondition: this really is a 360 px window
+    // no sideways scrolling of the page (an ordinary vertical scroll is fine)
+    expect(widths.scroll, `the page is ${widths.scroll}px wide in a ${widths.client}px window`).toBeLessThanOrEqual(widths.client);
+
+    // and nothing is merely clipped out of sight: what staff press and type in begins and ends inside the screen
+    const reachable: Array<[string, Locator]> = [
+      ["quantity box of the long-named item", page.getByTestId(`qty-input-${MULTIVITAMIN.id}`)],
+      ["unit box of the long-named item", page.getByTestId(`unit-input-${MULTIVITAMIN.id}`)],
+      ["Remove button of the long-named item", page.getByTestId(`remove-row-${MULTIVITAMIN.id}`)],
+      ["quantity box of the long-code item", page.getByTestId(`qty-input-${codeItem.id}`)],
+      ["Remove button of the missing item", page.getByTestId("remove-row-99999")],
+      ["search box", page.getByTestId("add-search")],
+      ["sheet title box", page.getByTestId("sheet-title")],
+      ["Print button", page.getByTestId("print-button")],
+      ["Excel button", page.getByTestId("export-xlsx")],
+    ];
+    for (const [label, locator] of reachable) {
+      await locator.scrollIntoViewIfNeeded();
+      const box = await locator.boundingBox();
+      if (box === null) throw new Error(`${label} has no box on screen`);
+      expect(box.x, `${label} starts inside the screen`).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width, `${label} ends inside the screen`).toBeLessThanOrEqual(widths.client + 1);
+    }
+  });
+
   test("an item counted in tablets keeps its own stock unit next to the on-hand figure; the order unit typed beside it is a separate word and nothing is converted", async ({
     page,
   }) => {
@@ -1093,6 +1224,47 @@ test.describe("Order sheet: the draft is kept in this browser", () => {
     expect((await readDraft(page))?.date).toBeNull(); // "today" is stored as no date, so the sheet follows the calendar
   });
 
+  test("a date the sheet cannot use (year 0026 or 2100, typing mistakes) is not used: a message names the date the sheet keeps, and the typo is never saved, printed or exported", async ({
+    page,
+  }) => {
+    await page.clock.setFixedTime(new Date(2026, 2, 9, 10, 0, 0)); // 9 March 2026, 10:00 local time
+    const mock = await installMockApi(page);
+    await seedDraft(page, [{ id: IBUPROFEN.id }]);
+    await openSheet(page);
+    const date = page.getByTestId("sheet-date");
+    const problem = page.getByTestId("sheet-date-error");
+    await expect(date).toHaveValue("2026-03-09");
+    await expect(problem).toHaveCount(0);
+
+    for (const typo of ["0026-11-05", "2100-01-01"]) {
+      await test.step(`typed ${typo}`, async () => {
+        await date.fill(typo);
+        await date.blur(); // the message waits until the person leaves the box (a year is typed digit by digit)
+        await expect(problem).toBeVisible();
+        await expect(problem).toHaveAttribute("role", "alert");
+        await expect(problem).toContainText("That date is not used");
+        await expect(problem).toContainText("The sheet still shows Mar 9, 2026");
+        await expect(date).toHaveAttribute("aria-invalid", "true");
+        // the printed sheet and the saved draft never took the typo
+        await expect(page.getByTestId("sheet-preview")).toContainText("Mar 9, 2026");
+        await expect(page.getByTestId("sheet-preview")).not.toContainText(typo.slice(0, 4));
+        expect((await readDraft(page))?.date ?? null).toBeNull();
+      });
+    }
+
+    // the file is made with the date the sheet shows, never with the typo
+    const { filename } = await downloadXlsx(page);
+    expect(filename).toBe("order-sheet-2026-03-09.xlsx");
+    expect(exportBodies(mock)[0].date).toBe("2026-03-09");
+
+    // a usable date takes the message away and is used
+    await date.fill("2026-11-05");
+    await expect(problem).toHaveCount(0);
+    await expect(date).not.toHaveAttribute("aria-invalid", "true");
+    await expect(page.getByTestId("sheet-preview")).toContainText("Nov 5, 2026");
+    expect((await readDraft(page))?.date).toBe("2026-11-05");
+  });
+
   test("a damaged saved draft never breaks the page: it opens as an empty sheet, a half-good one keeps its good rows, and the next change saves a clean draft", async ({
     page,
   }) => {
@@ -1297,7 +1469,7 @@ test.describe("Order sheet: supplier numbers, barcodes and items that are gone",
     await expect(page.getByTestId("missing-supplier-summary")).toHaveCount(0);
   });
 
-  test("supplier order numbers like 00417-B, 0092, AX-1182/4 and a 64-character code appear exactly, in the builder, the printed sheet and the Excel file", async ({
+  test("supplier order numbers like 00417-B, 0092, AX-1182/4, ab-12x/Z (mixed case) and a 64-character code appear exactly, in the builder, the printed sheet and the Excel file", async ({
     page,
   }) => {
     const long64 = `0042-${"ABCDEFGHIJ".repeat(5)}-LONGCODE`;
@@ -1306,6 +1478,8 @@ test.describe("Order sheet: supplier numbers, barcodes and items that are gone",
       { item: mk(8101, "Code with letters and a dash", { supplier_order_number: "00417-B" }), code: "00417-B" },
       { item: mk(8102, "Code with leading zeros only", { supplier_order_number: "0092" }), code: "0092" },
       { item: mk(8103, "Code with a slash", { supplier_order_number: "AX-1182/4" }), code: "AX-1182/4" },
+      // Upper AND lower case ASCII letters: a sheet that folds the case either way (or only paints it that way) changes it.
+      { item: mk(8105, "Code in mixed upper and lower case", { supplier_order_number: "ab-12x/Z" }), code: "ab-12x/Z" },
       { item: mk(8104, "Code at the 64-character limit", { supplier_order_number: long64 }), code: long64 },
     ];
     await installMockApi(page, { medications: codes.map((c) => c.item) });
@@ -1313,7 +1487,9 @@ test.describe("Order sheet: supplier numbers, barcodes and items that are gone",
     await openSheet(page);
 
     for (const { item, code } of codes) {
-      await expect(row(page, item).getByText(code, { exact: true })).toBeVisible(); // builder
+      const shown = row(page, item).getByText(code, { exact: true });
+      await expect(shown).toBeVisible(); // builder
+      await expect(shown).toHaveText(code, { useInnerText: true }); // as drawn on screen (innerText follows CSS text-transform)
     }
     expect((await previewRows(page)).map((cells) => cells[1])).toEqual(codes.map((c) => c.code)); // printed sheet
 
@@ -1383,6 +1559,41 @@ test.describe("Order sheet: supplier numbers, barcodes and items that are gone",
     expect((await previewRows(page))[0]).toEqual([nameOf(ASPIRIN), "00ASP-81", "6", "box"]);
     const { workbook } = await downloadXlsx(page);
     expect(workbook.sheet("Order sheet").table().rows[0]["Supplier order no."]?.text).toBe("00ASP-81");
+  });
+
+  test("when Refresh cannot reach the server the page says so in plain sight, keeps the earlier data and everything typed, and a later successful Refresh clears the warning and brings the new data", async ({
+    page,
+  }) => {
+    const mock = await installMockApi(page);
+    await seedDraft(page, [{ id: ASPIRIN.id, qty: "6", unit: "box" }]);
+    await openSheet(page);
+    const freshness = page.getByTestId("inventory-freshness");
+    await expect(freshness).toContainText("Inventory as of");
+    await expect(row(page, ASPIRIN)).toContainText(`On hand now: ${ASPIRIN.stock} units`);
+
+    // the stock changes elsewhere, but the refresh below fails, so the page cannot know and must not pretend it does
+    const stored = mock.medications.find((m) => m.id === ASPIRIN.id);
+    if (stored === undefined) throw new Error("fixture item missing from the mock database");
+    stored.stock = 33;
+    mock.failNext({ method: "GET", path: /\/api\/medications$/, status: 500, body: { error: "Unexpected database error." } });
+    await page.getByRole("button", { name: "Refresh inventory" }).click();
+
+    // The warning as a person reads it. (A screen-reader-only sentence in the same region also says "Couldn’t refresh", so only
+    // this longer wording proves the warning is on screen.) It replaces the normal "Inventory as of ..." line instead of hiding behind it.
+    await expect(page.getByText(/Couldn’t refresh\. Still showing the inventory as of/)).toBeVisible();
+    await expect(freshness).not.toContainText("Inventory as of");
+    await expect(row(page, ASPIRIN)).toContainText(`On hand now: ${ASPIRIN.stock} units`); // the earlier data, not the unseen change
+    await expect(page.getByTestId(`qty-input-${ASPIRIN.id}`)).toHaveValue("6"); // what was typed is untouched
+    await expect(page.getByTestId(`unit-input-${ASPIRIN.id}`)).toHaveValue("box");
+    await expect(page.getByTestId("print-button")).toBeEnabled(); // the sheet is still usable with the data it has
+    await expect(page.getByTestId("export-xlsx")).toBeEnabled();
+
+    // pressing Refresh again works: the warning goes and the new stock is shown
+    await page.getByRole("button", { name: "Refresh inventory" }).click();
+    await expect(row(page, ASPIRIN)).toContainText("On hand now: 33 units");
+    await expect(page.getByText(/Still showing the inventory as of/)).toHaveCount(0);
+    await expect(freshness).toContainText("Inventory as of");
+    await expect(page.getByTestId(`qty-input-${ASPIRIN.id}`)).toHaveValue("6");
   });
 
   test("supplier numbers that spreadsheets like to rewrite (1E5, 2026-11-05, =1+1, 20 digits, 00-1.50) stay the same characters on the sheet and in the Excel file", async ({
@@ -1667,5 +1878,49 @@ test.describe("Order sheet: what prints is only the sheet", () => {
     await expect(page.getByTestId("sheet-preview")).toBeVisible();
     await expect(page.getByTestId("sheet-preview")).toContainText(nameOf(IBUPROFEN));
     await expect(page.getByTestId("sheet-preview")).toContainText("0092");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// "Today" is the calendar day on the computer in front of the nurse, not the UTC day. The machine that runs these tests is in
+// UTC, where the two are the same day, so each test below puts the browser in a zone whose day differs from the UTC day at the
+// chosen moment (one behind UTC, one ahead). A sheet dated by the UTC day would print tomorrow's (or yesterday's) date.
+test.describe("Order sheet: a new sheet is dated with the local calendar day, not the UTC day", () => {
+  test.describe("in the evening in Los Angeles, when UTC is already the next day", () => {
+    test.use({ timezoneId: "America/Los_Angeles" });
+
+    test("at 20:30 on 9 March in Los Angeles the new sheet is dated 9 March: in the box, on the printed sheet and in the Excel file name", async ({
+      page,
+    }) => {
+      await page.clock.setFixedTime(new Date("2026-03-10T03:30:00Z")); // 20:30 on 9 March in Los Angeles; 10 March in UTC
+      const mock = await installMockApi(page);
+      await seedDraft(page, [{ id: IBUPROFEN.id }]);
+      await openSheet(page);
+      expect(await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe("America/Los_Angeles"); // precondition
+      await expect(page.getByTestId("sheet-date")).toHaveValue("2026-03-09");
+      await expect(page.getByTestId("sheet-preview")).toContainText("Mar 9, 2026");
+      const { filename } = await downloadXlsx(page);
+      expect(filename).toBe("order-sheet-2026-03-09.xlsx");
+      expect(exportBodies(mock)[0].date).toBe("2026-03-09");
+    });
+  });
+
+  test.describe("early in the morning in Auckland, when UTC is still the day before", () => {
+    test.use({ timezoneId: "Pacific/Auckland" });
+
+    test("at 12:30 on 10 March in Auckland the new sheet is dated 10 March: in the box, on the printed sheet and in the Excel file name", async ({
+      page,
+    }) => {
+      await page.clock.setFixedTime(new Date("2026-03-09T23:30:00Z")); // 12:30 on 10 March in Auckland; 9 March in UTC
+      const mock = await installMockApi(page);
+      await seedDraft(page, [{ id: IBUPROFEN.id }]);
+      await openSheet(page);
+      expect(await page.evaluate(() => Intl.DateTimeFormat().resolvedOptions().timeZone)).toBe("Pacific/Auckland"); // precondition
+      await expect(page.getByTestId("sheet-date")).toHaveValue("2026-03-10");
+      await expect(page.getByTestId("sheet-preview")).toContainText("Mar 10, 2026");
+      const { filename } = await downloadXlsx(page);
+      expect(filename).toBe("order-sheet-2026-03-10.xlsx");
+      expect(exportBodies(mock)[0].date).toBe("2026-03-10");
+    });
   });
 });
