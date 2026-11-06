@@ -379,6 +379,8 @@ describe("planSupplier: what happens to the supplier order number on save", () =
     { title: "create, inner spaces and case are kept", typed: "Ab  12c", loaded: null, expected: { send: true, value: "Ab  12c" } },
     { title: "edit, unchanged: not sent", typed: "0092", loaded: withSupplier("0092"), expected: { send: false, value: "0092" } },
     { title: "edit, unchanged apart from surrounding spaces: not sent", typed: " 0092 ", loaded: withSupplier("0092"), expected: { send: false, value: "0092" } },
+    { title: "edit, the stored code has spaces around it and the box still shows it as stored: not sent", typed: " 0092 ", loaded: withSupplier(" 0092 "), expected: { send: false, value: "0092" } },
+    { title: "edit, the stored code has spaces around it and the box shows it trimmed: not sent", typed: "0092", loaded: withSupplier(" 0092 "), expected: { send: false, value: "0092" } },
     { title: "edit, changed", typed: "0093", loaded: withSupplier("0092"), expected: { send: true, value: "0093" } },
     { title: "edit, changed only in letter case: that is a change", typed: "ab-1", loaded: withSupplier("AB-1"), expected: { send: true, value: "ab-1" } },
     { title: "edit, leading zeros dropped: that is a change", typed: "92", loaded: withSupplier("0092"), expected: { send: true, value: "92" } },

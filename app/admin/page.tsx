@@ -1741,7 +1741,10 @@ export default function AdminPage() {
               <input
                 id="admin-vendor-url"
                 data-testid="vendor-url-input"
-                type="url"
+                // Not type="url": the browser then refuses to submit the whole form, with no request and only a tooltip, for ANY edit of
+                // an item whose stored link has no https:// ("shop.example.com/reorder" is accepted by the API and shown as an
+                // https link everywhere). The server checks the link when it is sent, and the page flags the field.
+                type="text"
                 inputMode="url"
                 value={form.vendor_url}
                 onChange={(e) => setFormValue("vendor_url", e.target.value)}

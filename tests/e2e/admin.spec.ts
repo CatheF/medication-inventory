@@ -249,9 +249,9 @@ test.describe("Admin: the category survives create and edit", () => {
     expect(after.category_id).toBe(categoryId(0));
   });
 
-  // TASK 1: editing one field must not overwrite the item's other data. Each field is edited ALONE on a form that was opened
+  // Requirement: editing one field must not overwrite the item's other data. Each field is edited ALONE on a form that was opened
   // BEFORE another screen changed every other field: only the edited field may differ from what the database held at that moment.
-  // (The category is left out of "changed elsewhere" on purpose: the page always sends the form's category, SPEC 3.2.)
+  // (The category has its own twin tests in category-assignment-regression.spec.ts: it is sent only when the person changed it.)
   const CHANGED_ELSEWHERE = {
     name: "Ibuprofen 200 mg (renamed on another screen)",
     barcode: "0066778899",
@@ -1046,6 +1046,39 @@ test.describe("Admin: typing in the form does not re-render the list", () => {
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 // 3. Honest feedback when a save does not work (TASK 1: failed saves show a useful error and never look successful)
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
+
+test.describe("Admin: an item whose stored vendor link has no https://", () => {
+  // Staff have always been able to type "shop.example.com/reorder" there, every screen shows it as an https link, and the API
+  // accepts it. The vendor box used to be a browser-validated URL field, so the browser itself refused to submit the form
+  // (a tooltip, no request) for ANY edit of such an item, including a note or a category.
+  const BARE = "shop.example.com/reorder";
+
+  test("editing something else saves: the browser does not block the form, and only the changed field is sent", async ({ page }) => {
+    const item = seedItem(IBUPROFEN);
+    const api = await openAdmin(page, {
+      medications: buildMedications().map((m) => (m.id === item.id ? { ...m, vendor_url: BARE } : m)),
+    });
+    await openEditForm(page, item.id);
+    await expect(page.getByTestId("vendor-url-input")).toHaveValue(BARE);
+    await fillItemForm(page, { notes: "Moved to the top shelf" });
+    await saveItem(page);
+
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ notes: "Moved to the top shelf" });
+    expect(stored(api, item.id).vendor_url).toBe(BARE);
+    expect(stored(api, item.id).notes).toBe("Moved to the top shelf");
+  });
+
+  test("a bare address can be typed into the box and is sent as typed", async ({ page }) => {
+    const item = seedItem(IBUPROFEN);
+    const api = await openAdmin(page);
+    await openEditForm(page, item.id);
+    await fillItemForm(page, { vendorUrl: BARE });
+    await saveItem(page);
+    await expect(page.getByTestId("admin-success")).toBeVisible();
+    expect(lastBody(api, "PUT", PUT_ITEM(item.id))).toEqual({ vendor_url: BARE });
+  });
+});
 
 test.describe("Admin: honest feedback when a save does not work", () => {
   test("a refused save shows the server's message in an alert, keeps the form open with what was typed, and focuses the alert", async ({ page }) => {

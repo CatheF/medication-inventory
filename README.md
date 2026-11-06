@@ -124,6 +124,7 @@ All test data is synthetic.
 * On a phone, the Inventory tab shows the category chips above the search box, so the search box starts below the first screen.
 * `package.json` lists three packages that nothing imports (`@anthropic-ai/sdk`, `better-sqlite3`, `formidable`). They were there before this work; removing them is a separate, safe change.
 * The Usage and Kiosk pages were left as they were (apart from the kiosk's save message, see above): an automated accessibility check finds low-contrast text on both and a scroll area that cannot be reached by keyboard on Usage.
+* Admin, unchanged on purpose: two people changing the same field of an item at once overwrite each other (the last save wins; only the fields a person did not touch are protected); the stock and threshold boxes keep only digits, so "12.5" becomes 125; a stock edit in Admin writes the stock directly and records no usage-history entry; Delete uses the browser's own confirm dialog; leaving with an edited form open gives no warning. Pressing Save on a scanned (unnamed) item without typing anything marks it reviewed and keeps it unnamed, which would also clear a name that someone else gave it a moment earlier.
 * Not built: bulk category assignment, importing supplier order numbers from CSV, any ordering or purchasing integration, authentication.
 * Real Microsoft Excel, Safari/Firefox printing, real printers, screen readers and a real Supabase/PostgREST were not available when this was tested.
 
