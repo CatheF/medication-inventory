@@ -28,7 +28,9 @@ export const SEPARATOR = " · ";
 const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 const compareText = (a: string, b: string): number => collator.compare(a, b);
 
-const lower = (text: string): string => text.normalize("NFKC").toLowerCase();
+// The comparison form: NFKC, lower case, accents out (NFD without the combining marks), then NFC. Written out here on purpose,
+// not imported, so the oracle stays an independent statement of what the search should find.
+const lower = (text: string): string => text.normalize("NFKC").toLowerCase().normalize("NFD").replace(/\p{M}/gu, "").normalize("NFC");
 const sameId = (a: unknown, b: unknown): boolean => a !== null && a !== undefined && b !== null && b !== undefined && String(a).toLowerCase() === String(b).toLowerCase();
 
 export function searchTerms(search: string): string[] {

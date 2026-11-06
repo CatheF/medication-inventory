@@ -724,6 +724,16 @@ test.describe("search, stock level and category together", () => {
     expect((await readScreen(page)).rows).toHaveLength(0);
   });
 
+  test("search ignores accents: the unaccented word finds the accented item, whichever way the accent is typed", async ({ page }) => {
+    const api = await openInventory(page);
+    const creme = seedByName(api.medications, "Cr\u00e8me antiseptique 1 %, 30 g");
+    for (const typed of ["creme", "CREME", "cr\u00e8me", "cre\u0300me"]) {
+      await setSearch(page, typed);
+      await expectScreenMatches(page, api.medications, api.categories, view({ search: typed }), `typed ${typed}`);
+      expect((await readScreen(page)).rows.map((r) => r.id), `typed ${typed}`).toEqual([creme.id]);
+    }
+  });
+
   test("a search made only of blanks or invisible characters is no search, and invisible characters inside a word do not break a match", async ({
     page,
   }) => {
