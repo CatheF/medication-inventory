@@ -6,8 +6,8 @@ import type { ColumnKey } from "./format";
 // THE printed sheet. This one component is both the on-screen "paper" preview and what the browser prints:
 // everything else on the page is print:hidden, and the print rules in app/globals.css (.print-sheet) switch the
 // paper look off (fixed width, padding, shadow) and add the page-break behavior (repeat the header row on every
-// page, never split a row). It is black on white and uses only borders, never shading or color, so it reads the
-// same on a black-and-white printer.
+// page, never split a row, keep the notes row with the last item row so the last page always has an item row). It is
+// black on white and uses only borders, never shading or color, so it reads the same on a black-and-white printer.
 //
 // It shows exactly `sheet.rows`: items that no longer exist are not in it. Quantity and unit are what staff typed
 // (empty when left blank: an empty bordered cell to fill in by hand). A missing supplier order number prints as
@@ -99,6 +99,30 @@ const BodyRow = memo(
     a.row.barcode === b.row.barcode
 );
 
+/**
+ * What Ctrl/Cmd+P (the browser's own print command) puts on paper while there is NO sheet to print: the inventory is still
+ * loading, or it could not be loaded. The print rules hide everything but the sheet, and the sheet only exists once the
+ * inventory has loaded, so without this the paper would come out completely blank, which looks like a printer fault or like
+ * an empty order. It says plainly why there is nothing to print and what to do. Hidden on screen (the loading box and the
+ * load error already say it there). Black on white, borders only, no color, the same as the sheet.
+ */
+export function PrintUnavailable({ loadFailed }: { loadFailed: boolean }) {
+  return (
+    <section
+      data-testid="print-unavailable"
+      aria-label="Order sheet not printed"
+      className="print-unavailable sheet-font hidden border-2 border-black bg-white p-6 text-black print:block"
+    >
+      <h2 className="mb-3 text-[18pt] leading-tight font-bold">Order sheet not printed</h2>
+      <p className="text-[13pt] leading-snug">
+        {loadFailed
+          ? "The order sheet could not be printed because the inventory could not be loaded. Close the print window, press Retry on the screen (or reload the page), then print again."
+          : "The order sheet could not be printed yet because the inventory is still loading. Close the print window, wait for the list to load, then print again."}
+      </p>
+    </section>
+  );
+}
+
 export function PrintSheet({ sheet, paper }: { sheet: BuiltSheet; paper: PaperSize }) {
   const { options, rows } = sheet;
   const invalidQty = new Set(sheet.invalidQtyIds);
@@ -172,7 +196,9 @@ export function PrintSheet({ sheet, paper }: { sheet: BuiltSheet; paper: PaperSi
             ))
           )}
           {notes !== "" ? (
-            <tr>
+            // "sheet-notes": the print rules keep this row with the item row above it (see app/globals.css), so the notes
+            // never end up alone on a last page that has no item rows.
+            <tr className="sheet-notes">
               <td colSpan={columns.length} className={`${CELL} border-t-2`}>
                 <strong>Notes to supplier:</strong> <span className="whitespace-pre-line">{notes}</span>
               </td>

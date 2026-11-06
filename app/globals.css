@@ -60,12 +60,16 @@ select {
 }
 
 @media print {
+  /* .print-unavailable is the notice the page prints while there is no sheet (the inventory is loading or failed to load). */
   html:has(.print-sheet),
-  body:has(.print-sheet) {
+  body:has(.print-sheet),
+  html:has(.print-unavailable),
+  body:has(.print-unavailable) {
     background: #fff !important;
     color: #000 !important;
   }
-  body:has(.print-sheet) {
+  body:has(.print-sheet),
+  body:has(.print-unavailable) {
     min-height: 0 !important;
   }
   main:has(.print-sheet) {
@@ -123,6 +127,20 @@ select {
   .print-sheet tr {
     break-inside: avoid;
     page-break-inside: avoid;
+  }
+  /* The notes row closes the sheet and is taller than an item row. On its own, a notes row that does not fit under the last
+     item row moves to a NEW page by itself and leaves a last page with the column headings and the notes but no item rows.
+     So it is kept together with the last item row: "avoid" is stated on both sides of that one break (the notes row says
+     "not before me", the row above it says "not after me"; browsers differ in which side they read), and a page break falls
+     one row earlier instead. If the notes alone are taller than a whole page nothing can keep them together, and they flow
+     onto the next pages. These are separate rules so a browser that does not know :has() still reads the first one. */
+  .print-sheet tr.sheet-notes {
+    break-before: avoid;
+    page-break-before: avoid;
+  }
+  .print-sheet tr:has(+ tr.sheet-notes) {
+    break-after: avoid;
+    page-break-after: avoid;
   }
   .print-sheet th,
   .print-sheet td {

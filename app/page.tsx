@@ -27,6 +27,10 @@ type Mode = "dispense" | "receive";
 type ScanMode = "manual" | "quick";
 type Toast = { color: "green" | "red"; headline: string; sub?: string };
 
+// Quick mode: the line under "Lookup failed" / "Network error". A failed lookup is only a read, so nothing was recorded and
+// scanning again is always safe.
+const LOOKUP_FAILED_HINT = "Check the connection and scan again.";
+
 type ScanPhase =
   | { kind: "idle" }
   | { kind: "looking" }
@@ -411,15 +415,26 @@ export default function MainPage() {
     scanLockRef.current = true;
     lastScanRef.current = { barcode: trimmed, time: now };
 
+    // False until the item has been read. A failure before that is a failed LOOKUP (a read: nothing was recorded, so "scan
+    // again" is safe). Once the stock movement is on its way a failure leaves it open whether it was recorded, so that toast
+    // keeps its short message and does not tell staff to scan again.
+    let lookupDone = false;
     try {
       const res = await fetch(`/api/medications/barcode/${encodeURIComponent(trimmed)}`);
 
-      if (!res.ok) {
+      // The barcode route answers 404 ONLY when no item has this barcode. Any other failure (a server or database error, a
+      // refused request) says nothing about the item, which may well exist, so it must not be reported as an unknown barcode.
+      if (res.status === 404) {
         showToast({ color: "red", headline: "Unknown barcode", sub: trimmed });
+        return;
+      }
+      if (!res.ok) {
+        showToast({ color: "red", headline: "Lookup failed", sub: LOOKUP_FAILED_HINT });
         return;
       }
 
       const med: MedScan = await res.json();
+      lookupDone = true;
 
       if (mode === "dispense" && med.stock <= 0) {
         showToast({ color: "red", headline: "Out of stock", sub: med.name || med.barcode });
@@ -445,7 +460,11 @@ export default function MainPage() {
       });
       fetchMedications();
     } catch {
-      showToast({ color: "red", headline: "Network error" });
+      showToast(
+        lookupDone
+          ? { color: "red", headline: "Network error" }
+          : { color: "red", headline: "Network error", sub: LOOKUP_FAILED_HINT }
+      );
     } finally {
       scanLockRef.current = false;
     }
@@ -522,6 +541,9 @@ export default function MainPage() {
   const handleTransaction = async () => {
     if (phase.kind !== "found") return;
     const med = phase.medication;
+    // The quantity that is recorded: an emptied box means 1. The request and the success message below both use THIS number
+    // (not the typed text), so the message always states what was actually recorded.
+    const units = quantity === "" ? 1 : Number(quantity);
     // A scan that arrives while the transaction is on its way must not swap the card under it.
     scanLockRef.current = true;
     setProcessing(true);
@@ -529,7 +551,7 @@ export default function MainPage() {
       const res = await fetch("/api/transactions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ medication_id: med.id, type: mode, quantity: quantity === "" ? 1 : Number(quantity), note: note || undefined }),
+        body: JSON.stringify({ medication_id: med.id, type: mode, quantity: units, note: note || undefined }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -540,7 +562,7 @@ export default function MainPage() {
       const verb = mode === "receive" ? "Added" : "Dispensed";
       const label = med.name || med.barcode;
       scanLockRef.current = false;
-      setPhase({ kind: "success", message: `${verb} ${quantity} ${med.unit} of ${label}. New stock: ${data.stock}` });
+      setPhase({ kind: "success", message: `${verb} ${units} ${med.unit} of ${label}. New stock: ${data.stock}` });
       setNote("");
       setQuantity("1");
       setManualBarcode("");
@@ -661,7 +683,9 @@ export default function MainPage() {
               that already exists is read out, one that arrives together with its region often is not. */}
           <div role="status" aria-live="polite" aria-atomic="true">
             {toast && (
-              <div className={`rounded-xl px-4 py-3 mb-4 flex items-center gap-3 ${
+              // flex-wrap: on a narrow screen the line under the headline drops below it, instead of squeezing the headline
+              // into two lines and cutting that line off ("Check the connection …"). Wide screens look exactly as before.
+              <div className={`rounded-xl px-4 py-3 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 ${
                 toast.color === "green" ? "bg-green-700 text-white" : "bg-red-700 text-white"
               }`}>
                 <span className="text-3xl font-bold tabular-nums leading-none">{toast.headline}</span>

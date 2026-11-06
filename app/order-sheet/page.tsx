@@ -16,7 +16,7 @@ import { AddItems } from "./AddItems";
 import type { Announcement } from "./AddItems";
 import { InventoryFreshness } from "./InventoryFreshness";
 import { PrintActions } from "./PrintActions";
-import { PrintSheet } from "./PrintSheet";
+import { PrintSheet, PrintUnavailable } from "./PrintSheet";
 import { SheetDetails } from "./SheetDetails";
 import { SheetLoadError } from "./SheetLoadError";
 import { SheetRows } from "./SheetRows";
@@ -114,9 +114,12 @@ export default function OrderSheetPage() {
     disabledReason = `Fix the order quantity on ${invalidCount} ${pluralize(invalidCount, "row", "rows")} first: digits only.`;
   }
 
-  // The browser suggests the page title as the file name for "Save as PDF", so give it a useful one while printing.
+  // The browser suggests the page title as the file name for "Save as PDF", so give it a useful one while printing. Only when
+  // there is a sheet to print: before that (or after a failed load) the paper holds just a notice, and a file that is named
+  // like an order sheet would be mistaken for one.
   const printTitle = printDocumentTitle({ title: draft.title, date: resolvedDate });
   useEffect(() => {
+    if (!ready) return;
     let original: string | null = null;
     const before = () => {
       original = document.title;
@@ -135,7 +138,7 @@ export default function OrderSheetPage() {
       window.removeEventListener("afterprint", after);
       after();
     };
-  }, [printTitle]);
+  }, [printTitle, ready]);
 
   // Remember what each item on the sheet is called, so a row whose item is deleted later can still say which item it was.
   // Runs every time the inventory has been read (first load, Retry, Refresh, coming back to the tab). A row whose item is not
@@ -576,7 +579,11 @@ export default function OrderSheetPage() {
             <span className="sm:hidden">On a narrow screen, swipe the preview sideways to see every column.</span>
           </p>
         </section>
-      ) : null}
+      ) : (
+        // Ctrl/Cmd+P before there is a sheet (the inventory is loading, or could not be loaded): the paper explains why
+        // it is not the order sheet instead of coming out blank. Hidden on screen.
+        <PrintUnavailable loadFailed={loadStatus === "error"} />
+      )}
     </div>
   );
 }
