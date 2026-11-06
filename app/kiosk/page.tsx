@@ -20,7 +20,6 @@ type Phase =
   | { kind: "confirm"; medication: MedResult; isUnnamed: boolean }
   | { kind: "processing" }
   | { kind: "success"; medName: string | null; medBarcode: string; quantity: number; newStock: number; mode: Mode }
-  | { kind: "unknown_created"; barcode: string }
   | { kind: "error"; message: string };
 
 export default function KioskPage() {
@@ -67,35 +66,47 @@ export default function KioskPage() {
         }
 
         if (res.status === 404) {
-          const createRes = await fetch("/api/medications", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              name: null,
-              barcode: trimmed,
-              stock: 0,
-              threshold: 10,
-              unit: "units",
-              is_unnamed: true,
-            }),
-          });
+          // The kiosk may only say a barcode was "saved for staff review" when it really was: the create succeeded, or the
+          // create said it already exists (409) and the item can be opened. Every other outcome is a failure to save and is
+          // shown as one, the same way a failed lookup is.
+          const couldNotSave = () => {
+            scanLockRef.current = false;
+            setPhase({ kind: "error", message: `Could not save barcode ${trimmed}` });
+            scheduleReset();
+          };
 
-          if (createRes.ok) {
+          let createRes: Response | null = null;
+          try {
+            createRes = await fetch("/api/medications", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: null,
+                barcode: trimmed,
+                stock: 0,
+                threshold: 10,
+                unit: "units",
+                is_unnamed: true,
+              }),
+            });
+          } catch {
+            // The server could not be reached: nothing was saved, which is handled with the other failed saves below.
+          }
+
+          if (createRes?.ok) {
             const newMed: MedResult = await createRes.json();
             setPhase({ kind: "confirm", medication: newMed, isUnnamed: true });
-          } else if (createRes.status === 409) {
+          } else if (createRes?.status === 409) {
             // Race: was just created by another scan — fetch it
             const fetchRes = await fetch(`/api/medications/barcode/${encodeURIComponent(trimmed)}`);
             if (fetchRes.ok) {
               const med: MedResult = await fetchRes.json();
               setPhase({ kind: "confirm", medication: med, isUnnamed: med.is_unnamed ?? false });
             } else {
-              setPhase({ kind: "unknown_created", barcode: trimmed });
-              scheduleReset();
+              couldNotSave();
             }
           } else {
-            setPhase({ kind: "unknown_created", barcode: trimmed });
-            scheduleReset();
+            couldNotSave();
           }
           return;
         }
@@ -398,18 +409,9 @@ export default function KioskPage() {
           </div>
         )}
 
-        {phase.kind === "unknown_created" && (
-          <div className="bg-amber-950/60 border border-amber-600 rounded-2xl p-6 text-center">
-            <p className="text-3xl mb-2">⚠</p>
-            <p className="text-xl font-bold text-amber-400">Unknown Barcode</p>
-            <p className="text-gray-400 font-mono text-sm mt-2">{phase.barcode}</p>
-            <p className="text-amber-300 mt-3 text-sm">Saved for staff review in Admin</p>
-          </div>
-        )}
-
         {phase.kind === "error" && (
           <div className="bg-gray-800 border border-red-700 rounded-2xl p-6 text-center">
-            <p className="text-red-400 text-xl mb-4">{phase.message}</p>
+            <p className="text-red-400 text-xl mb-4 [overflow-wrap:anywhere]">{phase.message}</p>
             <button
               onClick={handleCancel}
               className="px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-xl font-medium"

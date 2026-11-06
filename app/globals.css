@@ -1,6 +1,11 @@
 @import "tailwindcss";
 
+/* The app is light-only: a white page, white cards and fixed dark text (text-gray-900 and friends). There is deliberately no
+   `prefers-color-scheme: dark` override: it would turn the page near-black under those fixed colors and make the headings
+   nearly invisible whenever the visitor's operating system is in dark mode. `color-scheme: light` also keeps the
+   browser's own form controls, date pickers and scrollbars light in that case. */
 :root {
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #171717;
 }
@@ -9,14 +14,10 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  /* Tailwind's `font-mono` (barcodes, supplier numbers) must not point at --font-geist-mono: nothing defines it, so the
+     text would silently fall back to the proportional font. No monospace web font is loaded: this is the system
+     monospace stack, the same one the order sheet uses (.sheet-mono below). */
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
 body {
@@ -25,21 +26,124 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* Inputs always use dark text; placeholders stay mid-gray.
-   Prevents the dark-mode foreground color (#ededed) from
-   making typed text invisible on light backgrounds. */
+/* Inputs always use dark text, whatever color the text around them has. */
 input:not([type="file"]),
 textarea,
 select {
   color: #111827;
 }
 
+/* Placeholders: gray-500 is 4.83:1 on white (gray-400, #9ca3af, is only 2.5:1). This rule is outside any @layer, so it also
+   wins over Tailwind's placeholder:text-* utilities. */
 ::placeholder {
-  color: #9ca3af;
+  color: #6b7280;
   opacity: 1;
 }
 
 @keyframes kiosk-shrink {
   from { width: 100%; }
   to { width: 0%; }
+}
+
+/* ── Order sheet (app/order-sheet) ───────────────────────────────────────────────────────────────────────────
+   The sheet is ONE component (<PrintSheet>): a "paper" preview on screen AND the thing that prints. Only
+   `.print-sheet` prints: the page marks everything else `print:hidden`, and the boxes around the sheet carry
+   `.print-reset`. Paper size and page margins come from an @page rule that the page injects for the chosen paper
+   (Letter or A4). Everything below is scoped with :has(.print-sheet), so printing any other page is unchanged. */
+
+/* System fonts: they look the same on every computer and embed cleanly in a saved PDF. */
+.sheet-font {
+  font-family: Arial, Helvetica, "Liberation Sans", sans-serif;
+}
+.sheet-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media print {
+  /* .print-unavailable is the notice the page prints while there is no sheet (the inventory is loading or failed to load). */
+  html:has(.print-sheet),
+  body:has(.print-sheet),
+  html:has(.print-unavailable),
+  body:has(.print-unavailable) {
+    background: #fff !important;
+    color: #000 !important;
+  }
+  body:has(.print-sheet),
+  body:has(.print-unavailable) {
+    min-height: 0 !important;
+  }
+  main:has(.print-sheet) {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* The boxes around the sheet lose their card look, and any scrolling or clipping: an overflow box would cut a long
+     table off at the end of the first page. */
+  .print-reset {
+    display: block !important;
+    width: auto !important;
+    max-width: none !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    background: none !important;
+    overflow: visible !important;
+    transform: none !important;
+    outline: 0 !important;
+  }
+
+  .print-sheet {
+    width: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
+    background: #fff !important;
+    color: #000 !important;
+  }
+  .print-sheet h3,
+  .print-sheet dl {
+    break-after: avoid;
+  }
+  /* 1px short of the full width: with collapsed borders the outer half of the right border sits outside the table box, and
+     on some paper sizes the printer clips it at the page edge, which loses the table's right-hand line. */
+  .print-sheet table {
+    table-layout: fixed;
+    width: calc(100% - 1px);
+    border-collapse: collapse;
+  }
+  /* The column headings (and the footer line) repeat on every page; a row is never split across two pages. */
+  .print-sheet thead {
+    display: table-header-group;
+  }
+  .print-sheet tfoot {
+    display: table-footer-group;
+  }
+  .print-sheet tr {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  /* The notes row closes the sheet and is taller than an item row. On its own, a notes row that does not fit under the last
+     item row moves to a NEW page by itself and leaves a last page with the column headings and the notes but no item rows.
+     So it is kept together with the last item row: "avoid" is stated on both sides of that one break (the notes row says
+     "not before me", the row above it says "not after me"; browsers differ in which side they read), and a page break falls
+     one row earlier instead. If the notes alone are taller than a whole page nothing can keep them together, and they flow
+     onto the next pages. These are separate rules so a browser that does not know :has() still reads the first one. */
+  .print-sheet tr.sheet-notes {
+    break-before: avoid;
+    page-break-before: avoid;
+  }
+  .print-sheet tr:has(+ tr.sheet-notes) {
+    break-after: avoid;
+    page-break-after: avoid;
+  }
+  .print-sheet th,
+  .print-sheet td {
+    overflow-wrap: anywhere;
+  }
 }

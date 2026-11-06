@@ -1,104 +1,82 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextRequest } from "next/server";
 import { supabase } from "@/lib/db";
+import { ITEM_NOT_FOUND_MESSAGE } from "@/lib/api-errors";
+import { parseMedicationId } from "@/lib/ids";
+import { normalizeMedication } from "@/lib/normalize";
+import { errorResponse, invalidIdResponse, json, readJsonObject, readMedicationFields } from "../_shared";
 
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+// Never serve a cached item: a stale response makes a saved edit look lost.
+export const dynamic = "force-dynamic";
+
+type Params = { params: Promise<{ id: string }> };
+
+const NOT_FOUND = ITEM_NOT_FOUND_MESSAGE;
+
+export async function GET(_request: NextRequest, { params }: Params) {
   try {
-    const { id } = await params;
-    const { data, error } = await supabase
-      .from("medications")
-      .select("*")
-      .eq("id", Number(id))
-      .single();
+    const id = parseMedicationId((await params).id);
+    if (id === null) return invalidIdResponse();
 
-    if (error || !data) {
-      return NextResponse.json({ error: "Medication not found" }, { status: 404 });
-    }
+    const { data, error } = await supabase.from("medications").select("*").eq("id", id).maybeSingle();
+    if (error) return errorResponse(error, "medications.read", "GET /api/medications/[id]");
+    if (!data) return json({ error: "Medication not found" }, 404);
 
-    return NextResponse.json(data);
-  } catch (error) {
-    console.error(error);
-    return NextResponse.json({ error: "Failed to fetch medication" }, { status: 500 });
-  }
-}
-
-export async function PUT(
-  request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await params;
-    const body = await request.json();
-    const { name, barcode, photo_url, stock, threshold, vendor_url, unit, notes, category_id } = body;
-
-    if (!barcode) {
-      return NextResponse.json({ error: "Barcode is required" }, { status: 400 });
-    }
-
-    const { data, error } = await supabase
-      .from("medications")
-      .update({
-        name: name?.trim() || null,
-        barcode,
-        photo_url: photo_url || null,
-        stock: stock ?? 0,
-        threshold: threshold ?? 10,
-        vendor_url: vendor_url || null,
-        unit: unit || "units",
-        notes: notes || null,
-        category_id: category_id ?? null,
-        is_unnamed: false, // any admin edit clears the unnamed flag
-      })
-      .eq("id", Number(id))
-      .select()
-      .single();
-
-    if (error) {
-      console.error("[PUT /api/medications] Supabase error:", error);
-      if (error.code === "23505") {
-        return NextResponse.json({ error: "Barcode already exists" }, { status: 409 });
-      }
-      if (error.code === "42501" || error.message?.includes("row-level security")) {
-        return NextResponse.json({ error: "Update blocked by Row Level Security — check Supabase RLS policies" }, { status: 403 });
-      }
-      return NextResponse.json({ error: error.message || "Failed to update medication", detail: error.details ?? "", code: error.code }, { status: 500 });
-    }
-
-    if (!data) {
-      return NextResponse.json({ error: "Medication not found" }, { status: 404 });
-    }
-
-    return NextResponse.json(data);
+    return json(normalizeMedication(data));
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error("[PUT /api/medications] Unexpected error:", msg);
-    return NextResponse.json(
-      { error: msg.includes("ENOTFOUND") ? "Cannot reach Supabase — check NEXT_PUBLIC_SUPABASE_URL in .env.local" : "Failed to update medication", detail: msg },
-      { status: 500 }
-    );
+    return errorResponse(err, "medications.read", "GET /api/medications/[id]");
   }
 }
 
-export async function DELETE(
-  _request: NextRequest,
-  { params }: { params: Promise<{ id: string }> }
-) {
+/**
+ * Partial update: only keys present in the body are written. An omitted key is never touched (a body without
+ * `category_id` must not clear the category); an explicit null clears a nullable column.
+ */
+export async function PUT(request: NextRequest, { params }: Params) {
   try {
-    const { id } = await params;
+    const id = parseMedicationId((await params).id);
+    if (id === null) return invalidIdResponse();
 
-    // Transactions are deleted automatically via ON DELETE CASCADE
-    const { error } = await supabase
+    const parsedBody = await readJsonObject(request);
+    if (!parsedBody.ok) return json({ error: parsedBody.error }, parsedBody.status);
+
+    const fields = readMedicationFields(parsedBody.body);
+    if (!fields.ok) return json({ error: fields.error, field: fields.field }, 400);
+    if (Object.keys(fields.patch).length === 0) return json({ error: "Nothing to update" }, 400);
+
+    const { data, error } = await supabase
       .from("medications")
-      .delete()
-      .eq("id", Number(id));
+      // Any successful edit clears the "unnamed — needs review" flag.
+      // The flag means "created by a scan, nobody has looked at it yet", so saving counts as the review even when the
+      // edit does not touch the name. This is a product rule, not a technical one: clearing the flag only when a name is
+      // sent would keep an item in the review queue after an unrelated edit, and staff could then never dismiss an item
+      // they choose not to name.
+      // To change the rule, replace `is_unnamed: false` here and update the tests marked "documented contract".
+      .update({ ...fields.patch, is_unnamed: false })
+      .eq("id", id)
+      .select("*")
+      .single();
+    if (error) return errorResponse(error, "medications.update", "PUT /api/medications/[id]");
+    if (!data) return json({ error: NOT_FOUND }, 404);
 
-    if (error) throw error;
+    return json(normalizeMedication(data));
+  } catch (err) {
+    return errorResponse(err, "medications.update", "PUT /api/medications/[id]");
+  }
+}
 
-    return NextResponse.json({ success: true });
-  } catch (error) {
-    console.error(error);
-    return NextResponse.json({ error: "Failed to delete medication" }, { status: 500 });
+export async function DELETE(_request: NextRequest, { params }: Params) {
+  try {
+    const id = parseMedicationId((await params).id);
+    if (id === null) return invalidIdResponse();
+
+    // Transactions are deleted automatically via ON DELETE CASCADE.
+    // Ask for the deleted rows back so "nothing matched" is reported instead of a false success.
+    const { data, error } = await supabase.from("medications").delete().eq("id", id).select("id");
+    if (error) return errorResponse(error, "medications.delete", "DELETE /api/medications/[id]");
+    if (!data || data.length === 0) return json({ error: NOT_FOUND }, 404);
+
+    return json({ success: true });
+  } catch (err) {
+    return errorResponse(err, "medications.delete", "DELETE /api/medications/[id]");
   }
 }
