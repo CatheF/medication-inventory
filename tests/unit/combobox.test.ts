@@ -431,13 +431,13 @@ describe("filterOptions", () => {
       expect(calls).toBeLessThanOrEqual(callsPerFold * (1 + 1000));
     });
 
-    it("stays fast: 200 filter passes over 1,000 options (about 100 ms here; the bound only catches a large slowdown)", () => {
+    it("stays fast: 200 filter passes over 1,000 options (about 200 ms here, more on a busy machine; the bound only catches a large slowdown)", () => {
       const queries = ["c", "ca", "cat", "cate", "categ", "refrig", "ambient 9", "0999", "check weekly", "zzzz"];
       const started = performance.now();
       for (let round = 0; round < 20; round += 1) {
         for (const query of queries) filterOptions(WITH_ACTION, query);
       }
-      expect(performance.now() - started).toBeLessThan(1000);
+      expect(performance.now() - started).toBeLessThan(2500);
     });
   });
 

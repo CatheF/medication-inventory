@@ -1844,7 +1844,7 @@ const oracleFoldCache = new Map<string, string>();
 function oracleFold(text: string): string {
   let folded = oracleFoldCache.get(text);
   if (folded === undefined) {
-    folded = oracleStrip(text).normalize("NFKC").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+    folded = oracleStrip(text).normalize("NFKC").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     oracleFoldCache.set(text, folded);
   }
   return folded;

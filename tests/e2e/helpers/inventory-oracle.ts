@@ -1,12 +1,13 @@
 // An INDEPENDENT oracle for the Inventory tab's browse behavior (tests/e2e/inventory-browse.spec.ts).
 //
 // It answers "which items must be on screen, in which order, under which headings, with which numbers" for a given set of
-// synthetic items, categories and view, using plain code written from the written rules (SPEC.md 2.7 / 2.10 and the owner's
-// TASK.md section 2). It deliberately imports NOTHING from lib/inventory-view.ts (only types), so a bug in the app's view logic
-// cannot hide behind the same bug in the check.
+// synthetic items, categories and view, using plain code written from the written rules (below, and the owner's requirement to
+// browse the inventory by category). It deliberately imports NOTHING from lib/inventory-view.ts (only types), so a bug in the
+// app's view logic cannot hide behind the same bug in the check.
 //
 // Rules, as written down:
-//   search   split on whitespace; EVERY term must be a case-insensitive substring of "name barcode supplier order no."
+//   search   split on whitespace; EVERY term must be a substring of "name barcode supplier order no.", ignoring case and accents
+//            ("creme" finds "Crème"; the accent may be one character or a letter plus a combining mark)
 //   stock    low: stock <= threshold; ok: stock > threshold; all: no filter
 //   category all | uncategorized (no category_id) | unknown (category_id set but not in the category list) | one category
 //   sort     name: natural case-insensitive, unnamed last (by barcode); stock-asc: stock then name; category: category name, then name
@@ -28,9 +29,10 @@ export const SEPARATOR = " · ";
 const collator = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 const compareText = (a: string, b: string): number => collator.compare(a, b);
 
-// The comparison form: NFKC, lower case, accents out (NFD without the combining marks), then NFC. Written out here on purpose,
-// not imported, so the oracle stays an independent statement of what the search should find.
-const lower = (text: string): string => text.normalize("NFKC").toLowerCase().normalize("NFD").replace(/\p{M}/gu, "").normalize("NFC");
+// The comparison form: NFKC, lower case, then accents out (NFD without the Latin combining marks U+0300 to U+036F). Written out
+// here on purpose, and with a narrower rule than the app's (no final NFC, Latin marks only), so the oracle is a separate
+// statement of what the search should find, not a copy of the app's recipe.
+const lower = (text: string): string => text.normalize("NFKC").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 const sameId = (a: unknown, b: unknown): boolean => a !== null && a !== undefined && b !== null && b !== undefined && String(a).toLowerCase() === String(b).toLowerCase();
 
 export function searchTerms(search: string): string[] {

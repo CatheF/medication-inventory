@@ -13,7 +13,7 @@ import { stripInvisibleCharacters } from "./text-safety";
 // Every combining mark, not only the Latin accents: the accents are the part that matters to this app (French-labelled
 // products such as "Crème antiseptique" sit next to plain ones), and the rest is the same kind of thing (the voiced-sound
 // marks of kana, the vowel signs of Indic scripts, Arabic and Hebrew vowel points). Searching ignores them too: it finds
-// slightly more, never less. The regex has the `g` flag and is only ever used with String.prototype.replace, which starts
+// more, and for any text a person would type never less. The regex has the `g` flag and is only ever used with String.prototype.replace, which starts
 // from the beginning every time, so it keeps no state between calls.
 const COMBINING_MARKS = /\p{M}/gu;
 
