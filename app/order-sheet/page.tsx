@@ -365,9 +365,14 @@ export default function OrderSheetPage() {
                 <h2 id="items-heading" className={H2}>
                   Items on this sheet <span className="font-normal text-gray-600">({count})</span>
                 </h2>
-                <Link href={INVENTORY_TAB_HREF} data-testid="inventory-tab-link" className={`${TEXT_LINK} inline-flex min-h-11 items-center`}>
-                  Pick items on the Inventory tab
-                </Link>
+                {/* With no rows the empty card right below offers the very same link as its main action (same text, same
+                    target): two identical links at once are noise for everyone and a puzzle for a screen reader's link list. So
+                    the heading row carries it only while the sheet has rows. */}
+                {count > 0 ? (
+                  <Link href={INVENTORY_TAB_HREF} data-testid="inventory-tab-link" className={`${TEXT_LINK} inline-flex min-h-11 items-center`}>
+                    Pick items on the Inventory tab
+                  </Link>
+                ) : null}
               </div>
 
               {/* Static card (not a live region): "Sheet cleared" and "Removed … 0 items left" are announced by the status line of

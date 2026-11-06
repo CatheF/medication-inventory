@@ -4,13 +4,8 @@
 // ever compared as strings; nothing in here calls Number() on them.
 
 import type { Category, Medication } from "@/lib/db";
-import {
-  UNKNOWN_CATEGORY_ID,
-  isUnknownCategoryFilter,
-  naturalCompare,
-  type ItemGroup,
-  type ViewState,
-} from "@/lib/inventory-view";
+import { categoryTitles, idKey } from "@/lib/filter-chips";
+import { naturalCompare, type ItemGroup } from "@/lib/inventory-view";
 
 export type StockStatus = "out" | "low" | "ok";
 
@@ -37,33 +32,20 @@ export function ignoreHeldEnter(event: { key: string; repeat: boolean; preventDe
   if (event.repeat && event.key === "Enter") event.preventDefault();
 }
 
-/** Comparison key for a category id, written exactly like the view logic does it: trimmed, lower-cased, blank = null. */
-export function idKey(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" && !Number.isFinite(value)) return null;
-  const key = String(value).trim().toLowerCase();
-  return key === "" ? null : key;
-}
+// The comparison key for a category id (trimmed, lower-cased, blank = null) is defined once, in lib/filter-chips.ts, because the
+// filter chips on both screens need it too. It is re-exported so the Inventory components keep importing it from here.
+export { idKey };
 
 export type CategoryOption = { id: string; key: string; title: string };
 
-const UNNAMED_CATEGORY_TITLE = "Unnamed category";
-
 /**
  * The categories in the order the chips and the groups use: natural, case-insensitive title order, ties by list
- * position. Same filtering as lib/inventory-view.ts: blank ids, the reserved "unknown" id and repeated ids are left
- * out (an item can never point at them, so a chip for them would always read 0).
+ * position. Which categories count, and what each one is called, comes from categoryTitles (lib/filter-chips.ts): blank ids,
+ * the reserved "unknown" id and repeated ids are left out (an item can never point at them, so a chip for them would always
+ * read 0), and a blank name reads "Unnamed category". The same rules as lib/inventory-view.ts.
  */
 export function orderCategories(categories: readonly Category[]): CategoryOption[] {
-  const seen = new Set<string>();
-  const entries: Array<CategoryOption & { position: number }> = [];
-  categories.forEach((category, position) => {
-    const key = idKey(category.id);
-    if (key === null || key === UNKNOWN_CATEGORY_ID || seen.has(key)) return;
-    seen.add(key);
-    const name = typeof category.name === "string" ? category.name.trim() : "";
-    entries.push({ id: String(category.id), key, title: name === "" ? UNNAMED_CATEGORY_TITLE : name, position });
-  });
+  const entries = categoryTitles(categories);
   entries.sort((a, b) => naturalCompare(a.title, b.title) || a.position - b.position);
   return entries.map(({ id, key, title }) => ({ id, key, title }));
 }
@@ -97,48 +79,6 @@ export function displayName(item: Pick<Medication, "name">): string | null {
  */
 export function rememberedName(item: Pick<Medication, "name" | "barcode">): string {
   return displayName(item) ?? `Unnamed item (barcode ${item.barcode})`;
-}
-
-// ── Active filters (the chips under the toolbar) ──────────────────────────────────────────────────────────────
-
-const OPEN_QUOTE = "“";
-const CLOSE_QUOTE = "”";
-
-// Characters that render as nothing (zero-width spaces and joiners, soft hyphen, direction marks, variation selectors...).
-// The same set lib/inventory-view.ts ignores in a search, so the chip and the summary line quote the same text.
-const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
-
-/**
- * The search as the summary line quotes it: invisible characters dropped, trimmed, inner whitespace collapsed to single
- * spaces. "" means "no search" (and then there is no Search chip either).
- */
-export function searchChipText(search: unknown): string {
-  return typeof search === "string" ? search.replace(INVISIBLE, "").trim().replace(/\s+/g, " ") : "";
-}
-
-/** One applied filter, as the chips show it. `key` doubles as the chip's test id suffix. */
-export type ActiveFilterSpec = { key: "category" | "stock" | "search"; label: string; value: string };
-
-/**
- * The filters that are on, in the order the summary line lists them: Category, Stock, Search. A filter that is not
- * narrowing the list (All, stock All, an empty search) has no entry. Category values: the category's name,
- * "Uncategorized", or "Category unavailable" (the pseudo category, or an id the list cannot name).
- */
-export function describeActiveFilters(view: ViewState, titleByKey: ReadonlyMap<string, string>): ActiveFilterSpec[] {
-  const specs: ActiveFilterSpec[] = [];
-  const category = view.category;
-  if (category.kind === "uncategorized") {
-    specs.push({ key: "category", label: "Category", value: "Uncategorized" });
-  } else if (category.kind === "category") {
-    const key = isUnknownCategoryFilter(category) ? null : idKey(category.id);
-    const title = key === null ? undefined : titleByKey.get(key);
-    specs.push({ key: "category", label: "Category", value: title ?? "Category unavailable" });
-  }
-  if (view.stock === "low") specs.push({ key: "stock", label: "Stock", value: "Low" });
-  else if (view.stock === "ok") specs.push({ key: "stock", label: "Stock", value: "Adequate" });
-  const search = searchChipText(view.search);
-  if (search !== "") specs.push({ key: "search", label: "Search", value: `${OPEN_QUOTE}${search}${CLOSE_QUOTE}` });
-  return specs;
 }
 
 /**

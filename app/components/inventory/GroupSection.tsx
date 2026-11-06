@@ -12,6 +12,8 @@ type GroupSectionProps = {
   count: number;
   /** How many of this group's visible items are on the order sheet. */
   onSheetCount: number;
+  /** True when the sheet holds the most rows it can: the group's "Add all" turns into the status "Sheet full (500 items)". */
+  sheetFull: boolean;
   open: boolean;
   onToggle: () => void;
   /** Puts every item this group shows that is not on the order sheet yet on the sheet. */
@@ -27,7 +29,18 @@ type GroupSectionProps = {
  * screen "Add all N" wraps under the title. Collapsed rows stay in the page (hidden), so ticks and focus are never lost
  * by collapsing; the header (and "Add all N") stays visible.
  */
-export function GroupSection({ groupKey, title, count, onSheetCount, open, onToggle, onAddAll, note, children }: GroupSectionProps) {
+export function GroupSection({
+  groupKey,
+  title,
+  count,
+  onSheetCount,
+  sheetFull,
+  open,
+  onToggle,
+  onAddAll,
+  note,
+  children,
+}: GroupSectionProps) {
   const listId = `group-list-${groupKey}`;
   return (
     <section className="mb-5" data-testid={`group-${groupKey}`}>
@@ -60,7 +73,15 @@ export function GroupSection({ groupKey, title, count, onSheetCount, open, onTog
           </button>
         </h3>
         <div className="flex shrink-0 items-center pr-3 pb-1.5 pl-4 sm:py-1 sm:pl-0">
-          <BulkAddButton scope="group" groupKey={groupKey} title={title} shown={count} pending={count - onSheetCount} onAdd={onAddAll} />
+          <BulkAddButton
+            scope="group"
+            groupKey={groupKey}
+            title={title}
+            shown={count}
+            pending={count - onSheetCount}
+            sheetFull={sheetFull}
+            onAdd={onAddAll}
+          />
         </div>
       </div>
       <div

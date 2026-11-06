@@ -6,6 +6,8 @@
 // The searchable picker replaces a native <select> once a list is long. Callers switch with
 // shouldUseCombobox(realOptionCount): a native select up to 10 real options, the Combobox from 11.
 
+import { stripInvisibleCharacters } from "./text-safety";
+
 // ── Public types ────────────────────────────────────────────────────────────────
 
 /** Callers switch from a native <select> to the Combobox when they have at least this many real options. */
@@ -29,12 +31,11 @@ export function shouldUseCombobox(realOptionCount: number): boolean {
 
 // ── Search folding ──────────────────────────────────────────────────────────────
 
-// The SAME rule as `fold` in lib/inventory-view.ts (which is private there, so it is repeated here instead of imported;
-// tests/unit/combobox.test.ts compares the two so they cannot drift apart): invisible characters are dropped first so an
-// accent that one separated from its letter still composes, then NFKC (canonical equivalence and look-alike forms:
-// "µg" = "μg", full-width letters, ligatures), then lower case. Accents are NOT removed: "cafe" does not find "Café".
-// On top of that, whitespace runs become one space and the ends are trimmed.
-const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
+// The SAME rule as `fold` in lib/inventory-view.ts (which is private there; tests/unit/combobox.test.ts compares the two so
+// they cannot drift apart): invisible characters are dropped first (stripInvisibleCharacters, lib/text-safety.ts: the one
+// definition both searches share) so an accent that one separated from its letter still composes, then NFKC (canonical
+// equivalence and look-alike forms: "µg" = "μg", full-width letters, ligatures), then lower case. Accents are NOT removed:
+// "cafe" does not find "Café". On top of that, whitespace runs become one space and the ends are trimmed.
 
 /**
  * Case-insensitive, accent-sensitive search form of `text`: invisible and format characters removed, NFKC, lower case,
@@ -42,7 +43,7 @@ const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
  */
 export function foldForSearch(text: string): string {
   if (typeof text !== "string") return "";
-  return text.replace(INVISIBLE, "").normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+  return stripInvisibleCharacters(text).normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function searchTerms(query: string): string[] {

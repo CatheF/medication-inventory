@@ -17,6 +17,8 @@ export default defineConfig({
   use: {
     baseURL,
     viewport: { width: 1280, height: 900 },
+    // Chips and the like fade in 150 ms; scanning or clicking in the middle of a transition made accessibility checks flaky.
+    reducedMotion: "reduce",
     launchOptions: process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {},
   },
   webServer: process.env.E2E_BASE_URL

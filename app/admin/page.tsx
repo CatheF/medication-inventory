@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, FormEvent, KeyboardEvent, MouseEvent, ReactNode } from "react";
 import { shouldUseCombobox, type ComboboxOption } from "@/lib/combobox";
 import type { Category, Medication } from "@/lib/db";
+import { categoryTitleByKey, describeActiveFilters, type ActiveFilterKey } from "@/lib/filter-chips";
 import { sameId } from "@/lib/ids";
 import {
   DEFAULT_VIEW,
@@ -449,38 +450,10 @@ function NativeOptions({ options }: { options: readonly ComboboxOption[] }) {
 }
 
 // ── Active filters and empty states ─────────────────────────────────────────────────────────────
-
-/**
- * Does the search box hold a real search? Blank text, whitespace and text made only of invisible characters do not count.
- * The view logic itself answers (with nothing to search, so it costs nothing), so the chip and the "Showing X of Y"
- * line can never disagree about whether a search is on.
- */
-function isSearchActive(search: string): boolean {
-  return selectView(NO_MEDICATIONS, [], { ...DEFAULT_VIEW, search }).summary.filtersActive;
-}
-
-// Characters that render as nothing: zero-width spaces and joiners, the soft hyphen, direction marks and bidi overrides,
-// variation selectors, tag characters... Text pasted from a web page or a PDF carries them. This is the set the view logic
-// leaves out of a search (lib/inventory-view.ts keeps its copy private, and so does the Inventory tab's chip), so the chip
-// and the "Showing X of Y" line always quote the same text. Left in, a pasted bidi override would even make the chip read
-// backwards ("neforpubi") while the summary line says "ibuprofen".
-const INVISIBLE_TEXT = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
-
-/**
- * The search as the chip shows it, and as the summary line quotes it: invisible characters dropped, ends trimmed, runs of
- * whitespace collapsed. The chip's title holds the text whole when the chip cuts it short.
- */
-function searchChipValue(search: string): string {
-  return search.replace(INVISIBLE_TEXT, "").trim().replace(/\s+/g, " ");
-}
-
-/** What the category chip says: the category's name, "Uncategorized" or "Category unavailable"; null while the filter is off. */
-function categoryChipValue(filter: CategoryFilter, categories: readonly Category[]): string | null {
-  if (filter.kind === "all") return null;
-  if (filter.kind === "uncategorized") return "Uncategorized";
-  if (isUnknownCategoryFilter(filter)) return "Category unavailable";
-  return categoryLabel(filter.id, categories).title;
-}
+// The words on the filter chips ("Category: Antibiotics", "Search: “ibuprofen”") come from lib/filter-chips.ts, the one
+// implementation the Inventory tab uses as well, so the two screens cannot word the same filter differently. Whether a search
+// counts as one (blank text, whitespace and text made only of invisible characters do not) is decided there too, by the same
+// rule the "Showing X of Y" line uses (tests/unit/filter-chips.test.ts compares the two).
 
 const EMPTY_ICON: Record<EmptyKind, EmptyIcon> = { "no-items": "box", "category-empty": "folder", "no-match": "search" };
 
@@ -1424,24 +1397,23 @@ export default function AdminPage() {
   };
 
   // The chips under the filter row: one for each filter that is on. Taking one off resets only that filter.
-  const categoryChip = categoryChipValue(categoryFilter, categories);
-  const searchText = searchChipValue(search);
-  const searchChip = searchText !== "" && isSearchActive(search) ? searchText : null;
+  const filterSpecs = describeActiveFilters(viewState, categoryTitleByKey(categories));
 
-  const removeFilter = (key: "category" | "search") => {
+  const removeFilter = (key: ActiveFilterKey, isLast: boolean) => {
+    // This list has no stock filter, so there is never a "stock" chip to remove here.
     if (key === "category") setCategoryFilter({ kind: "all" });
-    else setSearch("");
+    else if (key === "search") setSearch("");
     // While another chip is left, ActiveFilterChips hands the keyboard focus to its neighbour. The last chip takes the
     // whole row with it, so then the focus goes to the search box (always there), never to <body>.
-    if (categoryChip === null || searchChip === null) searchRef.current?.focus();
+    if (isLast) searchRef.current?.focus();
   };
 
-  const activeFilters: ActiveFilter[] = [
-    ...(categoryChip === null
-      ? []
-      : [{ key: "category", label: "Category", value: categoryChip, onRemove: () => removeFilter("category") }]),
-    ...(searchChip === null ? [] : [{ key: "search", label: "Search", value: searchChip, onRemove: () => removeFilter("search") }]),
-  ];
+  const activeFilters: ActiveFilter[] = filterSpecs.map((spec) => ({
+    key: spec.key,
+    label: spec.label,
+    value: spec.value,
+    onRemove: () => removeFilter(spec.key, filterSpecs.length === 1),
+  }));
 
   // "Add medication" in the empty list opens the same form as "+ Add Medication" at the top of the page. The card's own
   // button is the control the focus returns to when the form is cancelled (it is found again by its test id, see openerRef).

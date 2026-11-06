@@ -24,9 +24,9 @@ export function NavBar() {
           <Link href="/" className={`${TARGET} mr-3 sm:mr-auto font-bold text-lg tracking-tight`}>
             MedInventory
           </Link>
-          <NavLink href="/" current={pathname === "/"}>
-            Scan
-          </NavLink>
+          {/* No highlight for "/": the home page holds both the Scan and the Inventory tab and the nav cannot tell which one is
+              showing (the tab control right below it does), so marking "Scan" as the current page would be wrong half the time. */}
+          <NavLink href="/">Scan</NavLink>
           <NavLink href="/admin" current={pathname === "/admin"}>
             Admin
           </NavLink>

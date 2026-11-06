@@ -17,6 +17,7 @@
 //     empty-quotes message, and it treats look-alike forms as equal (NFKC: "µg" = "μg", full-width letters, ligatures).
 
 import type { Category, Medication } from "./db";
+import { stripInvisibleCharacters } from "./text-safety";
 
 // ── Public types ────────────────────────────────────────────────────────────────
 
@@ -118,18 +119,11 @@ export function naturalCompare(a: string, b: string): number {
   return collator.compare(a, b);
 }
 
-/**
- * Characters that render as nothing: zero-width spaces and joiners, the soft hyphen, direction marks and isolates,
- * the word joiner, variation selectors, Hangul fillers, tag characters... (Unicode "format" characters plus the
- * Default_Ignorable_Code_Point set). Text pasted from web pages, PDFs, chat apps and email carries them. They are not
- * whitespace, so left alone a search made only of them would count as real text (every item hidden behind an
- * empty-looking “” message) and one inside a word would stop it from matching.
- */
-const INVISIBLE = /[\p{Cf}\p{Default_Ignorable_Code_Point}]/gu;
-
-function stripInvisible(text: string): string {
-  return text.replace(INVISIBLE, "");
-}
+// Characters that render as nothing (zero-width spaces and joiners, the soft hyphen, direction marks and isolates, the word
+// joiner, variation selectors, Hangul fillers, tag characters...) are dropped by stripInvisibleCharacters (lib/text-safety.ts,
+// the one rule shared with the combobox search and the filter chips). Text pasted from web pages, PDFs, chat apps and email
+// carries them. They are not whitespace, so left alone a search made only of them would count as real text (every item hidden
+// behind an empty-looking “” message) and one inside a word would stop it from matching.
 
 /**
  * Case-insensitive form used for search, applied to the typed search and to the searched text alike:
@@ -140,7 +134,7 @@ function stripInvisible(text: string): string {
  * NFKC never produces an invisible character from a visible one, so one strip pass is enough.
  */
 function fold(text: string): string {
-  return stripInvisible(text).normalize("NFKC").toLowerCase();
+  return stripInvisibleCharacters(text).normalize("NFKC").toLowerCase();
 }
 
 /**
@@ -151,7 +145,7 @@ function fold(text: string): string {
  * blank) still count as text.
  */
 function displaySearch(search: unknown): string {
-  return typeof search === "string" ? stripInvisible(search).trim().replace(/\s+/g, " ") : "";
+  return typeof search === "string" ? stripInvisibleCharacters(search).trim().replace(/\s+/g, " ") : "";
 }
 
 function pluralItems(count: number): string {

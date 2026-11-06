@@ -3,8 +3,9 @@
 // Layout: table-driven tests per function, boundary cases (0 / 1 / many options, only actions, duplicate labels, 1,000
 // options), a seeded property test that checks filterOptions against an independent naive oracle, an exhaustive sweep of
 // moveActive, a sweep of every BMP character through foldForSearch, and a cross-check that the search folding agrees
-// with the Inventory search (lib/inventory-view.ts keeps its own private copy of the rule). Synthetic data only. The
-// component itself has no DOM test (no jsdom in this repo): it is checked in the browser.
+// with the Inventory search (lib/inventory-view.ts keeps its own private `fold`; both drop invisible characters with the one
+// shared stripInvisibleCharacters of lib/text-safety.ts, the rest of the folding is written twice, hence this cross-check).
+// Synthetic data only. The component itself has no DOM test (no jsdom in this repo): it is checked in the browser.
 import { describe, expect, it, vi } from "vitest";
 import type { Medication } from "@/lib/db";
 import { matchesSearch } from "@/lib/inventory-view";

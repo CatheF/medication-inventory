@@ -11,6 +11,7 @@ import {
   selectView,
   type ViewState,
 } from "@/lib/inventory-view";
+import { describeActiveFilters, type ActiveFilterKey } from "@/lib/filter-chips";
 import { addRows, removeRow } from "@/lib/order-sheet/draft";
 import { ORDER_SHEET_LIMITS } from "@/lib/order-sheet/types";
 import { useOrderDraft } from "@/lib/order-sheet/use-order-draft";
@@ -27,16 +28,7 @@ import { LoadErrorNotice } from "./LoadErrorNotice";
 import { OrderBar } from "./OrderBar";
 import { RetryButton } from "./RetryButton";
 import { StatCard } from "./StatCard";
-import {
-  categoryLabelFor,
-  describeActiveFilters,
-  idKey,
-  ignoreHeldEnter,
-  orderCategories,
-  plural,
-  rememberedName,
-  type ActiveFilterSpec,
-} from "./helpers";
+import { categoryLabelFor, idKey, ignoreHeldEnter, orderCategories, plural, rememberedName } from "./helpers";
 
 export type InventoryStatus = "loading" | "error" | "ready";
 
@@ -67,6 +59,12 @@ export type InventoryTabProps = {
 
 /** The message after "Add all" or its Undo. `addedIds` are exactly the rows THAT action put on the sheet (Undo takes only those off). */
 type BulkState = { text: string; canUndo: boolean; addedIds: readonly number[] };
+
+/** How the person last operated the filter chips, as far as the events on the chips can tell (see removeFilter). */
+type ChipInput = "keyboard" | "mouse" | "other";
+
+/** What the order bar says when an item could not be put on a sheet that already holds the most rows it can. */
+const SHEET_FULL_MESSAGE = `The sheet is full (${ORDER_SHEET_LIMITS.rows} items). Remove an item before adding another.`;
 
 const UNKNOWN_GROUP_NOTE =
   "These items point to a category that is not in the category list, so no category name can be shown for them.";
@@ -105,9 +103,10 @@ export function InventoryTab({
 
   const summaryRef = useRef<HTMLParagraphElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  // How the person last used the filter chips: "touch" (a tap), "pointer" (mouse or pen) or "keyboard" (also a screen
-  // reader's activation, which sends no pointer events). Only a tap changes what happens to focus (see removeFilter).
-  const chipInputRef = useRef<"touch" | "pointer" | "keyboard">("keyboard");
+  // How the person last operated the filter chips: a key press, a mouse press, or "other" (a finger or pen tap, or nothing
+  // that can be seen: a screen reader's activation sends neither key nor pointer events). Decides where focus goes when the
+  // last chip is removed (see removeFilter).
+  const chipInputRef = useRef<ChipInput>("other");
   const loadingRef = useRef<HTMLDivElement>(null);
   const errorRef = useRef<HTMLDivElement>(null);
   const pendingFocusRef = useRef(false);
@@ -169,7 +168,7 @@ export function InventoryTab({
   const handleToggle = useCallback((id: number, name: string) => {
     const current = sheetRef.current;
     if (!current.has(id) && current.count >= ORDER_SHEET_LIMITS.rows) {
-      setFullMessage(`The sheet is full (${ORDER_SHEET_LIMITS.rows} items). Remove an item before adding another.`);
+      setFullMessage(SHEET_FULL_MESSAGE);
       return;
     }
     setFullMessage(null);
@@ -182,21 +181,32 @@ export function InventoryTab({
   // "which rows did this action add" is exact even if the sheet changed in another tab a moment ago: addRows appends,
   // so the new rows are the ones after the old length. addRows stops at the row limit; when that cuts the action short
   // the message says so, and Undo only takes off what was really added.
+  // Once the sheet holds the most rows it can, the buttons are not offered any more (they read "Sheet full (500 items)",
+  // see BulkAddButton), so an action that adds nothing can only come from a sheet that was filled in another tab a moment ago.
+  // It changed nothing, so it says nothing new: the message of the previous action, and its Undo (which is still exact), stay
+  // as they are, and the order bar's sheet-is-full notice explains why nothing happened. It must never replace them with
+  // "Added 0 of N".
   const handleAddAll = useCallback((items: readonly Medication[], scopeTitle: string | null) => {
     const names = new Map(items.map((item) => [item.id, rememberedName(item)] as const));
     let requested = 0;
+    let rowsBefore = 0;
     let added: number[] = [];
     sheetRef.current.update((draft) => {
       const present = new Set(draft.rows.map((row) => row.id));
       const ids = items.filter((item) => !present.has(item.id)).map((item) => item.id);
       requested = ids.length;
+      rowsBefore = draft.rows.length;
       const next = addRows(draft, ids, names);
       added = next.rows.slice(draft.rows.length).map((row) => row.id);
       return next;
     });
     if (requested === 0) return; // everything was on the sheet already (the button is drawn as a status then)
-    setFullMessage(null);
     const count = added.length;
+    if (count === 0) {
+      if (rowsBefore >= ORDER_SHEET_LIMITS.rows) setFullMessage(SHEET_FULL_MESSAGE);
+      return; // nothing changed: keep the previous message and its Undo
+    }
+    setFullMessage(null);
     const text =
       count < requested
         ? `Added ${count} of ${requested}. The sheet is full (${ORDER_SHEET_LIMITS.rows} items).`
@@ -232,6 +242,8 @@ export function InventoryTab({
   };
 
   const sheetRows = sheet.draft.rows;
+  // The sheet holds the most rows it can: "Add all" is not offered any more (see BulkAddButton).
+  const sheetFull = sheet.count >= ORDER_SHEET_LIMITS.rows;
   const sheetCounts = useMemo(() => {
     if (model === null) return null;
     const known = new Set(medications.map((item) => item.id));
@@ -269,15 +281,25 @@ export function InventoryTab({
   // ── Active filter chips ────────────────────────────────────────────────────────────────────────
   // Removing a chip puts back ONLY that filter; the other filters, the sort, the grouping and every tick stay. The chips'
   // own focus rule covers a chip that has neighbours (focus moves to the next or previous chip). When the LAST chip goes,
-  // the chips disappear with the focused button, so focus is placed here: on the search box, which is where a person
-  // starts over. Not after a tap on a touch screen: focusing a text box there raises the on-screen keyboard over the list
-  // the person just widened, and a tap has no keyboard focus to keep.
+  // the chips disappear together with the button that had focus, so this code has to put focus somewhere real: the contract
+  // of ActiveFilterChips is that the caller never leaves it on <body>. Where it goes depends on how the chip was removed:
+  //   by keyboard or mouse -> the search box, the place to start over. A physical keyboard has no on-screen keyboard to raise,
+  //                           and a mouse user expects the pointer-focus convention of a desktop page.
+  //   in any other way     -> the results line (the tabIndex -1 line that "Clear filters" also focuses). That covers a finger
+  //                           or pen tap, where a focused text box would raise the on-screen keyboard over the list the person
+  //                           has just widened, AND an activation that sends neither key nor pointer events (a screen reader's
+  //                           double tap), which cannot be told apart from a tap. The line is read out (the new count), takes no
+  //                           typing and so never raises a keyboard.
+  // The input is read from the events seen on the chips (the wrapper below) and USED UP by the removal, so a silent activation
+  // is never mistaken for the key press or click that happened to come before it.
   const removeFilter = useCallback(
-    (key: ActiveFilterSpec["key"], isLast: boolean) => {
+    (key: ActiveFilterKey, isLast: boolean) => {
+      const input = chipInputRef.current;
+      chipInputRef.current = "other";
       if (key === "category") onViewChange((previous) => ({ ...previous, category: { kind: "all" } }));
       else if (key === "stock") onViewChange((previous) => ({ ...previous, stock: "all" }));
       else onViewChange((previous) => ({ ...previous, search: "" }));
-      if (isLast && chipInputRef.current !== "touch") searchInputRef.current?.focus();
+      if (isLast) (input === "other" ? summaryRef : searchInputRef).current?.focus();
     },
     [onViewChange]
   );
@@ -433,7 +455,7 @@ export function InventoryTab({
                 "clear all" here on purpose: the results line already has the one "Clear filters" button. */}
             <div
               onPointerDownCapture={(event) => {
-                chipInputRef.current = event.pointerType === "touch" ? "touch" : "pointer";
+                chipInputRef.current = event.pointerType === "mouse" ? "mouse" : "other";
               }}
               onKeyDownCapture={() => {
                 chipInputRef.current = "keyboard";
@@ -483,6 +505,7 @@ export function InventoryTab({
                     scope="flat"
                     shown={model.visible.length}
                     pending={flatPending}
+                    sheetFull={sheetFull}
                     onAdd={() => handleAddAll(model.visible, null)}
                   />
                 )}
@@ -508,6 +531,7 @@ export function InventoryTab({
                     title={group.title}
                     count={group.items.length}
                     onSheetCount={group.items.filter((item) => sheet.has(item.id)).length}
+                    sheetFull={sheetFull}
                     open={!collapsed.has(group.key)}
                     onToggle={() => toggleGroup(group.key)}
                     onAddAll={() => handleAddAll(group.items, group.title)}

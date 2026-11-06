@@ -20,7 +20,7 @@ type Plan = { icon: EmptyIcon; primary: EmptyAction; secondary?: EmptyAction };
 /**
  * The three different "nothing to show" cases, kept visibly apart, each with a picture and the next step:
  *   no-items        the inventory itself is empty            -> "Add an item" (Admin), "Scan a barcode" (Scan tab)
- *   category-empty  the chosen category holds no items       -> "Show all items", "Add items in Admin"
+ *   category-empty  the chosen category holds no items       -> "Show all items", "Assign items in Admin"
  *   no-match        the search / stock / category filters match nothing -> "Clear filters"
  * The words come from describeEmpty() in lib/inventory-view.ts. The card is static: the summary line above the list is
  * the live region that announces that nothing matched. data-testid and data-empty-kind sit on a wrapper around the card.
@@ -37,7 +37,9 @@ export function EmptyState({ kind, title, detail, onClearFilters, onShowAll, onS
         ? {
             icon: "folder",
             primary: { label: "Show all items", onClick: onShowAll, testId: "inventory-empty-show-all" },
-            secondary: { label: "Add items in Admin", href: "/admin", testId: "inventory-empty-admin" },
+            // Named like the sentence above it ("Assign items to this category from the Admin page."): the Admin page is where
+            // an existing item is put into a category, so "Add items" would promise something else.
+            secondary: { label: "Assign items in Admin", href: "/admin", testId: "inventory-empty-admin" },
           }
         : {
             icon: "search",
