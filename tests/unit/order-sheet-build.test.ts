@@ -356,7 +356,7 @@ describe("buildSheet", () => {
     ];
     const sheet = buildSheet(items, inputs, OPTIONS);
     expect(sheet.missingIds).toEqual([999999]);
-    expect(sheet.invalidQtyIds).toEqual([]); // a missing row is not checked, as before
+    expect(sheet.invalidQtyIds).toEqual([]); // a missing row is not checked
     expect(sheet.rows.map((r) => r.id)).toEqual([first.id]);
     expect(JSON.stringify(sheet)).not.toContain("Deleted item");
     expect(JSON.stringify(sheet)).not.toContain("Kept row");
@@ -399,9 +399,9 @@ describe("buildSheet", () => {
 });
 
 // ── One limit, written once ───────────────────────────────────────────────────────────────────────────────────────
-// The largest order quantity used to exist in three forms: an unused MAX_ORDER_QTY constant, ORDER_SHEET_LIMITS.qtyDigits (its
-// number of digits) and the text "999,999,999" typed into the error message. The digit count is now the only source; every
-// text that names the limit is derived from it, so changing it can never leave a message that disagrees with the rule.
+// The largest order quantity has ONE source, ORDER_SHEET_LIMITS.qtyDigits (its number of digits), not a second constant or
+// the text "999,999,999" typed into a message. Every text that names the limit is derived from the digit count, so changing
+// it can never leave a message that disagrees with the rule.
 describe("the order quantity limit is written once", () => {
   const WORDS = "Order quantity must be a whole number from 1 to 999,999,999 (digits only), or left blank.";
 

@@ -1,11 +1,11 @@
 // The pure logic of the Admin item form: what is sent to the API when an item is saved, how the answer is checked, and the
 // category choices. It lives here, not in app/admin/page.tsx, so the rules that decide what reaches the database (the
-// heart of the category and supplier order number fix) can be tested without a browser: tests/unit/admin-form.test.ts and
+// category and the supplier order number above all) can be tested without a browser: tests/unit/admin-form.test.ts and
 // tests/api/admin-payload-roundtrip.test.ts. The page keeps the hooks, the focus handling and the JSX.
 //
 // Category ids are OPAQUE strings (uuid in the live database, digit strings for the bigint schema). They are compared
-// with sameId() and never go through Number(): Number("<uuid>") is NaN, JSON.stringify turns NaN into null, and that
-// is how a chosen category used to be dropped while the page still said "Medication updated."
+// with sameId() and never go through Number(): Number("<uuid>") is NaN, JSON.stringify turns NaN into null, and the
+// chosen category would be dropped while the page still said "Medication updated."
 import type { ComboboxOption } from "./combobox";
 import type { Category, Medication } from "./db";
 import { sameId } from "./ids";
@@ -245,10 +245,10 @@ export function findNotStored(saved: Medication, sent: SavePayload): string[] {
 }
 
 // ── Text that is too long ───────────────────────────────────────────────────────────────────────
-// These limits used to be an input's maxLength, which cuts pasted text off without a word: a 70-character code was saved as
-// its first 64 characters and reported as "Saved". Now the text stays whole, the person is told next to the field, and
-// nothing is saved until it fits. Lengths are counted the way the server counts them: characters (code points) of the text
-// without the spaces around it, so an emoji is one character, not two.
+// These limits are not an input's maxLength, because maxLength cuts pasted text off without a word: a 70-character code
+// would be saved as its first 64 characters and reported as "Saved". Here the text stays whole, the person is told next to
+// the field, and nothing is saved until it fits. Lengths are counted the way the server counts them: characters (code
+// points) of the text without the spaces around it, so an emoji is one character, not two.
 
 // The numbers are the server's (lib/limits.ts); they are re-exported here because the form and its tests speak of them.
 export { CATEGORY_NAME_MAX_LENGTH, UNIT_MAX_LENGTH };

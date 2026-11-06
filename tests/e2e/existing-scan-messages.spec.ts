@@ -1,21 +1,21 @@
-// What the Scan tab SAYS when something goes wrong or is recorded (TASK.md sections 6 and 8: the scanner must keep working, and
-// a failed lookup must not look like "this item is not in the system"). Two messages were wrong and are fixed:
-//   * Quick mode reported EVERY failed lookup as "Unknown barcode", also an HTTP 500 / 503 / 403 for a barcode that EXISTS, so
-//     staff could conclude that an item is missing from the system. The barcode route answers 404 only when no item has the
-//     barcode, so now only a 404 says "Unknown barcode". Any other failed answer says "Lookup failed", and a lookup that gets no
+// What the Scan tab SAYS when something goes wrong or is recorded. Requirement: the scanner keeps working, and a failed lookup
+// must not look like "this item is not in the system".
+//   * Quick mode says "Unknown barcode" only for a 404, which the barcode route answers only when no item has the barcode. Any
+//     other failed answer (an HTTP 500 / 503 / 403 for a barcode that EXISTS) says "Lookup failed", and a lookup that gets no
 //     answer at all says "Network error"; both add "Check the connection and scan again." (a lookup is only a read: nothing
 //     was recorded, so scanning again is safe). The toast stays red and goes away by itself.
-//   * Manual mode's success message was built from the typed text, so with the quantity box emptied (which records 1 unit) it
-//     read "Dispensed  units of X" with the number missing. It now states the quantity that was actually recorded.
+//   * Manual mode's success message states the quantity that was actually recorded, also with the quantity box emptied (which
+//     records 1 unit): it must not echo the typed text ("Dispensed  units of X" with the number missing).
 //
 // Same locators and helpers as the other existing-*.spec.ts files (visible text and roles, mock API in helpers/mock-api.ts).
 //
 // Expected results:
-//   * against the current app (E2E_BASE_URL=http://127.0.0.1:3100): every test passes;
-//   * against the ORIGINAL UI (http://127.0.0.1:3101): the tests about an HTTP error, a lookup that gets no answer, the recovery
-//     after a failed lookup and the emptied or zero-padded quantity FAIL (it says "Unknown barcode" for a server error, has no
-//     line under "Network error", and states the typed text instead of the recorded quantity); the tests for a real 404, for a
-//     failure while the movement is sent and for a plainly typed quantity pass on both: that behavior must not change.
+//   * against the current app: every test passes;
+//   * against an older build of the app (point E2E_BASE_URL at it): the tests about an HTTP error, a lookup that gets no answer,
+//     the recovery after a failed lookup and the emptied or zero-padded quantity fail (it says "Unknown barcode" for a server
+//     error, has no line under "Network error", and states the typed text instead of the recorded quantity); the tests for a
+//     real 404, for a failure while the movement is sent and for a plainly typed quantity pass on both: that behavior must
+//     not change.
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
 import { installMockApi, type MockApi } from "./helpers/mock-api";

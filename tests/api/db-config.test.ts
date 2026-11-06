@@ -1,6 +1,6 @@
-// Requirement-driven tests: how the app finds its database, lib/db.ts (SPEC 2.1; TASK.md section 7 lists "environment/
-// database mismatches" as a way inventory can seem to disappear; the owner said the Vercel integration with Supabase
-// will be used, and that integration may expose the public key under either of two names).
+// Requirement-driven tests: how the app finds its database, lib/db.ts. A mismatch between the app's settings and the
+// database is one way inventory can seem to disappear, and the Vercel integration with Supabase may expose the public key
+// under either of two names.
 //
 // Every other API test replaces '@/lib/db' with the in-memory fake, so without this file nothing would notice if the app
 // stopped reading the key the hosting integration provides, or started without a key and failed later and obscurely.

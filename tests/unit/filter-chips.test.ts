@@ -24,7 +24,7 @@ import { displaySearchText } from "@/lib/search-text";
 import { buildCategories, buildMedications, fakeUuid, type IdShape } from "../helpers/fixtures";
 
 // Unit tests for lib/filter-chips.ts: the words on the filter chips of the Inventory tab and of the Admin list. Synthetic data
-// only. Invisible characters are built from code points on purpose (written literally they are unreadable in review and some
+// only. Invisible characters are built from code points on purpose (written literally they are unreadable in a diff and some
 // tooling rewrites them).
 
 const cp = (n: number): string => String.fromCodePoint(n);

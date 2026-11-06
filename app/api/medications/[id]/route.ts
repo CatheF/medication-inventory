@@ -45,10 +45,11 @@ export async function PUT(request: NextRequest, { params }: Params) {
 
     const { data, error } = await supabase
       .from("medications")
-      // Any successful edit clears the "unnamed — needs review" flag (SPEC 2.6, unchanged from the original route).
+      // Any successful edit clears the "unnamed — needs review" flag.
       // The flag means "created by a scan, nobody has looked at it yet", so saving counts as the review even when the
-      // edit does not touch the name. Open product decision: clearing it only when a name is sent would keep an item in
-      // the review queue after an unrelated edit, but staff could then never dismiss an item they choose not to name.
+      // edit does not touch the name. This is a product rule, not a technical one: clearing the flag only when a name is
+      // sent would keep an item in the review queue after an unrelated edit, and staff could then never dismiss an item
+      // they choose not to name.
       // To change the rule, replace `is_unnamed: false` here and update the tests marked "documented contract".
       .update({ ...fields.patch, is_unnamed: false })
       .eq("id", id)

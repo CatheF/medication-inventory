@@ -1,5 +1,5 @@
-// Regression tests for the routes this work must NOT change (TASK.md section 8 "Do not break ... stock adjustments, usage
-// history, analytics, existing reports ..."; SPEC 0.9): /api/transactions, /api/analytics, /api/import, /api/upload.
+// Regression tests for the routes that must keep working as they are: /api/transactions, /api/analytics, /api/import and
+// /api/upload. Requirement: stock adjustments, usage history, analytics and existing reports are not broken.
 //
 // These tests pin what those routes do TODAY, so a regression would show. They are characterization tests: where today's
 // behavior is plainly unfortunate (for example a fractional quantity ends in a 500) the test says "documents" and only
@@ -369,7 +369,7 @@ describe.each(ID_SHAPES)("CSV import: POST /api/import on the $label", ({ option
 
   it("documents a PRE-EXISTING hazard of the unchanged import route: a blank stock or threshold cell in a re-imported CSV sets that item's stock and threshold to 0, with HTTP 200 and no warning", async () => {
     // Number("") is 0, so an empty cell is read as the number zero rather than 'not provided'. No page in the app calls
-    // /api/import (only direct HTTP calls reach it) and SPEC 0.9 forbids changing the route, so this is pinned, not fixed.
+    // /api/import (only direct HTTP calls reach it) and the route is deliberately left unchanged, so this is pinned, not fixed.
     // If someone fixes it on purpose, change this test together with the route.
     const existing = itemNamed(medications, "Acetaminophen 500 mg"); // stock 120, threshold 40
     const res = await upload(`name,barcode,stock,threshold\nAcetaminophen renamed,${existing.barcode},,\n`);

@@ -109,7 +109,7 @@ export async function openOrderSheetUnready(
 /**
  * Replaces the rows of the saved draft with `ids` (blank quantity and unit) and tells the open page, the way a second tab
  * does. Much faster than reloading the page for every row count. The window event "medinventory:orderDraft" is the
- * documented same-tab update signal of the draft store (SPEC 2.8). Resolves once the builder lists exactly these rows.
+ * same-tab update signal of the draft store (DRAFT_EVENT in lib/order-sheet/draft.ts). Resolves once the builder lists exactly these rows.
  */
 export async function setDraftRows(page: Page, ids: number[]): Promise<void> {
   await page.evaluate(

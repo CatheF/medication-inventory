@@ -1,11 +1,11 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): scanning with the camera.
+// Existing behavior that must be PRESERVED: scanning with the camera.
 //
 // There is no camera hardware here, so this file uses Chromium's SYNTHETIC camera fed with a generated video of a
 // valid EAN-13 barcode (tests/e2e/helpers/barcode-video.ts). The page itself is unmodified and unaware: it asks
 // for the camera with getUserMedia, plays the stream in its <video> and decodes frames with @zxing/browser, exactly
 // as with a real camera. What this does NOT prove: focus, lighting, motion blur, other barcode types or a real device.
 //
-// Same locators on the current app and on the original UI.
+// The same locators work on the current app and on an older build of it (see tests/e2e/helpers/existing-behavior.ts).
 import { test, expect, type Page } from "@playwright/test";
 import { installMockApi, type MockApi } from "./helpers/mock-api";
 import { writeBarcodeVideo } from "./helpers/barcode-video";

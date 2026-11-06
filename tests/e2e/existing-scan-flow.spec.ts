@@ -1,8 +1,8 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): the Scan tab's manual barcode lookup, the
+// Existing behavior that must be PRESERVED: the Scan tab's manual barcode lookup, the
 // Receive / Dispense flows, error handling and the stat cards / low-stock alert.
 //
-// Locators use visible text, roles and structure only: the same spec is run against the current app and against
-// the original UI (see tests/e2e/helpers/existing-behavior.ts). No database is involved: /api/* is answered by
+// Locators use visible text, roles and structure only: the same spec runs against the current app and against
+// an older build of it (see tests/e2e/helpers/existing-behavior.ts). No database is involved: /api/* is answered by
 // tests/e2e/helpers/mock-api.ts, which mirrors the real routes (including the transactions RPC's messages).
 import { test, expect, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
@@ -561,7 +561,7 @@ test.describe("Inventory tab: the low-stock alert still works", () => {
 
     await openInventoryTab(page);
 
-    // The wording differs only in grammar for one item (original: "1 unnamed item need staff review.", now "... needs ..."):
+    // The wording differs only in grammar for one item (an older build says "1 unnamed item need staff review.", the current app "... needs ..."):
     // the count and the sentence are the preserved behavior.
     await expect(page.getByText(new RegExp(`^${unnamedCount} unnamed items? needs? staff review\\.$`))).toBeVisible();
     await expect(page.getByRole("link", { name: "Review in Admin" })).toHaveAttribute("href", "/admin");

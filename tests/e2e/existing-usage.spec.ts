@@ -1,9 +1,9 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): the Usage & Projections page (/usage)
-// and the usage history / analytics it shows. Its own source file is unchanged; what could break is what
+// Existing behavior that must be PRESERVED: the Usage & Projections page (/usage)
+// and the usage history / analytics it shows. What could break it is what
 // surrounds it (top bar, global styles). It calls exactly one endpoint, GET /api/analytics?days=N, which is answered
 // here with synthetic data in the real route's shape (app/api/analytics/route.ts).
 //
-// Same locators on the current app and on the original UI.
+// The same locators work on the current app and on an older build of it (see tests/e2e/helpers/existing-behavior.ts).
 import { test, expect, type Page } from "@playwright/test";
 import { installMockApi } from "./helpers/mock-api";
 import { inventoryFixture, watchPage, type ExpectedNoise, type PageWatch } from "./helpers/existing-behavior";

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { hasInvisibleOrControlCharacter, stripInvisibleCharacters } from "@/lib/text-safety";
 
-// Invisible characters are built from code points on purpose: written literally they are unreadable in review
+// Invisible characters are built from code points on purpose: written literally they are unreadable in a diff
 // and some tooling rewrites them.
 const cp = (n: number): string => String.fromCodePoint(n);
 const hex = (n: number): string => `U+${n.toString(16).toUpperCase().padStart(4, "0")}`;

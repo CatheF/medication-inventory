@@ -1,6 +1,6 @@
 // Helpers for the Admin page browser tests (tests/e2e/admin.spec.ts).
 //
-// Locators use the data-testid values documented in SPEC.md section 3 plus labels and roles. Nothing here re-implements
+// Locators use the data-testid values the Admin page defines (category-select, save-button, ...) plus labels and roles. Nothing here re-implements
 // application logic: the helpers open pages, drive controls and read what a person (or a request body) can observe.
 import { expect, type Locator, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
@@ -108,7 +108,7 @@ export async function fillItemForm(page: Page, fields: ItemFields): Promise<void
 
 /**
  * Puts `text` into a field the way a paste does: the old text is selected and the whole new text arrives in ONE insertion,
- * with no key presses. This is the route by which a long value used to be cut off silently by an input's `maxlength`.
+ * with no key presses. This is the route by which an input's `maxlength` would cut a long value off silently.
  */
 export async function pasteInto(page: Page, testId: string, text: string): Promise<void> {
   const field = page.getByTestId(testId);
@@ -422,7 +422,7 @@ export async function adminRowIdsInOrder(page: Page): Promise<number[]> {
   );
 }
 
-// ── The order sheet is only ever filled by a person (SPEC 3.3: nothing is added automatically) ─────
+// ── The order sheet is only ever filled by a person (nothing is added automatically) ─────────────
 
 /** How many items the browser's saved order-sheet draft holds. 0 when nothing was saved. Reads the key the app really uses. */
 export async function orderSheetDraftRows(page: Page): Promise<number> {

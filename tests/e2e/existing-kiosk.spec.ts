@@ -1,14 +1,14 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): the full-screen Kiosk page (/kiosk).
-// Its source file changed in one place only: a barcode that could not be saved no longer gets the "Saved for staff review"
-// card (see the tests on failed saves below). What could break is everything around it (top bar, global styles, shared
-// data helpers), so it is exercised end to end here with a handheld scanner (keystrokes) against the mocked API.
+// Existing behavior that must be PRESERVED: the full-screen Kiosk page (/kiosk). A barcode that could not be saved never
+// gets the "Saved for staff review" card (see the tests on failed saves below). What could break the page is everything
+// around it (top bar, global styles, shared data helpers), so it is exercised end to end here with a handheld scanner
+// (keystrokes) against the mocked API.
 //
 // Headless Chromium has no camera: without one the kiosk writes `console.error("Camera:", ...)` BY DESIGN each
 // time it goes back to "Ready". That one line is whitelisted in the tests below (and only that line);
-// existing-synthetic-camera.spec.ts runs the kiosk with a synthetic camera device and requires a completely clean console.
+// existing-camera-idle.spec.ts runs the kiosk with a synthetic camera device and requires a completely clean console.
 // What these tests do NOT prove: that a real camera reads a real barcode.
 //
-// Same locators on the current app and on the original UI.
+// The same locators work on the current app and on an older build of it (see tests/e2e/helpers/existing-behavior.ts).
 import { test, expect, type Page } from "@playwright/test";
 import { installMockApi, type MockApi } from "./helpers/mock-api";
 import {
@@ -247,9 +247,9 @@ test.describe("Kiosk page", () => {
   });
 
   // The save of an unknown barcode can fail three ways: the server refuses it (400, for instance a barcode over the size
-  // limit), the server fails (500), or the server cannot be reached. Nothing is saved in any of them. The kiosk used to show
-  // "Unknown Barcode / Saved for staff review in Admin" for the first two, which was false: staff would wait for an item
-  // that was never created.
+  // limit), the server fails (500), or the server cannot be reached. Nothing is saved in any of them. The kiosk must not
+  // show "Unknown Barcode / Saved for staff review in Admin" in any of them: that would be false, and staff would wait for
+  // an item that was never created.
   for (const failure of [
     {
       name: "the server refuses the barcode (400)",

@@ -1,8 +1,8 @@
-// Requirement-driven tests: GET / PUT / DELETE /api/medications/[id] (TASK.md sections 1, 8, 9; SPEC 2.6).
+// Requirement-driven tests: GET / PUT / DELETE /api/medications/[id].
 //
 //   "Editing another field does not clear the category or overwrite unrelated item data."
 //   "Failed saves show a useful error and do not appear successful."
-//   Never report success for a change that did not happen (the old DELETE answered success for a row that was not there).
+//   Never report success for a change that did not happen (a DELETE of a row that is not there is not a success).
 //
 // Both id shapes are exercised (the categories attached to the items differ between them).
 import { beforeEach, describe, expect, it, vi } from "vitest";

@@ -1,9 +1,10 @@
-// Markup-level tests of the two Order sheet components this round changed, rendered on the server (no browser needed):
+// Markup-level tests of Order sheet components, rendered on the server (no browser needed):
 //  * PrintSheet: the print-only "?" marker and warning line for an invalid quantity (Ctrl/Cmd+P ignores the disabled
 //    Print button, so the paper copy must never silently lose what staff typed). Real printing is covered by the
 //    Playwright spec (page.pdf + pdftotext); here the classes that make it print-only are pinned down.
 //  * SheetRows: a row whose item was deleted says which item it was ("<name> - no longer in inventory").
-// and the structure of what the Undo / limit / Enter changes added (UndoLine, LimitNote, the quantity and unit boxes, AddItems, SheetDetails).
+//  * The structure of the Undo line, the limit note, the quantity and unit boxes, the item search and the sheet details
+//    (UndoLine, LimitNote, AddItems, SheetDetails).
 import { createElement, createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";

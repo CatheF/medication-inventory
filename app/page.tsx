@@ -333,9 +333,10 @@ export default function MainPage() {
     }
   }, [resetScan, releaseStream]);
 
-  // Leaving the Scan tab ends the camera state. This was an effect calling stopCamera(); by the time that effect ran
-  // the <video> element was already unmounted with the tab, so all it did was setScanning(false). Doing the same
-  // reset while rendering gives the identical result without the extra render pass (and the lint error).
+  // Leaving the Scan tab ends the camera state. It is reset while rendering rather than in an effect: an effect calling
+  // stopCamera() would run after the <video> element was already unmounted with the tab, so all it could do is
+  // setScanning(false). Doing the same reset while rendering gives the identical result without the extra render pass
+  // and without the react-hooks/set-state-in-effect lint error.
   if (tab !== "scan" && scanning) setScanning(false);
   // The <video> element is gone with the tab, but the camera is not: end the stream itself (the LED stays on otherwise).
   // releaseStream sets no state, which is why this one can be an effect.
@@ -548,8 +549,8 @@ export default function MainPage() {
     const input = manualInputRef.current;
     lookupBarcode(input?.value ?? manualBarcode);
     // The looked-up code stays visible in the box, but selected: whatever is typed or scanned next replaces it. A handheld
-    // scanner types into the focused box like a keyboard, so without this its digits were added to the END of the previous
-    // code, and the lookup was for the two barcodes glued together, which no item has: it was saved as a junk "unknown" item.
+    // scanner types into the focused box like a keyboard, so without this its digits would be added to the END of the previous
+    // code, and the lookup would be for the two barcodes glued together, which no item has: it would be saved as a junk "unknown" item.
     input?.select();
   };
 
@@ -748,8 +749,8 @@ export default function MainPage() {
                   onChange={(e) => setManualBarcode(e.target.value)}
                   // Entering the box selects what is in it, so a code typed or scanned next replaces it. The box can still hold an
                   // earlier code (a lookup leaves it there, and a scan made elsewhere on the page puts its code there), and a
-                  // handheld scanner types like a keyboard: without this its digits were added to the END of the old code, and
-                  // the lookup was for two barcodes glued together, which no item has, so it was saved as a junk "unknown" item.
+                  // handheld scanner types like a keyboard: without this its digits would be added to the END of the old code, and
+                  // the lookup would be for two barcodes glued together, which no item has, so it would be saved as a junk "unknown" item.
                   onMouseDown={() => {
                     manualMouseDownRef.current = true;
                   }}

@@ -1,4 +1,4 @@
-// Requirement-driven tests: the .xlsx file produced by POST /api/order-sheet/xlsx (TASK.md sections 3, 4, 5, 9; SPEC 2.8, 2.10).
+// Requirement-driven tests: the .xlsx file produced by POST /api/order-sheet/xlsx.
 //
 //   "Do not call a CSV file XLSX"                      -> the bytes are a real zip package that opens as a spreadsheet
 //   "Protect against spreadsheet formula injection"    -> no formula element anywhere, hostile text stays literal text

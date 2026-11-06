@@ -90,8 +90,8 @@ describe("order quantity wording", () => {
     expect(qtyProblem("000")).toBe("Enter 1 or more, or leave blank.");
   });
 
-  // A pasted 12-digit number used to be cut to 9 digits by the box (and so became a different, valid quantity) without a word.
-  // The box keeps what was pasted now, so the message has to say what is wrong with it: it IS digits only, it is too big.
+  // A pasted 12-digit number must not be cut to 9 digits by the box (it would become a different, valid quantity without a word).
+  // The box keeps what was pasted, so the message has to say what is wrong with it: it IS digits only, it is too big.
   it("a number with too many digits is called too large and names the limit; it is not told to use digits only", () => {
     for (const typed of ["1000000000", "999999999999", " 123456789012 ", "00000000001000000000"]) {
       expect(qtyProblem(typed), JSON.stringify(typed)).toBe(`Too large. Enter ${MAX_QTY_TEXT} or less.`);

@@ -4,7 +4,7 @@
  *
  * WHY IT IS "FAITHFUL" (the things that matter for this app's bugs)
  *   * Request bodies are JSON round-tripped exactly like the real client does (`NaN` -> `null`, `undefined` keys
- *     dropped). That is how `Number("<uuid>")` silently turned `category_id` into `null`.
+ *     dropped). That is how `Number("<uuid>")` silently turns `category_id` into `null`.
  *   * Filters are serialized to the same PostgREST text the client builds (`eq.NaN`, `in.(1,2)`, `is.null`) and are
  *     parsed/typed against the column, so `.eq("category_id", NaN)` on a uuid column is a 22P02 like in production.
  *   * Columns are typed. `categoryIdType: "uuid"` (live DB) vs `"bigint"` (supabase/schema.sql): invalid text ->
@@ -2023,7 +2023,7 @@ export function createFakeSupabase(options: FakeSupabaseOptions = {}): FakeSupab
   function runHooks(record: RecordedCall): void {
     const index = calls.length - 1;
     for (const hook of [...hooks]) {
-      if (hooks.includes(hook)) hook(record, index); // skip a hook another hook removed earlier in this round
+      if (hooks.includes(hook)) hook(record, index); // skip a hook another hook removed earlier in this loop
     }
   }
 

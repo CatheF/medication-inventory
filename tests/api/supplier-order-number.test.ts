@@ -1,10 +1,10 @@
-// Requirement-driven tests: the supplier ordering number (TASK.md section 3, 8, 9; SPEC 1 deploy-order independence, 2.3, 2.6).
+// Requirement-driven tests: the supplier ordering number.
 //
 //   "Store it as text so leading zeros, letters, and punctuation survive."
 //   "Keep it separate from item name and barcode."
 //   "Preserve existing items without a code; display missing information honestly."
 //   "Do not infer supplier codes from barcodes or external catalogs, or automatically strip codes from existing item names."
-//   Deploy-order independence: the new app must work both BEFORE and AFTER the migration that adds the column.
+//   Deploy-order independence: the app must work both BEFORE and AFTER the migration that adds the column.
 //
 // Both id shapes are exercised. The database is the fake in tests/helpers/fake-supabase.ts.
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,7 +32,7 @@ beforeEach(() => {
   vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 
-/** The owner's examples plus the values spreadsheets and number parsers love to mangle. */
+/** Typical supplier codes plus the values spreadsheets and number parsers love to mangle. */
 const ROUND_TRIP_CODES: readonly string[] = [
   "00417-B", // leading zeros + letter + dash
   "0092", // digits only, leading zeros
@@ -359,7 +359,7 @@ describe.each(ID_SHAPES)("supplier order number on the $label", ({ options }) =>
 });
 
 describe.each(ID_SHAPES)("deploy-order independence: the database does NOT have the supplier column yet ($label)", ({ options }) => {
-  // The new app may be deployed before the migration is applied: it must keep listing and saving items, and say clearly
+  // The app may be deployed before the migration is applied: it must keep listing and saving items, and say clearly
   // what is missing when somebody tries to store a supplier number.
   let fake: FakeSupabase;
   let medications: Medication[];

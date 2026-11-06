@@ -1,7 +1,18 @@
-// Smoke test for POST /api/order-sheet/xlsx.
+// Read-only guarantee and HTTP behaviour of POST /api/order-sheet/xlsx, checked against a recording stub of the database.
 //
 // "@/lib/db" is replaced by a stub that RECORDS EVERY CALL made on the Supabase client (any method, any depth), so
-// the tests can prove the route is read-only: nothing but from("medications").select("*").in("id", …) may happen.
+// the tests can prove the route is read-only: nothing but from("medications").select("*").in("id", …) may happen, on
+// success, on invalid input and after a failed read.
+//
+// Why the stub is written in this file instead of using tests/helpers/fake-supabase.ts: the recorder has no table model
+// of its own and does not care which method was called, so a write (insert, update, delete, upsert, rpc, whatever its
+// name) is caught however the client is used. The shared fake serves the fuller HTTP contract in order-sheet-export.test.ts
+// and the workbook checks in order-sheet-export-file.test.ts.
+//
+// Also covered: the download headers and a filename built only from the validated date, rows in the sheet's order, the
+// optional On hand and Barcode columns, formula-looking names written as literal text, de-duplicated ids, reads in chunks
+// of 200 ids, validation errors (400, 413), items that are no longer in the inventory (422), and database or generation
+// failures (403, 500, 503) that never produce a partial file.
 import { strFromU8, unzipSync } from "fflate";
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";

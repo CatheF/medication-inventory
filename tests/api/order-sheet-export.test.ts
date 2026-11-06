@@ -1,4 +1,4 @@
-// Requirement-driven tests: POST /api/order-sheet/xlsx, the HTTP contract (TASK.md sections 4, 5, 8, 9; SPEC 2.8, 2.10).
+// Requirement-driven tests: POST /api/order-sheet/xlsx, the HTTP contract.
 //
 //   "Preparing, printing, or exporting the sheet must not place an order, email a supplier, change stock balances, mark
 //    goods as ordered, or rewrite usage history."                                      -> ZERO writes, on every path
@@ -577,10 +577,10 @@ describe("the network guard used by the export tests really notices an outbound 
 // value is 1000; this project's real value is not confirmed). The inventory LIST copes with a cap (medications-list.test.ts).
 // The export reads the items it needs 200 ids at a time and treats every id missing from an answer as "deleted", so with a
 // cap BELOW 200 it reports items that exist as "no longer in the inventory" (422) and the sheet cannot be exported at all.
-// The cases whose cap is below the 200-id read size FAILED on the application as first built (readMedications trusted the
-// first answer); they pass now that readMedications asks again for the ids that did not come back. The cases with a very
-// small cap need many rounds, so a "fix" that retries only once would still fail them. The control cases pin the boundary
-// where it always worked.
+// The cases whose cap is below the 200-id read size need readMedications to ask again for the ids that did not come back
+// (trusting the first answer would report items that exist as missing). The cases with a very small cap need many
+// repeats, so a retry that happens only once would still fail them. The control cases pin the boundary where a single read
+// suffices.
 describe.each(ID_SHAPES)("export when the database returns at most N rows per read, on the $label", ({ options, shape }) => {
   function seedItems(maxRows: number, count: number): { fake: FakeSupabase; items: Medication[] } {
     const fake = installFake({ ...options, maxRows });

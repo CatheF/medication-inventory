@@ -61,8 +61,8 @@ import { Notice } from "../components/Notice";
 // Admin: add, edit and delete medications; assign categories; enter supplier order numbers.
 //
 // Category ids are OPAQUE strings (uuid in the live database, digit strings for the bigint schema). They are compared
-// with sameId() and never go through Number(): Number("<uuid>") is NaN, JSON.stringify turns NaN into null, and that
-// is how a chosen category used to be dropped while the page still said "Medication updated."
+// with sameId() and never go through Number(): Number("<uuid>") is NaN, JSON.stringify turns NaN into null, and the
+// chosen category would be dropped while the page still said "Medication updated."
 //
 // Nothing here claims success without proof: a save counts as saved only when the server answers 2xx AND the row it
 // sends back carries the category (and supplier order number) that was sent. A failed load is an error with a Retry

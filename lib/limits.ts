@@ -1,12 +1,12 @@
 // Size limits the API enforces on what staff (or anything else that can reach the API) send, in one place so the routes,
 // the tests and the screens that explain a refusal quote the same numbers.
 //
-// Text lengths count Unicode code points, not UTF-16 units, so one emoji is one character everywhere (the barcode rule that
-// was already in place). They are generous for real inventory data (the longest item name in the live data is 113
-// characters) and exist so that a request cannot store or return megabytes of text: every item is sent to every browser by
-// GET /api/medications, so one huge field would slow down every screen for everybody.
+// Text lengths count Unicode code points, not UTF-16 units, so one emoji is one character everywhere. They are generous for
+// real inventory data (the longest item name in the live data is 113 characters) and exist so that a request cannot store or
+// return megabytes of text: every item is sent to every browser by GET /api/medications, so one huge field would slow down
+// every screen for everybody.
 
-/** A barcode as stored. Bounded, but far above anything a scanner reads; it used to be 128, which refused real codes. */
+/** A barcode as stored. Bounded, but far above anything a scanner reads, because a cap as low as 128 characters refused real codes. */
 export const BARCODE_MAX_LENGTH = 1024;
 export const NAME_MAX_LENGTH = 300;
 export const NOTES_MAX_LENGTH = 5000;

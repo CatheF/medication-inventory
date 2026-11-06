@@ -1,10 +1,10 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): the Scan tab must still load and work
+// Existing behavior that must be PRESERVED: the Scan tab must still load and work
 // when the inventory or the category requests fail, are slow, or answer with something unexpected. Staff scan stock in
 // and out all day; a problem with the LIST endpoints must never stop a barcode lookup or a stock movement.
 //
-// Everything here must pass on the original UI (E2E_BASE_URL=http://127.0.0.1:3101) and on the current one. What the
+// Everything here passes on the current app and on an older build of it (point E2E_BASE_URL at that build). What the
 // current UI does BETTER when the inventory fails (error notice with Retry instead of an empty inventory) is in
-// existing-resilience-improvements.spec.ts, which is expected to fail on the original UI by design.
+// existing-resilience-improvements.spec.ts, which is expected to fail on an older build by design.
 import { test, expect, type Page } from "@playwright/test";
 import { installMockApi, type MockApi } from "./helpers/mock-api";
 import {

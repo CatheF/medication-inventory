@@ -5,9 +5,9 @@
 // no "row-level security", no SQLSTATE codes, no file paths.
 //
 // The technical facts go in separate fields, for the person who looks after the app, and in the server log:
-//   code       the database error code (SQLSTATE or PGRST...), as before
-//   detail     the database's own message, truncated to 300 characters, never a secret, as before
-//   technical  one sentence for the person fixing it: the cause in database terms and where the cure is (new)
+//   code       the database error code (SQLSTATE or PGRST...)
+//   detail     the database's own message, truncated to 300 characters, never a secret
+//   technical  one sentence for the person fixing it: the cause in database terms and where the cure is
 //   field      the form field the message is about, when there is one
 // A message claims "nothing was saved" only when the database refused the request outright (a refused write, a duplicate, a
 // bad value). A lost connection or an unknown failure could have happened after the database committed, so those say the

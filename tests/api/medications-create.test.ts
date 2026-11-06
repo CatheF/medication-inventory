@@ -1,4 +1,4 @@
-// Requirement-driven tests: POST /api/medications (TASK.md sections 1, 3, 8, 9; SPEC 2.6).
+// Requirement-driven tests: POST /api/medications.
 //
 // Item creation must keep working for every existing caller (the Scan tab and /kiosk create an unnamed item for an
 // unknown barcode; the Admin form creates complete items), must refuse bad input with a message naming the field, and

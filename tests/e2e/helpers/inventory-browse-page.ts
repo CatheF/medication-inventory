@@ -365,7 +365,7 @@ export async function expectScreenMatches(
   if (visible.length > 0) {
     expect(screen.footer, `footer for ${where}`).toBe(expectedFooter(items.length, visible.length, view, categories));
   }
-  // Never a stray NaN / undefined / null where a name or number belongs (the original defect printed "NaN").
+  // Never a stray NaN / undefined / null where a name or number belongs (a category id turned into a number printed "NaN").
   // (What the person typed is allowed to say anything, and the page quotes it, so it is taken out before the scan.)
   const typed = view.search.trim();
   const scanned = typed === "" ? screen.bodyText : screen.bodyText.split(typed).join("");

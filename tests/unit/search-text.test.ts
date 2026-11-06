@@ -4,7 +4,7 @@
 // tests/unit/inventory-view.test.ts, tests/unit/combobox.test.ts and tests/unit/filter-chips.test.ts.
 //
 // Synthetic data only. Odd characters are built from code points on purpose: written literally they are unreadable in
-// review, and an editor or tool that normalizes text would silently turn the decomposed cases into precomposed ones.
+// a diff, and an editor or tool that normalizes text would silently turn the decomposed cases into precomposed ones.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { bodyList, bodyRecord } from "../helpers/api-test-kit";
 import { installFake, LIVE_AFTER_MIGRATION, type FakeSupabase } from "../helpers/fake-supabase";

@@ -80,9 +80,10 @@ const codePoints = (text: string): string =>
     : Array.from(text, (c) => `U+${(c.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}`).join(" ");
 
 // Characters that render as nothing. Pasted from web pages, PDFs, chat apps and email they make a search look blank
-// while it is not, and inside a word they stop it from matching. The first twelve are the ones found in review;
-// the rest are blank-looking too (U+3164 is the "invisible username" character) or can already sit in stored
-// supplier numbers (the bidi isolates U+2066..2069, see the KNOWN FOUNDATION BUG tests in supplier-order-number.test.ts).
+// while it is not, and inside a word they stop it from matching. The list covers zero-width characters, direction marks,
+// the soft hyphen, tag and variation characters, and blank-looking ones (U+3164 is the "invisible username" character),
+// and the bidi isolates U+2066..2069, which reorder displayed text (new supplier numbers refuse them, see
+// tests/unit/supplier-order-number.test.ts).
 const INVISIBLE_CHARACTERS: readonly { label: string; char: string }[] = [
   { label: "U+200B zero width space", char: ZWSP },
   { label: "U+200C zero width non-joiner", char: String.fromCodePoint(0x200c) },
@@ -309,10 +310,10 @@ describe("matchesSearch", () => {
 
 // ── matchesSearch: invisible characters and compatibility forms ─────────────────
 //
-// Review finding: text pasted from a web page, PDF or chat app carries zero-width and other format characters. They
-// are not whitespace, so a search made only of them used to count as real text (every item hidden behind an
-// empty-looking “” message), and one inside a word stopped it matching. Folding was also NFC-only, so look-alike
-// forms (micro sign vs Greek mu in "µg", full-width letters, ligatures) never matched their plain spelling.
+// Requirement: text pasted from a web page, PDF or chat app carries zero-width and other format characters. They
+// are not whitespace, but a search made only of them must not count as real text (every item would be hidden behind an
+// empty-looking “” message), and one inside a word must not stop it matching. Folding must not be NFC-only either:
+// look-alike forms (micro sign vs Greek mu in "µg", full-width letters, ligatures) have to match their plain spelling.
 
 describe("matchesSearch: invisible characters and compatibility forms", () => {
   const amox = item(1, {
@@ -416,7 +417,7 @@ describe("matchesSearch: invisible characters and compatibility forms", () => {
       }
     }
     expect(disagreements.slice(0, 5)).toEqual([]);
-    // not vacuous: every character the review found is blank, and blank characters are a real set, not just spaces
+    // not vacuous: every character in INVISIBLE_CHARACTERS is blank, and blank characters are a real set, not just spaces
     for (const { char } of INVISIBLE_CHARACTERS) expect(blank, codePoints(char)).toContain(char.codePointAt(0));
     expect(blank.length).toBeGreaterThan(150);
   });
@@ -437,7 +438,7 @@ describe("matchesSearch: invisible characters and compatibility forms", () => {
     const diaeresis = String.fromCodePoint(0x00a8);
     expect(() => matchesSearch(amox, diaeresis)).not.toThrow();
     expect(matchesSearch(item(8, { name: `Cafe${diaeresis}` }), `cafe${diaeresis}`)).toBe(true);
-    // The accent is ignored like any other, so "amox" + diaeresis is just "amox" (it used to need the accent itself).
+    // The accent is ignored like any other, so "amox" + diaeresis is just "amox".
     expect(matchesSearch(amox, `amox${diaeresis}`)).toBe(true);
     // The space NFKC leaves behind still ends a term: both words are needed, and neither is glued to the other.
     expect(matchesSearch(amox, `amox${diaeresis}capsules`)).toBe(true);
@@ -1626,11 +1627,11 @@ describe("selectView scenarios", () => {
 
 // ── The "Category unavailable" selection ────────────────────────────────────────
 //
-// SPEC 2.7 gives CategoryFilter no variant for categories that cannot be resolved (categories failed to load, or
-// are hidden), yet the UI needs a "Category unavailable" chip. The module selects that bucket with a reserved pseudo
-// id. These tests pin the contract the Inventory UI relies on, including the moment the review flagged: the chip
-// is only drawn while its count is above zero, so a user who picked it while the categories were missing must not
-// end up on a chip that vanishes when they arrive.
+// CategoryFilter has no variant for categories that cannot be resolved (categories failed to load, or are hidden), yet
+// the UI needs a "Category unavailable" chip. The module selects that bucket with a reserved pseudo id. These tests pin
+// the contract the Inventory UI relies on, including the moment that is easy to get wrong: the chip is only drawn while
+// its count is above zero, so a user who picked it while the categories were missing must not end up on a chip that
+// vanishes when they arrive.
 
 describe("the 'Category unavailable' selection", () => {
   const known = buildCategories("uuid");
@@ -1675,7 +1676,7 @@ describe("the 'Category unavailable' selection", () => {
   });
 
   it("keeps the spec'd test ids derivable from the module's own values", () => {
-    // category-chip-unknown, group-heading-unknown and group-heading-uncategorized (SPEC section 3)
+    // category-chip-unknown, group-heading-unknown and group-heading-uncategorized: the data-testid values the Inventory tab uses
     expect(`category-chip-${UNKNOWN_CATEGORY_ID}`).toBe("category-chip-unknown");
     const groups = selectView(items, [], view()).groups ?? [];
     expect(groups.map((g) => `group-heading-${g.key}`)).toEqual(["group-heading-unknown", "group-heading-uncategorized"]);

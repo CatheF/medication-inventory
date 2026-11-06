@@ -2,9 +2,9 @@
 #
 # Self-test of the SQL suite (supabase/tests/run.sh): proves that the suite can
 # FAIL, and that it works from an awkward path. A suite that has never been seen
-# to fail proves little: "366 checks passed" used to stay true for a migration
-# without its transaction, without its lock_timeout, and (on two of the three
-# shapes) without its NOTIFY.
+# to fail proves little: a count such as "366 checks passed" says nothing about what
+# it would catch. So it is fed a migration without its transaction, without its
+# lock_timeout and without its NOTIFY (and other broken copies), and must fail on each.
 #
 #   control    the real migration: the suite must pass
 #   relocated  a copy of supabase/ in a directory whose name holds a space, a

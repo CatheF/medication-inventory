@@ -1,10 +1,10 @@
 // The words on the filter chips under the search box of the Inventory tab and of the Admin list: "Category: Antibiotics",
 // "Stock: Low", "Search: “ibuprofen”". Pure: no React, no DOM, no fetch.
 //
-// ONE implementation, used by both screens, so the wording cannot drift. It did: the Admin chip left out the curly quotes that
-// the Inventory chip and both "Showing X of Y items" lines use. What a chip says about the search (invisible characters
+// ONE implementation, used by both screens, so the wording cannot drift: the chip on either screen quotes the search with the
+// same curly quotes as both "Showing X of Y items" lines. What a chip says about the search (invisible characters
 // dropped, ends trimmed, inner whitespace collapsed to single spaces) is exactly what lib/inventory-view.ts quotes in the
-// summary line, because both call displaySearchText (lib/search-text.ts); tests/unit/filter-chips.test.ts still compares the
+// summary line, because both call displaySearchText (lib/search-text.ts); tests/unit/filter-chips.test.ts compares the
 // two over many inputs.
 //
 // Category ids are opaque strings (uuid in the live database, digit strings for the bigint schema). They are compared as

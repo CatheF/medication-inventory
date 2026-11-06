@@ -1,10 +1,10 @@
 // Requirement-driven tests: the vendor link and the photo address are only ever stored as http or https addresses.
 //
-// Why: both fields were stored with any scheme (javascript:, data:, file:) and any text. The Inventory screen guards the
-// vendor LINK when it draws it, but the browser requests whatever the photo address says, and the stored value is what
+// Why: without validation both fields accept any scheme (javascript:, data:, file:) and any text. The Inventory screen guards
+// the vendor LINK when it draws it, but the browser requests whatever the photo address says, and the stored value is what
 // every other consumer (exports, other pages, other tools) reads. So the API refuses the value when it is written.
-// The vendor link keeps accepting a bare "shop.example.com/reorder" (staff have always typed those and every screen shows
-// them as https links); the photo address must be a real http(s) address. Values that are already stored are never rewritten.
+// The vendor link accepts a bare "shop.example.com/reorder" (staff type those and every screen shows them as https
+// links); the photo address must be a real http(s) address. Values that are already stored are never rewritten.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { asRecord, bodyRecord, errorTextOf, ID_SHAPES, itemNamed, snapshotDb, storedMedication } from "../helpers/api-test-kit";
 import { installFake, type FakeSupabase } from "../helpers/fake-supabase";

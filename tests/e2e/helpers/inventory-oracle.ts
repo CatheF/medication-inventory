@@ -1,7 +1,7 @@
 // An INDEPENDENT oracle for the Inventory tab's browse behavior (tests/e2e/inventory-browse.spec.ts).
 //
 // It answers "which items must be on screen, in which order, under which headings, with which numbers" for a given set of
-// synthetic items, categories and view, using plain code written from the written rules (below, and the owner's requirement to
+// synthetic items, categories and view, using plain code written from the written rules (below, and the requirement to
 // browse the inventory by category). It deliberately imports NOTHING from lib/inventory-view.ts (only types), so a bug in the
 // app's view logic cannot hide behind the same bug in the check.
 //

@@ -1,20 +1,19 @@
 // The Scan tab's manual barcode box, and a handheld scanner used while that box still holds an earlier code.
 //
 // A handheld scanner types its digits like a keyboard and ends with Enter. When the manual box has keyboard focus and still shows
-// the code that was looked up a moment ago, the scanner's digits were added to the END of that code, so the next lookup was for
-// two barcodes glued together ("012345600014" + "MED-1003"): no item has that barcode, so the app saved it as a new unnamed item
-// "for staff review", a junk record that then shows up in the inventory. The original app was protected only by accident (its
-// scan lock stayed on while a result card was open, so such a lookup was silently ignored; the scan lock now covers the request
-// only, so that a second scan shows the second item). The fix keeps the looked-up code visible in the box but selects it, so what
-// is typed or scanned next replaces it, while editing it by hand still works.
+// the code that was looked up a moment ago, the scanner's digits must not be added to the END of that code: the next lookup would
+// be for two barcodes glued together ("012345600014" + "MED-1003"), no item has that barcode, so the app would save it as a new
+// unnamed item "for staff review", a junk record that then shows up in the inventory. The scan lock covers the request only (so
+// that a second scan shows the second item), so it is not what keeps such a lookup out. Instead the box keeps the looked-up code
+// visible but selects it, so what is typed or scanned next replaces it, while editing it by hand still works.
 // The box also selects its text whenever it is entered (click or keyboard): a code can be in it without a lookup having just been
 // made from it (a scan made elsewhere on the page puts its code there), and clicking into the box afterwards must not glue the
 // next scan onto it either.
 //
 // Expected results:
-//   * against the current app (E2E_BASE_URL=http://127.0.0.1:3100): every test passes;
-//   * against the ORIGINAL UI (http://127.0.0.1:3101): the "found" and "failed lookup" tests FAIL (the scan is ignored while the
-//     card is open, or the glued code is looked up), but no item is created by the found-card case there either.
+//   * against the current app: every test passes;
+//   * against an older build of the app (point E2E_BASE_URL at it): the "found" and "failed lookup" tests fail (the scan is
+//     ignored while the card is open, or the glued code is looked up), but no item is created by the found-card case there either.
 import { test, expect, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
 import { installMockApi, type MockApi } from "./helpers/mock-api";

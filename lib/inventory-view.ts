@@ -3,8 +3,8 @@
 // its inputs, and every function returns new arrays.
 //
 // Category ids are opaque strings (uuid in the live database, digit strings for the bigint schema in
-// supabase/schema.sql). They are only ever compared as strings and never go through Number(): that was the
-// root cause of category assignments being dropped.
+// supabase/schema.sql). They are only ever compared as strings and never go through Number(): Number("<uuid>") is
+// NaN, which JSON.stringify turns into null, so a category assignment would be dropped.
 //
 // Invariants this module guarantees (and tests/unit/inventory-view.test.ts checks):
 //   * Items are never lost or duplicated: `visible` holds exactly the input items that match search, stock
@@ -76,7 +76,8 @@ export type EmptyKind = "no-items" | "category-empty" | "no-match";
 /**
  * Reserved pseudo category id: `{ kind: "category", id: UNKNOWN_CATEGORY_ID }` (ready-made as UNKNOWN_CATEGORY_FILTER)
  * selects the items whose category is not in the categories list: the "Category unavailable" chip and group.
- * SPEC 2.7's CategoryFilter has no variant for them, so this id is the contract. It is also the `key` of that group.
+ * The CategoryFilter union has no variant of its own for them, so this reserved id is the contract. It is also the `key`
+ * of that group.
  *
  * It cannot collide with a real category: ids are uuids or digit strings and parseCategoryId (lib/ids.ts) rejects
  * anything else (tests/unit/inventory-view.test.ts pins that). A category that did carry this id would be left out

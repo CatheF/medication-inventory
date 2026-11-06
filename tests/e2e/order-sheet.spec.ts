@@ -1,6 +1,6 @@
 // Browser tests of the MANUAL order sheet: choosing items, typing quantities, keeping the draft, and never having side
-// effects. Requirements: TASK.md sections 3, 4, 5 and 9; SPEC.md 2.10 and 3.3. Print layout and workbook internals have
-// their own package (e2e-print-export); here the export is only used to show that what staff typed arrives unchanged.
+// effects. Print layout and workbook internals have their own spec (print-and-export.spec.ts); here the export is only
+// used to show that what staff typed arrives unchanged.
 //
 // Every /api/* call is answered by tests/e2e/helpers/mock-api.ts (no database), with synthetic data only.
 // Run: E2E_BASE_URL=http://127.0.0.1:3100 CHROMIUM_PATH=<chromium> npx playwright test tests/e2e/order-sheet.spec.ts
@@ -17,7 +17,7 @@ import { installMockApi, type MockApi } from "./helpers/mock-api";
 // Without an action timeout a missing control would wait for the whole test timeout; this keeps failures quick and readable.
 test.use({ actionTimeout: 10_000, navigationTimeout: 30_000 });
 
-/** localStorage key of the draft (SPEC 2.8). The tests rely on it only to seed legacy/corrupt drafts and to read what was kept. */
+/** localStorage key of the draft. The tests rely on it only to seed legacy/corrupt drafts and to read what was kept. */
 const STORAGE_KEY = "medinventory.orderSheet.v1";
 
 // ── Synthetic inventory ───────────────────────────────────────────────────────────────────────────────────────────
@@ -1953,7 +1953,7 @@ test.describe("Order sheet: a new sheet is dated with the local calendar day, no
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // A read that is accepted and then never answered (what a paused or half-reachable database looks like). The Home page and
-// Admin give up after 30 seconds (AbortSignal.timeout) and show an error with Retry; without that limit this page said
+// Admin give up after 30 seconds (AbortSignal.timeout) and show an error with Retry; without that limit this page would say
 // "Loading the inventory…" for ever, with no way out. The real limit is 30 s: these tests shorten it to a moment from inside
 // the page (the 30 s itself is checked by what the page asked for), so the behaviour can be watched without waiting.
 test.describe("Order sheet: an inventory request that is never answered", () => {
@@ -2597,7 +2597,7 @@ test.describe("Order sheet: Enter in 'Add an item' adds a single match", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// Wording the review found wrong or inconsistent, and limits that cut text off without saying so.
+// Wording that must say what the controls do, and limits that must not cut text off without saying so.
 test.describe("Order sheet: wording that says what the controls do", () => {
   test("the on-hand and barcode checkboxes say that they change the Excel file too, and they do", async ({ page }) => {
     const mock = await installMockApi(page);
@@ -2743,7 +2743,7 @@ test.describe("Order sheet: no box cuts typed text off without saying so", () =>
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-// Follow-ups found by checking the Undo work in a real browser.
+// Order sheet behavior checked in a real browser: the Undo message, Enter in the item search, and a stalled Excel download.
 test.describe("Order sheet: the Undo message stays in sight and an Undo never throws typed work away", () => {
   const LONG = Array.from({ length: 26 }, (_, index) => mk(7800 + index, `Long sheet item ${String(index + 1).padStart(2, "0")}`, { stock: 100, threshold: 10 }));
   const LOW = [

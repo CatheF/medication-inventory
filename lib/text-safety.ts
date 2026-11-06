@@ -10,8 +10,8 @@
 //
 // ── hasInvisibleOrControlCharacter ───────────────────────────────────────────────────────────────────────────────
 // The rule is stated with Unicode properties, not with a list of code point ranges. A list has to be complete to be
-// safe, and the earlier hand-written lists were not: one stopped at U+2064 and let the bidi isolates U+2066-U+2069
-// through together with about 150 other invisible characters; the other stopped at U+2069 and missed U+206A-U+206F.
+// safe, and hand-written lists are easy to get wrong: one that stops at U+2064 lets the bidi isolates U+2066-U+2069
+// through together with about 150 other invisible characters; one that stops at U+2069 misses U+206A-U+206F.
 // A character is rejected when it is
 //   Cc                            a control character: NUL, tab, line feed, carriage return, DEL, the C1 range
 //   Cf                            a format character: zero-width space and joiners, direction marks, bidi embeddings,

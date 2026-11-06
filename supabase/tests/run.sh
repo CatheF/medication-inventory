@@ -10,8 +10,9 @@
 #
 #   live         the deployed Health Center shape: uuid ids, row level security
 #                (RLS) enabled on categories with NO policy, no supplier column
-#   repo_legacy  bigint ids, provisioned from the PREVIOUS schema.sql + rls.sql
-#                (no supplier column, no categories policies): the upgrade path
+#   repo_legacy  bigint ids: schema.sql + rls.sql with the supplier column and the two
+#                categories policies dropped again, like a database provisioned
+#                before the migration: the upgrade path
 #   repo_fresh   bigint ids, provisioned from the CURRENT schema.sql then rls.sql
 #
 # Around the three shapes it also runs:
@@ -283,7 +284,7 @@ build_shape_db() { # shape db log
         psql_db "$db" -f "$SCHEMA_SQL" >>"$setup_log" 2>&1 || setup_ok=0
         [ "$setup_ok" = 1 ] && { psql_db "$db" -f "$RLS_SQL" >>"$setup_log" 2>&1 || setup_ok=0; }
         if [ "$setup_ok" = 1 ] && [ "$shape" = repo_legacy ]; then
-          # Make the database look like one provisioned before this change.
+          # Make the database look like one provisioned before the migration: no supplier column, no categories policies.
           psql_db "$db" \
             -c 'alter table public.medications drop column supplier_order_number' \
             -c 'drop policy "anon: read categories" on public.categories' \

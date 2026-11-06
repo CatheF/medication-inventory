@@ -10,7 +10,7 @@ import { safeHttpUrl } from "@/lib/safe-url";
 
 export type StockStatus = "out" | "low" | "ok";
 
-/** The rule the old cards used: 0 is Out, at or below the threshold is Low, everything else is OK. */
+/** The stock status rule: 0 is Out, at or below the threshold is Low, everything else is OK. */
 export function stockStatus(item: Pick<Medication, "stock" | "threshold">): StockStatus {
   if (item.stock === 0) return "out";
   return item.stock <= item.threshold ? "low" : "ok";
@@ -34,11 +34,11 @@ export function ignoreHeldEnter(event: { key: string; repeat: boolean; preventDe
 }
 
 // The comparison key for a category id (trimmed, lower-cased, blank = null) is defined once, in lib/filter-chips.ts, because the
-// filter chips on both screens need it too. It is re-exported so the Inventory components keep importing it from here.
+// filter chips on both screens need it too. It is re-exported so the Inventory components can import it from here.
 export { idKey };
 
-// The link guard (http and https only) moved to lib/safe-url.ts, because the API now applies the same rule when it stores a
-// vendor link or a photo address. The Inventory components keep importing it from here.
+// The link guard (http and https only) is defined in lib/safe-url.ts because the API applies the same rule when it stores a
+// vendor link or a photo address. It is re-exported so the Inventory components can import it from here.
 export { safeHttpUrl };
 
 export type CategoryOption = { id: string; key: string; title: string };

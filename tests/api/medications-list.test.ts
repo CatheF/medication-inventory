@@ -1,8 +1,8 @@
-// Requirement-driven tests: GET /api/medications (TASK.md sections 2/8/9 as far as the API is involved; SPEC 1, 2.6).
+// Requirement-driven tests: GET /api/medications, as far as the API is involved in browsing.
 //
 //   "Ensure search, filtering, sorting, and pagination work together without hiding items or implying that a partial
 //    page is the complete category."
-//   "Existing items without categories remain accessible."   "errors shown as empty lists" (section 7)
+//   "Existing items without categories remain accessible."   "errors shown as empty lists" (one way inventory seems to disappear)
 //
 // The listing must be COMPLETE even when the database answers at most N rows per request (PostgREST max-rows, commonly
 // 1000), and a failure must be a failure, never a 200 with an empty or partial list. Both id shapes are exercised.

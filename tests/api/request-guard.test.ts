@@ -2,10 +2,10 @@
 //
 // The app has no login. A web page that a staff member visits could fire POST /api/medications (junk items),
 // POST /api/categories or POST /api/order-sheet/xlsx at it without any permission check from the browser, because a POST
-// with Content-Type text/plain needs no CORS preflight, and the routes parsed the body as JSON whatever its type.
-// The three POST routes this work added or changed now require Content-Type: application/json (415 otherwise) and refuse
-// a request the browser marks Sec-Fetch-Site: cross-site (403). The routes this work did not touch (transactions, import,
-// upload) are deliberately NOT covered, and these tests say so.
+// with Content-Type text/plain needs no CORS preflight, and a route that parses the body as JSON whatever its type
+// accepts it. So these three POST routes require Content-Type: application/json (415 otherwise) and refuse a request the
+// browser marks Sec-Fetch-Site: cross-site (403). The other routes (transactions, import, upload) do not use this guard;
+// they are deliberately NOT covered, and these tests say so.
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -200,9 +200,9 @@ describe.each(ID_SHAPES)("the request guard on the $label", ({ options }) => {
   });
 
   it("the routes this work did not touch are NOT covered (documented): a cross-site text/plain POST can still record a stock change", async () => {
-    // Known gap, left as it was on purpose: /api/transactions, /api/import and /api/upload were not changed by this work. If this
+    // Known gap, left in place on purpose: /api/transactions, /api/import and /api/upload do not use the guard. If this
     // test starts failing, the guard was extended to /api/transactions (every page that calls it already sends application/json):
-    // update this note and the handoff report deliberately.
+    // update this note and the README's security notes deliberately.
     const before = fake.dump("medications").find((row) => row.id === itemId)?.stock;
     const attack = new NextRequest("http://localhost/api/transactions", {
       method: "POST",

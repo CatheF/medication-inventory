@@ -3,7 +3,7 @@ import { parseSupplierOrderNumber, SUPPLIER_ORDER_NUMBER_MAX_LENGTH } from "@/li
 import { TRICKY_SUPPLIER_NUMBERS } from "../helpers/fixtures";
 
 // Invisible characters are built from code points on purpose: written literally (or as \u escapes) they are
-// unreadable in review and some tooling rewrites them.
+// unreadable in a diff and some tooling rewrites them.
 const cp = (n: number): string => String.fromCodePoint(n);
 
 const NBSP = cp(0x00a0);
@@ -245,12 +245,11 @@ describe("parseSupplierOrderNumber", () => {
   });
 });
 
-// Regression: the parser used to keep a hand-written list of forbidden ranges that stopped at U+2064. It let the four
-// bidi ISOLATE controls (U+2066-U+2069) through, although they reorder displayed text exactly like the override
-// characters rejected above, and about 150 other invisible or formatting characters with them. A code containing
-// any of them reads differently on screen and on the printed sheet. The rule is now a Unicode-category rule
-// (lib/text-safety.ts): control (Cc), format (Cf), line/paragraph separators (Zl, Zp) and Default_Ignorable code
-// points are rejected, variation selectors excepted.
+// Regression guard: a hand-written list of forbidden ranges that stops at U+2064 lets the four bidi ISOLATE controls
+// (U+2066-U+2069) through, although they reorder displayed text exactly like the override characters rejected above,
+// and about 150 other invisible or formatting characters with them. A code containing any of them reads differently on
+// screen and on the printed sheet. So the rule is a Unicode-category rule (lib/text-safety.ts): control (Cc), format
+// (Cf), line/paragraph separators (Zl, Zp) and Default_Ignorable code points are rejected, variation selectors excepted.
 describe("bidi isolates and other invisible format characters", () => {
   it.each([
     ["left-to-right isolate U+2066", 0x2066],
@@ -261,7 +260,8 @@ describe("bidi isolates and other invisible format characters", () => {
     expect(parseSupplierOrderNumber(`00417${cp(codePoint)}B-`).ok).toBe(false);
   });
 
-  // The code points the review found accepted, by name, so the table reads without a Unicode chart.
+  // The code points such a range list misses, by name, so the table reads without a Unicode chart ("the old list" below
+  // is a hand-written list of ranges that ends at U+2064).
   const INVISIBLE_BEYOND_THE_OLD_LIST: Array<[string, number]> = [
     ["soft hyphen", 0x00ad],
     ["combining grapheme joiner", 0x034f],

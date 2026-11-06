@@ -32,7 +32,7 @@ export function shouldUseCombobox(realOptionCount: number): boolean {
 // ── Search folding ──────────────────────────────────────────────────────────────
 
 // The SAME folding as the Inventory search (foldSearchText in lib/search-text.ts, the one definition both share: invisible
-// characters dropped, look-alike forms equal, accents ignored, lower case; tests/unit/combobox.test.ts still compares the two
+// characters dropped, look-alike forms equal, accents ignored, lower case; tests/unit/combobox.test.ts compares the two
 // searches so they cannot drift apart). On top of that, whitespace runs become one space and the ends are trimmed.
 
 /**

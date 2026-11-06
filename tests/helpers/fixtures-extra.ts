@@ -1,4 +1,4 @@
-// Extra helpers for API-route tests (complements tests/helpers/fixtures.ts, which is not modified).
+// Extra helpers for API-route tests (complements tests/helpers/fixtures.ts).
 // Synthetic data only.
 //
 //   const fake = installFake(LIVE_AFTER_MIGRATION);

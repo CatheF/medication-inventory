@@ -81,7 +81,7 @@ export function isSheetDate(value: string): boolean {
 
 /**
  * "2026-11-05" -> "Nov 5, 2026" (in the browser's language). Built in UTC so the day never shifts with the time zone.
- * A year before 1000 (only possible now when the computer's own clock is wrong: the draft and the export accept 2000-2099)
+ * A year before 1000 (only possible when the computer's own clock is wrong: the draft and the export accept 2000-2099)
  * is shown exactly as stored ("0026-11-05"): Date.UTC would read year 26 as 1926 and the formatter would print it as "26",
  * which looks like 2026. The printed sheet must never show a different date than the field.
  */

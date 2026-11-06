@@ -1,13 +1,12 @@
-// NEW-UI-ONLY BY DESIGN (TASK.md sections 2 and 6): when the inventory cannot be loaded, the Inventory tab and the
-// Scan tab now SAY so (error notice + Retry, dashes instead of zeros) instead of looking like an empty inventory.
-// This is the intentional difference from the original UI, which swallowed every API error into an empty list
-// ("No medications yet", stat cards at 0).
+// NEW-UI-ONLY BY DESIGN: when the inventory cannot be loaded, the Inventory tab and the Scan tab SAY so (error notice +
+// Retry, dashes instead of zeros) instead of looking like an empty inventory. An older build swallowed every API error
+// into an empty list ("No medications yet", stat cards at 0); these tests catch that behavior coming back.
 //
 // Expected results:
-//   * against the current app (E2E_BASE_URL=http://127.0.0.1:3100): every test passes;
-//   * against the ORIGINAL UI (http://127.0.0.1:3101): 5 of the 6 tests FAIL, each on the first assertion that looks
-//     for the error notice / warning (it does not exist there). That failure is the evidence that these tests detect
-//     the old defect. The 6th ("the notice is shown ... only when the inventory is missing") is a negative control:
+//   * against the current app: every test passes;
+//   * against an older build of the app (point E2E_BASE_URL at it): 5 of the 6 tests fail, each on the first assertion
+//     that looks for the error notice / warning (it does not exist there). That failure is the evidence that these tests
+//     detect the defect. The 6th ("the notice is shown ... only when the inventory is missing") is a negative control:
 //     it checks there is no false alarm when everything loaded, so it passes on both.
 // The behavior that must be identical on both (the Scan tab keeps working) is in existing-resilience.spec.ts.
 import { test, expect } from "@playwright/test";

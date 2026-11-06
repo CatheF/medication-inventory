@@ -1,5 +1,5 @@
 // Playwright helper: fulfills the app's /api/* calls in the browser with synthetic data, re-implementing the
-// API CONTRACT from SPEC.md section 2.6 (partial PUT, id-type-agnostic category ids, honest errors, ...).
+// API contract of the real routes (partial PUT, id-type-agnostic category ids, honest errors, ...).
 // It lets the real Next.js pages run end-to-end without a database. The real routes are covered separately by
 // the vitest route tests; keep this file in step with them.
 import type { Page, Route } from "@playwright/test";
@@ -337,7 +337,7 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
       }
     }
 
-    // ── stock operations (unchanged by this work; emulated for scan-flow regression tests) ────
+    // ── stock operations (emulated for the scan-flow regression tests) ────
     if (path === "/api/transactions") {
       if (method === "GET") return json(route, 200, []);
       if (method === "POST" && isDict(body)) {

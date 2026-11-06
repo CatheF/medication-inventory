@@ -4,7 +4,7 @@
 // WHY: the app has no login, so the only thing standing between a staff member's browser and the API is the browser's own
 // cross-site rules. A web page the person visits can still fire a "simple" POST at this app without any permission check
 // (no preflight) as long as the Content-Type is text/plain, application/x-www-form-urlencoded or multipart/form-data, and
-// the routes used to parse the body as JSON whatever its type. Two cheap checks close that door:
+// a route that parses the body as JSON whatever its type would accept it. Two cheap checks close that door:
 //   1. the body must be declared as application/json (a page on another site cannot send that without a preflight, which
 //      the app never answers, so the browser stops it), and
 //   2. a request the browser itself marks as coming from another site (Sec-Fetch-Site: cross-site) is refused outright.

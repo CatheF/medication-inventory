@@ -6,8 +6,8 @@
 // it is dressed for paper (bold font, wrapped text, column widths).
 //
 // It is deliberately independent of the code under test (nothing is imported from lib/ or app/). Its reading of a real
-// export was cross-checked once against openpyxl (see tests/api/order-sheet-export-file.test.ts, which repeats that
-// cross-check on every run when python3 + openpyxl are installed).
+// export is cross-checked against openpyxl (tests/api/order-sheet-export-file.test.ts does that on every run when
+// python3 + openpyxl are installed).
 import { strFromU8, unzipSync } from "fflate";
 
 export type XlsxCellType =

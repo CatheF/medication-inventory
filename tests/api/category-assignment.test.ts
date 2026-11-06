@@ -1,4 +1,4 @@
-// Requirement-driven tests: assigning a category to an item and reading it back (TASK.md section 1, 2-API-side, 8, 9).
+// Requirement-driven tests: assigning a category to an item and reading it back.
 //
 //   "A category selected when creating an item remains selected after saving, refreshing, and reopening it."
 //   "A category changed during editing persists in the same way."
@@ -327,9 +327,9 @@ describe.each(ID_SHAPES)("changing an item's category when it is EDITED, on the 
   });
 
   it("documents the wire format of the original defect: NaN serializes to null, and an explicit null clears the category", async () => {
-    // The old admin page sent Number("<uuid>"), which is NaN; JSON.stringify turns NaN into null, so the PUT carried an
-    // explicit null and the category was wiped while the page still said "saved". The server cannot tell NaN from an
-    // intended null, so the only defence is a client that sends the id string (covered by the admin page tests).
+    // A page that sends Number("<uuid>") sends NaN; JSON.stringify turns NaN into null, so the PUT carries an explicit
+    // null and the category is wiped while the page still says "saved". The server cannot tell NaN from an intended
+    // null, so the only defence is a client that sends the id string (covered by the admin page tests).
     const item = itemNamed(medications, "Cetirizine");
     const res = await api.updateItem(item.id, { category_id: Number.NaN });
     expect(res.status).toBe(200);
@@ -340,7 +340,7 @@ describe.each(ID_SHAPES)("changing an item's category when it is EDITED, on the 
 // ── What the Admin page REALLY sends ──────────────────────────────────────────────────────────────────────────────────────
 // When staff press Save on an existing item, app/admin/page.tsx (buildPayload) sends ONLY the fields that changed, plus
 // category_id on EVERY save (an id string, or null for "Uncategorized"), plus supplier_order_number when that changed. So
-// the realistic way to lose the owner's category is not "the category travels alone" (covered above) but "the category,
+// the realistic way to lose a category is not "the category travels alone" (covered above) but "the category,
 // or another field, is dropped or reset when it travels TOGETHER with other fields". Each case below is read back three
 // ways (the PUT answer, a fresh read of the item, the stored row) and checks that every field that was NOT sent is exactly
 // what it was before the save.
@@ -436,7 +436,7 @@ describe.each(ID_SHAPES)("saving an existing item the way the Admin page does (c
       }
       expect(String(storedMedication(fake, item.id).category_id)).toBe(target);
 
-      // the other two ways the app reads an item agree, and the item sits in the group the owner expects
+      // the other two ways the app reads an item agree, and the item sits in the group staff expect
       const byBarcode = await bodyRecord(await api.lookup(String(reread.barcode)));
       expect(byBarcode.id).toBe(item.id);
       expect(byBarcode.category_id).toBe(target);

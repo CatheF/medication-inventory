@@ -1,6 +1,6 @@
 // The browser gets plain words; the facts for whoever looks after the app are in the `technical` field AND in the server log
-// line the routes write for a 403 or a 5xx. A mutation that dropped the technical text from the item routes' log line used to
-// pass every test, so this pins it for the item routes (the categories route has its own check).
+// line the routes write for a 403 or a 5xx. Without this test, a change that dropped the technical text from the item routes'
+// log line would pass every other test, so this pins it for the item routes (the categories route has its own check).
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { installFake, type FakeSupabase } from "../helpers/fake-supabase";
 import { seedStandard } from "../helpers/fixtures-extra";

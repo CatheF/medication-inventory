@@ -1,29 +1,29 @@
-// REPRODUCTION PROOF of the owner's main bug: "categories appear available, but assignments don't persist".
+// REPRODUCTION PROOF of the main category bug: "categories appear available, but assignments don't persist".
 //
-// Root cause (SPEC.md section 1): the original Admin page turned the chosen category into a number with
-// Number(select.value). The live database uses UUID category ids, Number("<uuid>") is NaN, JSON.stringify writes NaN as
-// null, so the page sent `category_id: null` on every save and still said "Medication updated.".
+// Root cause: an Admin page that turns the chosen category into a number with Number(select.value). The live database uses
+// UUID category ids, Number("<uuid>") is NaN, JSON.stringify writes NaN as null, so such a page sends `category_id: null` on
+// every save and still says "Medication updated.".
 //
-// This file is a proof, so it only uses locators that exist on BOTH the original page and the current one: visible text,
+// This file is a proof, so it only uses locators that exist on BOTH such an older page and the current one: visible text,
 // roles and structure, never data-testid. The same file can therefore be run against either build:
 //   current UI : E2E_BASE_URL=http://127.0.0.1:3100 CHROMIUM_PATH=... npx playwright test tests/e2e/category-assignment-regression.spec.ts --reporter=list
-//   original UI: E2E_BASE_URL=http://127.0.0.1:3101 CHROMIUM_PATH=... npx playwright test tests/e2e/category-assignment-regression.spec.ts --reporter=list
+//   older build: E2E_BASE_URL=<address of a server running that build> CHROMIUM_PATH=... npx playwright test tests/e2e/category-assignment-regression.spec.ts --reporter=list
 //
-// Verified result of the two runs (20 tests):
-//   current UI  : 20 passed.
-//   original UI : 9 failed, 11 passed. Failing: the five uuid tests that assign, change or create a category, keep the pick on
+// Expected results (20 tests):
+//   current UI  : 20 pass.
+//   older build : 9 fail, 11 pass. Failing: the five uuid tests that assign, change or create a category, keep the pick on
 //                 screen, or use the long searchable list (`category_id: null` in the request, `null` in the database and no
 //                 category after a reload; the dropdown snaps back to "no category" and the page prints "NaN"); the stale stock
-//                 overwrite; and the three failed-save tests (the original puts its messages in a plain div without role="alert",
+//                 overwrite; and the three failed-save tests (the older page puts its messages in a plain div without role="alert",
 //                 its dropdown forgets the pick, and for a save that stored nothing it closes the form and says "Medication
-//                 updated."). Passing on the original: the three uuid controls (a stock-only edit passes the untouched uuid string
+//                 updated."). Passing there: the three uuid controls (a stock-only edit passes the untouched uuid string
 //                 straight through, so it never hits Number(); choosing "no category" really clears it) and all eight bigint twins
 //                 (also with the filled-in fixture rows below), because Number("3") is 3. That split is what pins the bug on the id type.
 //
 // How a failure is made trustworthy: everything the test needs in order to *reach* the behavior (the page loaded, the item is
 // listed, the edit form opened, the form started on the item's real category, the save request was answered) is a hard
-// assertion, so a broken harness or a changed layout fails loudly as "could not get there". The outcomes the owner cares
-// about (what the save request carried, what the database holds, what the page shows after a reload) are SOFT assertions
+// assertion, so a broken harness or a changed layout fails loudly as "could not get there". The outcomes that matter
+// (what the save request carried, what the database holds, what the page shows after a reload) are SOFT assertions
 // with messages in plain words, so one failing run lists every symptom instead of stopping at the first. Assertions that
 // say something did NOT happen are only made after a settled state was observed, so they cannot pass before the page reacts
 // (and, where the page could act later on a timer, after the page's clock was moved forward: see the accepted-but-not-stored test).
@@ -48,7 +48,7 @@ const NEW_ITEM_BARCODE = "0049000012345";
 const SAVE_PUT = /\/api\/medications\/\d+$/;
 const SAVE_POST = /\/api\/medications$/;
 
-/** What a page must not say after a save that did not succeed: the current build's "Saved. Category: ..." or the original's "Medication updated." */
+/** What a page must not say after a save that did not succeed: the current build's "Saved. Category: ..." or an older build's "Medication updated." */
 const SUCCESS_WORDING = /(^|\s)Saved\.|Medication (updated|added)\./;
 
 const PHOTO = `data:image/svg+xml;utf8,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#94a3b8"/></svg>')}`;
@@ -123,7 +123,7 @@ function savedBody(mock: MockApi, method: "PUT" | "POST"): Dict {
 
 /**
  * `category_id` as it travelled over the wire. A uuid id must arrive as that very string. A bigint id may be the digit string
- * or the equal number (the original page sends a number there, which is fine). A missing key stays `undefined`, and the
+ * or the equal number (an older page sends a number there, which is fine). A missing key stays `undefined`, and the
  * `null` that JSON.stringify writes for NaN stays `null`.
  */
 function sentCategory(body: Dict, shape: IdShape): unknown {
@@ -137,7 +137,7 @@ function expectCategoryNotClearedByRequest(body: Dict, shape: IdShape, expected:
   soft(sentCategory(body, shape), `${label}: the request must not carry a different category, null or NaN`).toBe(expected);
 }
 
-// ── Locators that exist on the original page AND the current one ───────────────────────────────────────────────────
+// ── Locators that exist on an older page AND the current one ────────────────────────────────────────────────────────
 
 /** The list row of an item: the innermost element that holds both the item's exact name and its "Edit" button. */
 function itemRow(page: Page, name: string): Locator {
@@ -208,17 +208,17 @@ async function chooseCategory(page: Page, name: string): Promise<void> {
 }
 
 /**
- * With 11 or more categories the current page offers a searchable list (a text input with options) instead of a plain dropdown
- * (SPEC.md section 2.10). The long-list test is only worth anything if it really drives that control, and chooseCategory would
- * quietly fall back to a plain dropdown if the page stopped switching, so this is asserted, not just recorded. Soft, so a failing
- * run still lists every other symptom.
+ * With 11 or more categories the current page offers a searchable list (a text input with options) instead of a plain dropdown.
+ * The long-list test is only worth anything if it really drives that control, and chooseCategory would quietly fall back to a
+ * plain dropdown if the page stopped switching, so this is asserted, not just recorded. Soft, so a failing run still lists every
+ * other symptom.
  */
 async function expectSearchableCategoryList(page: Page, categoryCount: number): Promise<void> {
   const native = await isNativeSelect(categoryField(page));
   soft(native, `with ${categoryCount} categories the Category field must be the searchable list (a text input with options), not a plain dropdown`).toBe(false);
 }
 
-/** Pick the "no category" entry ("— No category —" on the original page, "— Uncategorized —" on the current one). */
+/** Pick the "no category" entry ("— No category —" on an older page, "— Uncategorized —" on the current one). */
 async function chooseNoCategory(page: Page): Promise<void> {
   const field = categoryField(page);
   await expect(field).toBeVisible();
@@ -362,7 +362,7 @@ function expectOnlyTheseChanged(mock: MockApi, itemName: string, before: Medicat
   soft(expected, `database: ${label}: nothing but ${changed.join(" and ")} changed (name, barcode, unit, threshold, notes, vendor URL, photo, supplier number, ...)`).toEqual(before);
 }
 
-/** The things the owner cares about after a category was saved: the request, the database, the page right away and after a reload. */
+/** The things that matter after a category was saved: the request, the database, the page right away and after a reload. */
 async function expectCategorySaved(args: {
   page: Page;
   mock: MockApi;
@@ -407,7 +407,7 @@ async function expectCategorySaved(args: {
 // ── The proof ──────────────────────────────────────────────────────────────────────────────────────────────────────
 
 for (const shape of SHAPES) {
-  // uuid: the live schema (the shape of the bug). bigint: supabase/schema.sql, where the original page worked, which is
+  // uuid: the live schema (the shape of the bug). bigint: supabase/schema.sql, where an older page works, which is
   // what makes the uuid failures specific to the id type and not a flaw of the test.
   test.describe(`category assignment with ${shape} category ids`, () => {
     test("picking a category for an item that has none sends the category id, stores it, and still shows it after a reload", async ({ page }) => {
@@ -561,7 +561,7 @@ for (const shape of SHAPES) {
       await openEdit(page, LEGACY_ITEM);
       await expectFormStartsOn(page, NONE);
       // The control follows from the NUMBER of categories, not from the id shape: the uuid run asserts it, and the bigint twin stays a
-      // clean control for the original page (which has no searchable list and still saves a bigint id correctly).
+      // clean control for an older page (which has no searchable list and still saves a bigint id correctly).
       if (shape === "uuid") await expectSearchableCategoryList(page, categories.length);
 
       await chooseCategory(page, "Respiratory");
@@ -599,7 +599,7 @@ test.describe("editing one field does not overwrite the others", () => {
 
   // The twin of the stock test, for the category. The form is opened on "Pain & Fever"; meanwhile another person files the item
   // under "Antibiotics" (and a dispense takes the stock down). Saving a note must not file it back under "Pain & Fever": the category
-  // is not the person's change, so it must not travel with the save. (The page used to send the category with EVERY save.)
+  // is not the person's change, so it must not travel with the save. (A page that sends the category with EVERY save would.)
   for (const shape of SHAPES) {
     test(`saving a note does not put back a category that changed while the form was open (${shape} ids)`, async ({ page }) => {
       const mock = await installRichMockApi(page, shape);
@@ -639,7 +639,7 @@ test.describe("editing one field does not overwrite the others", () => {
   }
 });
 
-// What the owner lost trust over: a save that did not work looked as if it had. Three ways a save can fail to store the work, and
+// What costs staff their trust: a save that did not work looks as if it had. Three ways a save can fail to store the work, and
 // in all three the page must (a) say so where it can be heard, (b) keep the form open with what the user chose and typed, (c) not
 // use the words of a successful save. These are read only after the page finished reacting to the answer (waitUntilSaveSettled).
 test.describe("a save that did not succeed", () => {
@@ -706,8 +706,8 @@ test.describe("a save that did not succeed", () => {
     soft(dbRow(mock, LEGACY_ITEM), "database: a save that never arrived changed nothing").toEqual(before);
   });
 
-  // The original page answered a save that was accepted but did not store the category with "Medication updated." and closed the
-  // form, which is why the owner lost trust: everything looked fine and the category was gone. Here the server answers 200 with
+  // A page that answers a save that was accepted but did not store the category with "Medication updated." and closes the
+  // form loses staff's trust: everything looks fine and the category is gone. Here the server answers 200 with
   // the row exactly as it still is.
   test("a save the server accepted (HTTP 200) without storing the category warns about it, keeps the form open with the user's work, and does not say it saved", async ({ page }) => {
     // A page could also close the form a moment AFTER it warned (a timer), and a check made at one instant cannot see that. The page's

@@ -93,7 +93,7 @@ async function reloadAdmin(page: Page): Promise<void> {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 1. The category survives create and edit (TASK 1)
+// 1. The category survives create and edit
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Admin: the category survives create and edit", () => {
@@ -389,8 +389,8 @@ test.describe("Admin: the category survives create and edit", () => {
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 // 1b. A save sends only what the person changed ("Editing another field does not clear the category or overwrite unrelated
-//     item data"). The category used to be the one field that was always sent, so a form that had been open for a
-//     while put back the category it was opened with, whatever another person had set in the meantime.
+//     item data"). Sending the category with every save would put back the category a form was opened with, whatever
+//     another person had set in the meantime.
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Admin: a save sends only what the person changed", () => {
@@ -573,7 +573,7 @@ test.describe("Admin: a save sends only what the person changed", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 2. The supplier order number (TASK 3)
+// 2. The supplier order number
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Admin: the supplier order number", () => {
@@ -606,7 +606,7 @@ test.describe("Admin: the supplier order number", () => {
     expect(longest).toHaveLength(64);
     const mixedCase = ["Ab-12c/9", "sku-Ab-7x"]; // lower and upper case letters side by side: case-folding either way changes them
     const codes = [...TRICKY_SUPPLIER_NUMBERS, ...mixedCase, longest];
-    // Items that hold none of these codes yet, so every round really changes the supplier number (a round that re-typed the
+    // Items that hold none of these codes yet, so every code really changes the supplier number (typing the
     // value an item already had would send nothing and prove nothing).
     const items = buildMedications().filter((m) => !codes.includes(m.supplier_order_number ?? ""));
     expect(items.length).toBeGreaterThanOrEqual(codes.length);
@@ -745,9 +745,9 @@ test.describe("Admin: the supplier order number", () => {
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 // 2b. Text that is too long is never cut short silently (nothing may look saved that is not exactly what was typed).
-//     The supplier order number, the unit and the new category's name used to be clipped by an input's `maxlength`: a pasted
-//     70-character code was saved as its first 64 characters and reported as "Saved". The limits are still enforced, but now
-//     the person is told, next to the field, and nothing is saved until the text fits.
+//     The limits of the supplier order number, the unit and the new category's name are not an input's `maxlength`: that
+//     would clip a pasted 70-character code to its first 64 characters and report "Saved". The limits are enforced, the
+//     person is told, next to the field, and nothing is saved until the text fits.
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Admin: text that is too long is never cut short silently", () => {
@@ -949,9 +949,9 @@ test.describe("Admin: text that is too long is never cut short silently", () => 
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 2c. Typing in the item form does not re-render the list. Every keystroke changes the page's form state, and the rows below
-//     the form used to render again each time: with 1,500 items that cost about half a second per key. The rows are memoized
-//     now. This test counts renders instead of milliseconds, so it cannot be flaky: it asks React itself which rows did work.
+// 2c. Typing in the item form does not re-render the list. Every keystroke changes the page's form state, and rows below
+//     the form that rendered again each time would cost, with 1,500 items, about half a second per key. The rows are
+//     memoized. This test counts renders instead of milliseconds, so it cannot be flaky: it asks React itself which rows did work.
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 type RowRenderCounter = { counting: boolean; commits: number; rowRenders: number };
@@ -1044,12 +1044,12 @@ test.describe("Admin: typing in the form does not re-render the list", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 3. Honest feedback when a save does not work (TASK 1: failed saves show a useful error and never look successful)
+// 3. Honest feedback when a save does not work (failed saves show a useful error and never look successful)
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Admin: an item whose stored vendor link has no https://", () => {
-  // Staff have always been able to type "shop.example.com/reorder" there, every screen shows it as an https link, and the API
-  // accepts it. The vendor box used to be a browser-validated URL field, so the browser itself refused to submit the form
+  // Staff can type "shop.example.com/reorder" there, every screen shows it as an https link, and the API accepts it. The
+  // vendor box must therefore not be a browser-validated URL field: the browser would itself refuse to submit the form
   // (a tooltip, no request) for ANY edit of such an item, including a note or a category.
   const BARE = "shop.example.com/reorder";
 
@@ -1500,7 +1500,7 @@ test.describe("Admin: honest feedback when a save does not work", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 4. The Admin list agrees with the Inventory tab (TASK 2), and says why a list is empty
+// 4. The Admin list agrees with the Inventory tab, and says why a list is empty
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 /** Ground truth for the list tests, computed from the fixtures (not from either screen). */
@@ -1996,7 +1996,7 @@ test.describe("Admin: unnamed items, new categories and photos", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 6. Keyboard use, focus and accessible names (TASK 6)
+// 6. Keyboard use, focus and accessible names
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 /** Moves a native select to a choice using only the arrow keys. */
@@ -2158,7 +2158,7 @@ test.describe("Admin: keyboard use and focus", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 7. Phone width (TASK 6: usable on the supported screen sizes)
+// 7. Phone width (usable on the supported screen sizes)
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Admin: phone width", () => {
@@ -2276,8 +2276,9 @@ test.describe("Admin: phone width", () => {
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
-// 8. The original defect, with locators that work on ANY build of the page (roles, labels, visible text only)
-//    On the original page these fail because the chosen category is saved as null while the page says "Medication updated."
+// 8. The category defect, with locators that work on ANY build of the page (roles, labels, visible text only)
+//    On an older page that turns the category into a number these fail: the chosen category is saved as null while the
+//    page says "Medication updated."
 // ═════════════════════════════════════════════════════════════════════════════════════════════════
 
 test.describe("Regression for the original defect (build-independent locators)", () => {

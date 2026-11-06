@@ -1,26 +1,25 @@
-// NEW-UI-ONLY BY DESIGN (TASK.md sections 6 and 8, SPEC 3.4): how the scanner, the item card and the camera behave
-// NOW, where the original UI did less or did it wrong. The behavior that must be identical on both UIs is in
-// existing-scan-flow.spec.ts and existing-scanner-and-quick-mode.spec.ts; this file holds the differences, so that the
-// improvements cannot be lost again unnoticed:
+// NEW-UI-ONLY BY DESIGN: how the scanner, the item card and the camera behave. The behavior that must be identical on an
+// older build is in existing-scan-flow.spec.ts and existing-scanner-and-quick-mode.spec.ts; this file holds the
+// differences, so that the improvements cannot be lost unnoticed:
 //   * a scan typed right after clicking a tab (the tab button still has keyboard focus) works: the scanner's Enter is
 //     swallowed, so it cannot press that button again and undo the scan;
 //   * a scan works while a checkbox has focus, and a Space inside a scanned code does not flip the focused checkbox
-//     (new "Add to order sheet" checkboxes);
-//   * digits typed into the new Inventory controls (search box, sort select) are typing, not a scan;
+//     ("Add to order sheet" checkboxes);
+//   * digits typed into the Inventory controls (search box, sort select) are typing, not a scan;
 //   * scanning a second item while a card is open shows the second item, with a fresh quantity and an empty note;
-//   * the Scan tab fits a 360 px phone even with a 128-character barcode, and the top bar no longer pushes the Usage page 45 px
-//     past the edge of a 360 px screen (the original's "Kiosk Mode" link ended at x = 405);
+//   * the Scan tab fits a 360 px phone even with a 128-character barcode, and the top bar does not push the Usage page
+//     past the edge of a 360 px screen (an older build's "Kiosk Mode" link ended at x = 405);
 //   * the camera is switched off when the Scan tab is left;
 //   * an item that a scan created shows up in the Scan tab's numbers and in the Inventory tab without a reload;
 //   * keyboard, screen reader and touch access of the Scan tab (focus after a failed retry, alert / status regions, names,
 //     pressed states, 44 px targets).
 //
 // Expected results:
-//   * against the current app (E2E_BASE_URL=http://127.0.0.1:3100): every test passes;
-//   * against the ORIGINAL UI (http://127.0.0.1:3101): every test FAILS, each on the first assertion that looks for the
-//     new behavior (the checkbox, search box, sort select, alert and status regions do not exist there; the scan after a
-//     tab click is undone; the second scan is ignored; the page overflows; the camera stays on; the list is stale; the
-//     targets are small). That failure is the evidence that these tests detect what the original lacked.
+//   * against the current app: every test passes;
+//   * against an older build of the app (point E2E_BASE_URL at it): every test fails, each on the first assertion that
+//     looks for the new behavior (the checkbox, search box, sort select, alert and status regions do not exist there; the
+//     scan after a tab click is undone; the second scan is ignored; the page overflows; the camera stays on; the list is
+//     stale; the targets are small). That failure is the evidence that these tests detect what the older build lacks.
 //
 // Chromium's synthetic camera is switched on for the whole file (only the camera test uses it); see
 // existing-camera-idle.spec.ts. What this file does NOT prove: that a real camera device works.

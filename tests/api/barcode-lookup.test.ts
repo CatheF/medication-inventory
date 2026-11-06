@@ -1,5 +1,4 @@
-// Requirement-driven tests: GET /api/medications/barcode/[code] (TASK.md "existing barcode scanner previously worked and
-// must remain functional", sections 8 and 9; SPEC 2.6).
+// Requirement-driven tests: GET /api/medications/barcode/[code]. Requirement: the existing barcode scanner keeps working.
 //
 // The Scan tab and /kiosk treat HTTP 404 from this route as "this barcode is not in the inventory" and then CREATE a new
 // unnamed item. A 404 sent for any other reason (database down, key rejected, a policy problem) would therefore create

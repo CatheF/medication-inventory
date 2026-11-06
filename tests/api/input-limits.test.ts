@@ -1,7 +1,7 @@
 // Requirement-driven tests: size limits on what the API accepts (item text fields, request bodies, the category list).
 //
-// Why they exist: before the limits, one request could store megabytes of text in an item's name, notes, vendor link, photo
-// address or unit. Every item is returned to every browser by GET /api/medications, so one such field slowed down every
+// Why they exist: without limits, one request could store megabytes of text in an item's name, notes, vendor link, photo
+// address or unit. Every item is returned to every browser by GET /api/medications, so one such field would slow down every
 // screen for everybody. The limits are in lib/limits.ts; the boundary of every one is tested here (the largest value that
 // is accepted, and one more that is refused).
 import { NextRequest } from "next/server";

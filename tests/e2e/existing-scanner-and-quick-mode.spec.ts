@@ -1,8 +1,8 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): the physical (USB) barcode scanner and
+// Existing behavior that must be PRESERVED: the physical (USB) barcode scanner and
 // Quick mode. A USB scanner behaves like a keyboard: it types the code very fast and ends with Enter, with no
 // field focused. The page listens for that anywhere, on either tab.
 //
-// Same locators on the current app and on the original UI (see tests/e2e/helpers/existing-behavior.ts).
+// The same locators work on the current app and on an older build of it (see tests/e2e/helpers/existing-behavior.ts).
 import { test, expect, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
 import { installMockApi, type MockApi } from "./helpers/mock-api";

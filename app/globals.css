@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 /* The app is light-only: a white page, white cards and fixed dark text (text-gray-900 and friends). There is deliberately no
-   `prefers-color-scheme: dark` override: it turned the page near-black under those fixed colors and made the headings
-   nearly invisible whenever the visitor's operating system was in dark mode. `color-scheme: light` also keeps the
+   `prefers-color-scheme: dark` override: it would turn the page near-black under those fixed colors and make the headings
+   nearly invisible whenever the visitor's operating system is in dark mode. `color-scheme: light` also keeps the
    browser's own form controls, date pickers and scrollbars light in that case. */
 :root {
   color-scheme: light;
@@ -14,9 +14,9 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --font-sans: var(--font-geist-sans);
-  /* Tailwind's `font-mono` (barcodes, supplier numbers) used to point at --font-geist-mono, which nothing defines, so it
-     silently fell back to the proportional font. No monospace web font is loaded (and none is added): this is the
-     system monospace stack, the same one the order sheet uses (.sheet-mono below). */
+  /* Tailwind's `font-mono` (barcodes, supplier numbers) must not point at --font-geist-mono: nothing defines it, so the
+     text would silently fall back to the proportional font. No monospace web font is loaded: this is the system
+     monospace stack, the same one the order sheet uses (.sheet-mono below). */
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -33,7 +33,7 @@ select {
   color: #111827;
 }
 
-/* Placeholders: gray-500 is 4.83:1 on white (the old #9ca3af was 2.5:1). This rule is outside any @layer, so it also
+/* Placeholders: gray-500 is 4.83:1 on white (gray-400, #9ca3af, is only 2.5:1). This rule is outside any @layer, so it also
    wins over Tailwind's placeholder:text-* utilities. */
 ::placeholder {
   color: #6b7280;

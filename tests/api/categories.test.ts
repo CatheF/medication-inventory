@@ -1,4 +1,5 @@
-// Requirement-driven tests for /api/categories (TASK.md section 1 "Repair categories", sections 8 and 9; SPEC 2.6).
+// Requirement-driven tests for /api/categories. Requirement: categories persist (a created category is read back), a failed
+// write is reported as a failure, and nothing but creating and listing categories is possible.
 //
 // Every group runs against BOTH database shapes: the live Health Center database (uuid ids) and supabase/schema.sql
 // (bigint ids). The category API must behave the same for both and must always hand the browser string ids.
@@ -369,7 +370,7 @@ describe.each(ID_SHAPES)("the live categories defect (RLS on, no policy) with $l
     // Postgres answers a SELECT blocked by row-level security with zero rows and NO error, so this layer cannot tell
     // "no categories" from "categories I may not read". The Inventory tab therefore shows items whose category it
     // cannot name under "Category unavailable" instead of trusting an empty list. If this test starts failing, the
-    // API gained a way to detect the situation: update the UI notes and the handoff report deliberately.
+    // API gained a way to detect the situation: update the UI notes deliberately.
     fake.seedCategories([{ name: "Created by an administrator" }]);
     const res = await GET();
     expect(res.status).toBe(200);

@@ -1,5 +1,5 @@
-// DOCUMENTATION of the access boundary as it is TODAY (TASK.md section 8: "Apply the same access rules to the new category,
-// ordering-code, and report operations", "authentication, permissions, and any tenant boundaries").
+// DOCUMENTATION of the access boundary as it is TODAY. Requirement: the category, supplier-order-number and report
+// operations follow the same access rules as the rest of the app (authentication, permissions, tenant boundaries).
 //
 // READ THIS BEFORE RELYING ON IT: these tests describe existing behavior; they are NOT a security guarantee. The app has
 // NO authentication: every /api route runs with the Supabase anon key and no login, no session, no tenant. Anyone who can
@@ -243,7 +243,7 @@ describe("limitations that follow from how row-level security answers (documenta
   it("makes rows hidden by a missing SELECT policy on medications look like an empty inventory: the list is an empty 200, an item lookup is 404, and creating an item fails with 403", async () => {
     // Postgres answers a SELECT that row-level security blocks with ZERO ROWS and no error. This layer cannot tell
     // "hidden" from "empty", which is why the dashboard must treat an empty list from a live database with suspicion
-    // (see the missing-inventory investigation). If this test starts failing, the API gained a way to tell the two apart.
+    // (see docs/DATA-PERSISTENCE-INVESTIGATION.md). If this test starts failing, the API gained a way to tell the two apart.
     const fake = installFake(LIVE_AFTER_MIGRATION);
     const { medications } = seedStandard(fake);
     fake.setRls("medications", { select: false, insert: true, update: true, delete: true });

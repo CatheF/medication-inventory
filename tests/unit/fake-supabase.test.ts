@@ -1,13 +1,13 @@
 // Self-tests for tests/helpers/fake-supabase.ts. Everything here is synthetic.
 //
 // Sections 15 and 16 prove the two vi.mock patterns documented in the helper's header by running REAL route
-// handlers (the four routes the spec leaves unchanged: transactions, analytics, import, upload) against the fake.
-// Section 15b uses throwaway inline copies of the pre-fix categories handlers to show the live symptoms.
+// handlers (transactions, analytics, import, upload) against the fake.
+// Section 15b uses throwaway inline copies of plain categories handlers (the preFix functions) to show the live symptoms.
 //
-// Three tests in section 15 DO import api-core's new routes (POST/GET /api/medications, POST /api/categories). They
+// Three tests in section 15 DO import the category and item routes (POST/GET /api/medications, POST /api/categories). They
 // are the ones that prove the fake can reproduce what the route-level suites need: a NUL character reaching the
-// route's own guard, and the two timing scenarios (a 23505 race and rows shifting between pages) that used to need a
-// hand-rolled stand-in. They only assert contract facts from SPEC 2.6 (status codes, field names, "every row exactly
+// route's own guard, and the two timing scenarios (a 23505 race and rows shifting between pages) that would otherwise
+// need a hand-rolled stand-in. They only assert the routes' contract (status codes, field names, "every row exactly
 // once"), never message wording, so a rewording of those routes cannot break them.
 import { NextRequest, NextResponse } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -1920,8 +1920,9 @@ describe("pattern A: vi.mock('@/lib/db') + installFake() with the real, unchange
 
 // ═══════════════════════════════════ 15b. the live category failures, reproduced through the fake ═══════════════════════════════════
 
-// Throwaway inline copies of the PRE-FIX categories handlers (what the repo shipped). They exist to show that the
-// fake reproduces the production symptoms; they are deliberately not the new routes, which other people are rewriting.
+// Throwaway inline copies of plain categories handlers that read and write the table directly and hide the database's
+// error behind a generic message (hence the preFix names). They exist to show that the fake reproduces the production
+// symptoms; they are deliberately not the real routes, so this demonstration cannot change when those routes do.
 async function preFixCategoriesGET(): Promise<Response> {
   try {
     const { data, error } = await supabase.from("categories").select("*").order("name");

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { idKey, parseCategoryId, parseMedicationId, sameId, toIdString } from "@/lib/ids";
 
 // Odd characters are built from code points on purpose: written literally (or as \u escapes) they are unreadable in
-// review and some tooling rewrites them.
+// a diff and some tooling rewrites them.
 const cp = (n: number): string => String.fromCodePoint(n);
 
 const UUID = "3f2b8c1e-5a47-4d0b-9c63-1e8f7a2d4b90";
@@ -161,7 +161,7 @@ describe("parseCategoryId", () => {
   });
 
   describe("strings that are really bugs leaking through", () => {
-    // These are exactly what the admin page used to send: Number(uuid) -> NaN -> JSON null, or String() of a missing value.
+    // These are what a form sends when it turns an id into a number or into text without checking: Number(uuid) -> NaN -> JSON null, or String() of a missing value.
     it.each(["NaN", "nan", "undefined", "null", "NULL", "None", "none", "true", "false", "Infinity", "-Infinity", "[object Object]", "{}", "[]"])(
       "rejects %j instead of treating it as an id or as 'no category'",
       (input) => expectRejected(input)
@@ -223,7 +223,7 @@ describe("parseCategoryId", () => {
 
   it("round-trips through JSON the way the admin form sends it (a string id survives, NaN would not)", () => {
     expect(JSON.parse(JSON.stringify({ category_id: UUID })).category_id).toBe(UUID);
-    // The original defect: Number(uuid) is NaN and JSON.stringify turns NaN into null ("no category").
+    // The defect this guards against: Number(uuid) is NaN and JSON.stringify turns NaN into null ("no category").
     expect(JSON.stringify({ category_id: Number(UUID) })).toBe('{"category_id":null}');
     // ...and the API refuses the textual forms of that mistake rather than saving them.
     expectRejected("NaN");
@@ -310,8 +310,7 @@ describe("sameId", () => {
   });
 });
 
-// The comparison key the view logic, the filter chips and the Inventory components all use for a category id: one definition
-// (it used to be written out in two modules).
+// The comparison key the view logic, the filter chips and the Inventory components all use for a category id: one definition.
 describe("idKey", () => {
   it.each<[string, unknown]>([
     ["null", null],

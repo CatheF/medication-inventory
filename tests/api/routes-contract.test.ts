@@ -1,6 +1,16 @@
-// Smoke tests for the api-core routes (categories + medications). They call the real route handlers with a small,
-// stateful stand-in for the Supabase client. Comprehensive independent route tests with a full fake come later;
-// this file proves the contract in SPEC 2.6 end to end for the behaviours that caused the reported problems.
+// Contract tests for the category and medication routes, end to end: GET and POST /api/categories, GET and POST
+// /api/medications (paging, query parameters, errors), GET / PUT / DELETE /api/medications/[id] and
+// GET /api/medications/barcode/[code]. The tests call the real route handlers and check status codes, response bodies and
+// what ended up in the database.
+//
+// What it protects: a category chosen for an item is stored, comes back as a string id and survives an edit of an
+// unrelated field; the supplier order number is stored exactly as typed; a list is never silently cut at the server's row
+// cap and an error is never turned into an empty list; a failed write is reported as a failure; and a barcode lookup that
+// fails for any reason other than "not found" is not a 404 (otherwise the scanner would create a duplicate unnamed item).
+//
+// Why the database stand-in below is written in this file instead of using tests/helpers/fake-supabase.ts, which the other
+// files in tests/api share: it is a second, independently written model of PostgREST and Postgres. When both models agree
+// with the routes, a mistake in either model cannot hide a defect in a route.
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Category, Medication } from "@/lib/db";
@@ -631,7 +641,7 @@ describe("POST /api/categories", () => {
     ["right-to-left override", { name: `Pain${cp(0x202e)}Fever` }],
     ["bidi isolate", { name: `Pain${cp(0x2066)}Fever` }],
     ["line separator", { name: `Pain${cp(0x2028)}Fever` }],
-    // The route used to keep its own list of ranges that stopped at U+2069; these slipped through it.
+    // A hand-written list of ranges that stops at U+2069 lets these slip through.
     ["inhibit symmetric swapping (U+206A)", { name: `Pain${cp(0x206a)}Fever` }],
     ["nominal digit shapes (U+206F)", { name: `Pain${cp(0x206f)}Fever` }],
     ["soft hyphen", { name: `Anti${cp(0x00ad)}biotics` }],
@@ -778,8 +788,8 @@ describe("GET /api/medications", () => {
       ]);
     });
 
-    // Regression (review finding): with a server cap below the page size AND no total, the loop used to treat the
-    // first short page as the last one and answered 200 with only the first `cap` rows ("inventory disappeared").
+    // Regression: with a server cap below the page size AND no total, a loop that treats the first short page as the
+    // last one answers 200 with only the first `cap` rows ("inventory disappeared").
     it.each<[number, number]>([
       [100, 1500],
       [500, 1200],
@@ -820,8 +830,8 @@ describe("GET /api/medications", () => {
       expect(list).toHaveLength(rows.filter((m) => m.category_id === null).length);
     });
 
-    // Regression (review finding): without the empty-page check a count that overstates what is left (rows deleted
-    // while the list is being read) made the loop re-ask for the same offset until it hit 50 pages and answered 500.
+    // Regression: without the empty-page check, a count that overstates what is left (rows deleted while the list is
+    // being read) makes the loop re-ask for the same offset until it hits 50 pages and answers 500.
     it.each<[string, number, number]>([
       ["every row after the first page is deleted", 1000, 2],
       ["half of what the second page would have held is deleted", 1500, 3],
@@ -1541,11 +1551,10 @@ describe("PUT /api/medications/[id] (partial update)", () => {
       expect(unnamed.is_unnamed).toBe(false);
     });
 
-    // CONTRACT, not an accident (SPEC 2.6, and the original route: "any admin edit clears the unnamed flag"): the flag
-    // means "created by a scan, nobody has looked at it yet", so ANY successful edit counts as the review, including
-    // one that never touches the name. The admin form is the only caller and always sends the whole form. Open
-    // product decision (see the handoff): narrowing this to "only when a name is supplied" would keep an item in the
-    // review queue after an unrelated edit, but staff could then never dismiss an item they choose not to name.
+    // CONTRACT, not an accident: the flag means "created by a scan, nobody has looked at it yet", so ANY successful edit
+    // counts as the review, including one that never touches the name. The admin form is the only caller of this route.
+    // This is a product rule: narrowing it to "only when a name is supplied" would keep an item in the review queue
+    // after an unrelated edit, but staff could then never dismiss an item they choose not to name.
     it("an edit that does not touch the name also takes an unnamed item out of the review queue (documented contract)", async () => {
       const db = install();
       const unnamed = db.tables.medications.find((m) => m.is_unnamed === true)!;

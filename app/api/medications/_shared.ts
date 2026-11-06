@@ -3,8 +3,8 @@
 // so the request validation that POST and PUT must share lives here.
 //
 // PUT is a PARTIAL update: only keys that are present in the body are validated and written, an explicit null clears a
-// nullable column, and an absent key is never touched. (The previous PUT wrote every column on every save, so an edit
-// that never mentioned the category wrote `category_id: null` and wiped it.)
+// nullable column, and an absent key is never touched. (A PUT that wrote every column on every save would turn an edit
+// that never mentioned the category into `category_id: null` and wipe it.)
 import { NextResponse } from "next/server";
 import { mapSupabaseError, type ErrorContext } from "@/lib/api-errors";
 import { parseCategoryId } from "@/lib/ids";

@@ -158,7 +158,7 @@ function dbErrorResponse(error: unknown): NextResponse {
  * A database may answer a read with fewer rows than it was asked for: its own per-request row cap (PostgREST
  * `max-rows`) can be lower than the chunk. Trusting the first answer would report items that DO exist as "no longer in
  * the inventory". So after each answer the ids that did not come back are asked for again, and the loop ends when
- * everything has come back or a read makes no progress; only ids still absent then are genuinely missing. Every round
+ * everything has come back or a read makes no progress; only ids still absent then are genuinely missing. Every repeat
  * that continues strictly shrinks the pending list, so this is bounded by the number of ids (at most 500).
  */
 async function readMedications(ids: number[]): Promise<Medication[] | NextResponse> {

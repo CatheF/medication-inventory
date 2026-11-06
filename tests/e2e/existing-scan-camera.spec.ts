@@ -1,11 +1,11 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): the camera is optional. When the browser
+// Existing behavior that must be PRESERVED: the camera is optional. When the browser
 // cannot give the page a camera (no device, permission refused, no camera API at all) the Scan tab says so in the
 // camera panel and everything else, above all manual lookup, keeps working.
 //
 // What this file does NOT prove: that a real camera reads a real barcode. Headless Chromium has no camera, so the
 // camera-decode path (getUserMedia + @zxing/browser) could not be tested here; only the "no camera" degradation can be.
 //
-// Same locators on the current app and on the original UI (see tests/e2e/helpers/existing-behavior.ts).
+// The same locators work on the current app and on an older build of it (see tests/e2e/helpers/existing-behavior.ts).
 import { test, expect, type Locator, type Page } from "@playwright/test";
 import { installMockApi, type MockApi } from "./helpers/mock-api";
 import {

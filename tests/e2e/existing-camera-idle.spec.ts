@@ -1,9 +1,9 @@
-// Existing behavior that must have been PRESERVED (TASK.md section 8): starting and stopping the camera, and the
+// Existing behavior that must be PRESERVED: starting and stopping the camera, and the
 // kiosk starting its camera by itself. Uses Chromium's SYNTHETIC camera (a test-pattern video with no barcode in it),
 // so these tests are about the camera lifecycle, not about decoding (see existing-camera-decode.spec.ts for that).
 // What this does NOT prove: that a real camera device works.
 //
-// Same locators on the current app and on the original UI.
+// The same locators work on the current app and on an older build of it (see tests/e2e/helpers/existing-behavior.ts).
 import { test, expect } from "@playwright/test";
 import { installMockApi } from "./helpers/mock-api";
 import {

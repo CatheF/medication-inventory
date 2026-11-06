@@ -376,8 +376,8 @@ describe("buildOrderSheetXlsx: layout", () => {
   });
 });
 
-// Finding: the Notes row used to stop growing at about 10 lines (149 pt), so a longer note was silently cut off in the
-// sheet. The cap is now 25 lines (372 pt), under Excel's own 409.5 pt row limit.
+// The Notes row grows with the note up to 25 lines (372 pt, under Excel's own 409.5 pt row limit), so a longer note is
+// not silently cut off in the sheet.
 describe("buildOrderSheetXlsx: the Notes row shows the whole note", () => {
   const EXPECTED_25_LINES_PT = Math.ceil(25 * 11 * 1.35); // 372
   const noteLines = (count: number) => Array.from({ length: count }, (_v, i) => `Line ${i + 1}`).join("\n");
@@ -393,7 +393,7 @@ describe("buildOrderSheetXlsx: the Notes row shows the whole note", () => {
   it("grows with the text: 10, 12 and 25 lines each get their own height, not one shared 10-line cap", async () => {
     const heightOf = async (notes: string) => Number((await exportOf([med(1)], inputs([med(1)]), { ...OPTIONS, notes })).rowAttrs.get(4)?.ht);
     expect(await heightOf(noteLines(10))).toBe(Math.ceil(10 * 11 * 1.35)); // 149
-    expect(await heightOf(noteLines(12))).toBe(Math.ceil(12 * 11 * 1.35)); // 179: more than the old 149 pt cap
+    expect(await heightOf(noteLines(12))).toBe(Math.ceil(12 * 11 * 1.35)); // 179: taller than the 10-line row (149 pt)
     expect(await heightOf(noteLines(25))).toBe(EXPECTED_25_LINES_PT);
   });
 
@@ -442,9 +442,9 @@ describe("buildOrderSheetXlsx: freezing the rows above the data", () => {
   });
 });
 
-// Finding: opening the .xlsx in a spreadsheet app and printing it split the table across pages (names on pages 1-2,
-// supplier numbers and quantities on pages 3-4) and never repeated the header. The writer library cannot set up printing
-// itself, so a small writer "feature" adds it to the XML; these tests pin what ends up in the file.
+// Printing the .xlsx from a spreadsheet app must keep the table one page wide (names, supplier numbers and quantities on
+// the same pages) and repeat the header row on every page. The writer library cannot set up printing itself, so a small
+// writer "feature" adds it to the XML; these tests pin what ends up in the file.
 describe("buildOrderSheetXlsx: printing the file from a spreadsheet app", () => {
   it("fits the table to one page wide, as many pages tall as needed, portrait, with margins", async () => {
     const wb = await exportOf([med(1)], inputs([med(1)]));

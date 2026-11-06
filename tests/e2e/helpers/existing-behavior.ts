@@ -1,6 +1,7 @@
 // Helpers for the "existing behavior was preserved" browser specs (Scan tab, stock operations, Kiosk, Usage,
 // resilience). Locators in these specs use visible text, roles and page structure only, so the SAME spec runs
-// against the current app (E2E_BASE_URL=http://127.0.0.1:3100) and against the original UI (http://127.0.0.1:3101).
+// against the current app and against an older build of it, from before the category and order sheet features (point
+// E2E_BASE_URL at that build). That is how it is shown that the behavior is preserved.
 import { expect, type Locator, type Page } from "@playwright/test";
 import type { Medication } from "@/lib/db";
 import { buildMedications } from "../../helpers/fixtures";
@@ -105,7 +106,7 @@ export function expectedScanStats(items: Medication[]): { total: number; inStock
   };
 }
 
-// ── Page helpers (work on the original UI and on the current one) ───────────────────────────────────────────
+// ── Page helpers (work on an older build of the app and on the current one) ─────────────────────────────────
 
 /**
  * Opens a page of the app and waits until it has asked for the inventory and the categories: the page is then
@@ -173,11 +174,11 @@ export async function dropFocus(page: Page): Promise<void> {
  * Emulates a USB barcode scanner: the digits arrive as fast keystrokes, then Enter.
  *
  * Two situations, and a test must say which one it means:
- *  - default: nothing is focused (focus is dropped first). This is the situation both UIs handle, so the tests that
- *    run on the original UI too use it.
+ *  - default: nothing is focused (focus is dropped first). This is the situation an older build handles too, so the
+ *    tests that also run against an older build use it.
  *  - `keepFocus: true`: the keystrokes go to whatever has focus right now, e.g. the tab button or the checkbox that
- *    staff clicked a moment before reaching for the scanner. That is how a scanner is really used, and the original
- *    UI breaks in it (the scanner's Enter presses the focused button again), so only new-UI tests use it.
+ *    staff clicked a moment before reaching for the scanner. That is how a scanner is really used, and an older build
+ *    breaks in it (the scanner's Enter presses the focused button again), so only the tests of the current behavior use it.
  */
 export async function scanWithKeyboard(page: Page, code: string, options: { keepFocus?: boolean } = {}): Promise<void> {
   if (options.keepFocus !== true) await dropFocus(page);
@@ -325,9 +326,9 @@ export function requestedFacingMode(constraints: unknown): string | null {
 }
 
 /**
- * True when the page is the ORIGINAL UI (before the categories / order sheet work): its top bar has no "Order sheet"
- * link. Only used to mark the few tests whose assertions describe an intentional improvement. Call it on a page that
- * shows the top bar (not on /kiosk).
+ * True when the page is an older build of the app, from before the category and order sheet features: its top bar has
+ * no "Order sheet" link. Only used to mark the few tests whose assertions describe an intentional improvement. Call it
+ * on a page that shows the top bar (not on /kiosk).
  */
 export async function isOriginalUi(page: Page): Promise<boolean> {
   return (await page.locator("body > nav").getByRole("link", { name: /^Order sheet/ }).count()) === 0;

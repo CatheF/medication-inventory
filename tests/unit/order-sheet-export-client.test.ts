@@ -210,8 +210,8 @@ describe("what staff are told when it fails (and nothing is saved)", () => {
   });
 });
 
-// A paused or half-reachable database accepts a request and never answers it. Without a limit the page said "Creating the Excel
-// file..." for ever, with the button off and no way out; now the request has the same 30-second limit as the inventory read
+// A paused or half-reachable database accepts a request and never answers it. Without a limit the page would say "Creating the
+// Excel file..." for ever, with the button off and no way out; so the request has the same 30-second limit as the inventory read
 // (app/order-sheet/request-limit.ts) and ends in the page's usual export error, which has Retry.
 describe("a request nobody answers", () => {
   const TOO_SLOW = "The server took too long to answer while creating the Excel file. Try again, or use Print / Save as PDF instead.";

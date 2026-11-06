@@ -24,8 +24,9 @@ create schema medinv_t;
 -- ── What each shape must look like BEFORE the migration ──────────────────────
 -- live        the deployed Health Center database: uuid ids, RLS on categories
 --             with no policy, no supplier column, FK without ON DELETE SET NULL.
--- repo_legacy a bigint database provisioned from the previous supabase/schema.sql
---             and rls.sql: no supplier column, no categories policies.
+-- repo_legacy a bigint database provisioned from supabase/schema.sql and rls.sql and
+--             then stripped of what the migration adds: no supplier column, no
+--             categories policies.
 -- repo_fresh  a bigint database provisioned from the current schema.sql + rls.sql:
 --             the migration has nothing left to add.
 create table medinv_t.expectations (
