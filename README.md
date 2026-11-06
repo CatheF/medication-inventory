@@ -65,7 +65,7 @@ The order sheet is a worklist for ordering; it never orders anything.
 
 ## Changes to the existing scanner
 
-The barcode scanner (USB scanner, camera, typed codes, Quick mode, kiosk) still works the way it did, with these deliberate changes. Each one fixes a way the original could save a wrong record or leave a person stuck, and each is covered by the `tests/e2e/existing-*.spec.ts` browser tests (about 120 tests, including a USB-scanner emulation and a fake camera):
+The barcode scanner (USB scanner, camera, typed codes, Quick mode, kiosk) still works the way it did, with these deliberate changes. Each one fixes a way the original could save a wrong record or leave a person stuck, and each is covered by the `tests/e2e/existing-*.spec.ts` browser tests (about 140 tests, including a USB-scanner emulation and a fake camera):
 
 * **A failed lookup is no longer reported as "unknown barcode".** The barcode route answers 404 only when no item has the code; a database or network error is an error. Quick mode says "Lookup failed" with "Check the connection and scan again." for those, and the scanner can no longer create a duplicate "needs review" item just because the database was unreachable.
 * **The scan lock covers the request only.** In the original, a result card that stayed open made every later scan do nothing, silently. Now a new scan shows the new item, and the quantity and note typed for the previous card are cleared (they must never carry over to another item).
