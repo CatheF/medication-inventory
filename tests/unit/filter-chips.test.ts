@@ -10,6 +10,7 @@ import {
   searchChipValue,
   stockChipValue,
 } from "@/lib/filter-chips";
+import { idKey as idKeyFromIds } from "@/lib/ids";
 import {
   DEFAULT_VIEW,
   UNKNOWN_CATEGORY_FILTER,
@@ -19,6 +20,7 @@ import {
   type StockFilter,
   type ViewState,
 } from "@/lib/inventory-view";
+import { displaySearchText } from "@/lib/search-text";
 import { buildCategories, buildMedications, fakeUuid, type IdShape } from "../helpers/fixtures";
 
 // Unit tests for lib/filter-chips.ts: the words on the filter chips of the Inventory tab and of the Admin list. Synthetic data
@@ -39,6 +41,10 @@ const VARIATION_SELECTOR_16 = cp(0xfe0f);
 const HANGUL_FILLER = cp(0x3164);
 const NBSP = cp(0x00a0);
 const BRAILLE_BLANK = cp(0x2800);
+const COMBINING_ACUTE = cp(0x0301);
+const COMBINING_GRAVE = cp(0x0300);
+const SPACING_DIAERESIS = cp(0x00a8); // NFKC turns it into a space plus a combining diaeresis
+const E_GRAVE = cp(0x00e8);
 
 const SHAPES: readonly IdShape[] = ["uuid", "bigint"];
 
@@ -70,6 +76,10 @@ const NO_SEARCH: Array<[string, unknown]> = [
   ["a variation selector", VARIATION_SELECTOR_16],
   ["a Hangul filler (the 'invisible username' character)", HANGUL_FILLER],
   ["a left-to-right mark between spaces", ` ${LRM} `],
+  // Accents are ignored when searching, so a search made only of them has nothing to look for.
+  ["a lone combining accent", COMBINING_ACUTE],
+  ["combining accents between spaces", ` ${COMBINING_ACUTE} ${COMBINING_GRAVE} `],
+  ["a spacing diaeresis (a space plus an accent once folded)", SPACING_DIAERESIS],
 ];
 
 // ── idKey ────────────────────────────────────────────────────────────────────────
@@ -96,6 +106,10 @@ describe("idKey", () => {
     expect(idKey(42)).toBe("42");
     expect(idKey("42")).toBe("42");
     expect(idKey(" 0042 ")).toBe("0042"); // never numeric: leading zeros survive
+  });
+
+  it("is the one idKey of lib/ids.ts, not a copy (the Inventory components import it from here)", () => {
+    expect(idKey).toBe(idKeyFromIds);
   });
 });
 
@@ -207,6 +221,28 @@ describe("searchChipText", () => {
     expect(searchChipText("x".repeat(200))).toBe("x".repeat(200));
     expect(searchChipText(`${ZWSP}${"x".repeat(200)}${ZWSP}`)).toBe("x".repeat(200));
     expect(searchChipText(`${"ab ".repeat(66)}`)).toBe(`${"ab ".repeat(66)}`.trim());
+  });
+
+  it("shows accents exactly as typed, however they are written: the search ignores them, the chip never rewrites them", () => {
+    for (const typed of [`Cr${E_GRAVE}me`, `CR${cp(0x00c8)}ME`, `Cre${COMBINING_GRAVE}me`, "creme"]) {
+      expect(searchChipText(typed)).toBe(typed);
+      expect(searchChipValue(typed)).toBe(`“${typed}”`);
+    }
+    expect(searchChipText(` a${COMBINING_ACUTE} `)).toBe(`a${COMBINING_ACUTE}`); // an accent on a letter is part of the word
+  });
+
+  it("is the one display rule of lib/search-text.ts (the summary line of lib/inventory-view.ts uses it too)", () => {
+    const corpus: unknown[] = [
+      ...NO_SEARCH.map(([, search]) => search),
+      "  ibuprofen \t 200\n mg ",
+      `ibu${ZWSP}pro${SOFT_HYPHEN}fen`,
+      `Cr${E_GRAVE}me`,
+      `Cre${COMBINING_GRAVE}me`,
+      `a${COMBINING_ACUTE}`,
+      "Ｉbuprofen",
+      BRAILLE_BLANK,
+    ];
+    for (const search of corpus) expect(searchChipText(search), JSON.stringify(search)).toBe(displaySearchText(search));
   });
 });
 

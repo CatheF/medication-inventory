@@ -58,6 +58,19 @@ const GREEK_MU = String.fromCodePoint(0x03bc);
 const LIGATURE_FI = String.fromCodePoint(0xfb01);
 const SQUARE_MG = String.fromCodePoint(0x338e); // one character that reads "mg"
 const SUPERSCRIPT_TWO = String.fromCodePoint(0x00b2);
+// Accented letters, also built from code points: "Crème" is C r è m e, and a tool that normalizes text would otherwise
+// rewrite the decomposed spellings into the precomposed ones.
+const E_GRAVE = String.fromCodePoint(0x00e8);
+const E_GRAVE_UPPER = String.fromCodePoint(0x00c8);
+const E_ACUTE = String.fromCodePoint(0x00e9);
+const E_ACUTE_UPPER = String.fromCodePoint(0x00c9);
+const A_RING = String.fromCodePoint(0x00e5);
+const C_CEDILLA = String.fromCodePoint(0x00e7);
+const N_TILDE = String.fromCodePoint(0x00f1);
+const U_ACUTE = String.fromCodePoint(0x00fa);
+const U_DIAERESIS = String.fromCodePoint(0x00fc);
+const S_CARON = String.fromCodePoint(0x0161);
+const SPACING_DIAERESIS = String.fromCodePoint(0x00a8); // NFKC turns it into a space plus a combining diaeresis
 /** "Amox" typed with full-width letters (U+FF21..): the compatibility form IMEs and pasted web text produce. */
 const fullWidth = (ascii: string): string => Array.from(ascii, (c) => String.fromCodePoint(c.charCodeAt(0) + 0xfee0)).join("");
 /** "U+200B U+0020" for a string made of invisible characters, so test names stay readable. */
@@ -424,7 +437,197 @@ describe("matchesSearch: invisible characters and compatibility forms", () => {
     const diaeresis = String.fromCodePoint(0x00a8);
     expect(() => matchesSearch(amox, diaeresis)).not.toThrow();
     expect(matchesSearch(item(8, { name: `Cafe${diaeresis}` }), `cafe${diaeresis}`)).toBe(true);
-    expect(matchesSearch(amox, `amox${diaeresis}`)).toBe(false);
+    // The accent is ignored like any other, so "amox" + diaeresis is just "amox" (it used to need the accent itself).
+    expect(matchesSearch(amox, `amox${diaeresis}`)).toBe(true);
+    // The space NFKC leaves behind still ends a term: both words are needed, and neither is glued to the other.
+    expect(matchesSearch(amox, `amox${diaeresis}capsules`)).toBe(true);
+    expect(matchesSearch(amox, `amox${diaeresis}tablets`)).toBe(false);
+  });
+});
+
+// ── matchesSearch: accents ──────────────────────────────────────────────────────
+//
+// Staff type "creme" for "Crème antiseptique 1 %, 30 g" (a French-labelled product in the live data) on a keyboard or
+// scanner without accent keys, and the other way round. Search ignores accents in the typed text and in the item text
+// alike, and a letter written as one character or as letter + combining accent is the same letter. Only the COMPARISON
+// ignores accents: nothing is rewritten, and categories are still told apart by id, never by a folded name.
+
+describe("matchesSearch: accents", () => {
+  const CREME = `Cr${E_GRAVE}me antiseptique 1 %, 30 g`;
+  const CREME_DECOMPOSED = `Cre${COMBINING_GRAVE}me antiseptique 1 %, 30 g`;
+  const CREME_PLAIN = "Creme hydratante, 50 g";
+
+  const cases: { label: string; name: string; barcode?: string; supplier?: string; search: string; expected: boolean }[] = [
+    // the reported case, and the three other ways to write the letter
+    { label: "an unaccented search finds the accented name", name: CREME, search: "creme", expected: true },
+    { label: "the accented search finds the accented name too", name: CREME, search: `cr${E_GRAVE}me`, expected: true },
+    { label: "an accented search finds a name written without the accent", name: CREME_PLAIN, search: `cr${E_GRAVE}me`, expected: true },
+    { label: "an unaccented search finds a name written with a combining accent", name: CREME_DECOMPOSED, search: "creme", expected: true },
+    { label: "a decomposed search finds the precomposed name", name: CREME, search: `cre${COMBINING_GRAVE}me`, expected: true },
+    { label: "a precomposed search finds the decomposed name", name: CREME_DECOMPOSED, search: `cr${E_GRAVE}me`, expected: true },
+    { label: "a decomposed search finds the decomposed name", name: CREME_DECOMPOSED, search: `cre${COMBINING_GRAVE}me`, expected: true },
+    // case
+    { label: "an upper-case accented search finds the accented name", name: CREME, search: `CR${E_GRAVE_UPPER}ME`, expected: true },
+    { label: "an upper-case plain search finds the accented name", name: CREME, search: "CREME", expected: true },
+    { label: "an upper-case accented name is found by plain lower-case letters", name: `${E_ACUTE_UPPER}MULSION 5 %`, search: "emulsion", expected: true },
+    // the accent can be on any letter, and in any term
+    { label: "the accent can be in the middle of a longer word", name: `Antis${E_ACUTE}ptique`, search: "antiseptique", expected: true },
+    { label: "the accent can be typed where the stored name has none", name: "Antiseptique", search: `antis${E_ACUTE}ptique`, expected: true },
+    { label: "every term is folded: an accented and a plain term together", name: CREME, search: `creme antis${E_ACUTE}ptique`, expected: true },
+    { label: "a term in a different order still matches", name: CREME, search: `antiseptique cr${E_GRAVE}me`, expected: true },
+    { label: "every term is still required", name: CREME, search: "creme zzz", expected: false },
+    // other fields
+    { label: "the barcode is folded too", name: "Item", barcode: `${E_ACUTE_UPPER}CLAT-01`, search: "eclat", expected: true },
+    { label: "the supplier order number is folded too", name: "Item", supplier: `N${A_RING}-0092`, search: "na-0092", expected: true },
+    { label: "an accent typed into a supplier order number search matches the plain code", name: "Item", supplier: "NA-0092", search: `n${A_RING}-0092`, expected: true },
+    // other letters with accents
+    { label: "a tilde", name: `${N_TILDE}and${U_ACUTE} sulfate`, search: "nandu", expected: true },
+    { label: "an umlaut", name: `${U_DIAERESIS}ber`, search: "uber", expected: true },
+    { label: "a cedilla", name: `Fa${C_CEDILLA}ade`, search: "facade", expected: true },
+    { label: "a caron", name: `${S_CARON}ampon`, search: "sampon", expected: true },
+    // folding goes no further than the accent
+    { label: "a different base letter still does not match", name: CREME, search: "crime", expected: false },
+    { label: "the letters have to be there: dropping one does not match", name: CREME, search: "cree", expected: false },
+    { label: "a word the item does not contain does not match", name: "Gauze pads", search: "creme", expected: false },
+    { label: "a term still cannot match across the name/barcode boundary", name: `Caf${E_ACUTE}`, barcode: "123", search: "cafe123", expected: false },
+  ];
+
+  it.each(cases)("$label", ({ name, barcode, supplier, search, expected }) => {
+    const med = item(1, {
+      name,
+      ...(barcode === undefined ? {} : { barcode }),
+      ...(supplier === undefined ? {} : { supplier_order_number: supplier }),
+    });
+    expect(matchesSearch(med, search)).toBe(expected);
+  });
+
+  it("finds the stored name by every spelling of the same search, and never rewrites it", () => {
+    const stored = item(2, { name: CREME });
+    for (const search of ["creme", "CREME", `cr${E_GRAVE}me`, `CR${E_GRAVE_UPPER}ME`, `cre${COMBINING_GRAVE}me`, `  creme  `]) {
+      expect(matchesSearch(stored, search), search).toBe(true);
+    }
+    expect(stored.name).toBe(CREME);
+  });
+
+  // Letters with no combining accent (ligatures, the sharp s, the stroked o, the Turkish dotless and dotted i) are out of
+  // scope: whether "oeuvre" should find the ligature is not decided here. They must not crash, and must find themselves.
+  it.each([
+    [`${String.fromCodePoint(0x0153)}uvre`],
+    [`${String.fromCodePoint(0x00e6)}ther`],
+    [String.fromCodePoint(0x00df)],
+    [String.fromCodePoint(0x00f8)],
+    [String.fromCodePoint(0x0131)],
+    [`${String.fromCodePoint(0x0130)}stanbul`],
+  ])("copes with %j: no crash, and the item is found by its own spelling", (text) => {
+    const med = item(3, { name: `Remedy ${text} 100 mg` });
+    expect(() => matchesSearch(med, text)).not.toThrow();
+    expect(matchesSearch(med, text)).toBe(true);
+    expect(matchesSearch(med, `remedy ${text}`)).toBe(true);
+  });
+
+  describe("scripts whose letters are blocks of smaller letters", () => {
+    // Taking letters apart (NFD) is how accents are found. A Korean syllable block must come out whole again, or a
+    // search for the first two letters of 한 would find it (and every other block that starts the same way).
+    const HAN = String.fromCodePoint(0xd55c);
+    const HA = String.fromCodePoint(0xd558);
+    const GEUL = String.fromCodePoint(0xae00);
+    const med = item(4, { name: `${HAN}${GEUL} 500 mg` });
+
+    it("finds a whole syllable block", () => {
+      expect(matchesSearch(med, HAN)).toBe(true);
+      expect(matchesSearch(med, `${HAN}${GEUL}`)).toBe(true);
+    });
+
+    it("finds a syllable block typed as separate letters", () => {
+      expect(matchesSearch(med, HAN.normalize("NFD"))).toBe(true);
+    });
+
+    it("does not start finding a block by its first letters, as it did not before", () => {
+      expect(matchesSearch(med, HA)).toBe(false);
+    });
+  });
+});
+
+describe("accent-insensitive search stays consistent across counts, groups, summary and empty states", () => {
+  const categories = buildCategories("uuid");
+  const items = buildMedications({ shape: "uuid" });
+  const total = items.length;
+  const firstAid = categoryId(CATEGORY_NAMES.indexOf("First Aid"), "uuid");
+  const antibiotics = categoryId(CATEGORY_NAMES.indexOf("Antibiotics"), "uuid");
+  const stored = items[SEED_ITEMS.findIndex((s) => (s.name ?? "").startsWith("Cr"))]; // the fixture's "Crème antiseptique"
+  const SPELLINGS = ["creme", "CREME", `cr${E_GRAVE}me`, `CR${E_GRAVE_UPPER}ME`, `cre${COMBINING_GRAVE}me`, "  creme  "];
+
+  it("shows the accented fixture item for the plain spelling: the stored item itself, in its own group, counted once", () => {
+    expect(stored.name).not.toBe("Creme antiseptique 1 %, 30 g"); // the fixture really is accented
+    const result = selectView(items, categories, view({ search: "creme" }));
+    expect(result.visible).toEqual([stored]);
+    expect(result.visible[0]).toBe(stored); // the same object: nothing was copied or rewritten
+    expect(result.counts).toMatchObject({ all: 1, uncategorized: 0, unknown: 0 });
+    expect(Object.entries(result.counts.byId).filter(([, count]) => count > 0)).toEqual([[firstAid, 1]]);
+    expect(titles(result.groups ?? [])).toEqual(["First Aid"]);
+    expect(result.summary.text).toBe(`Showing 1 of ${total} items${DOT}Search ${LQ}creme${RQ}`);
+  });
+
+  it("gives one result for every spelling of the search, and quotes each exactly as typed", () => {
+    const reference = selectView(items, categories, view({ search: "creme" }));
+    for (const search of SPELLINGS) {
+      const result = selectView(items, categories, view({ search }));
+      expect(ids(result.visible), search).toEqual(ids(reference.visible));
+      expect(result.counts, search).toEqual(reference.counts);
+      expect(result.groups?.map((g) => g.key), search).toEqual(reference.groups?.map((g) => g.key));
+      const typed = search.trim().replace(/\s+/g, " ");
+      expect(result.summary.text, search).toBe(`Showing 1 of ${total} items${DOT}Search ${LQ}${typed}${RQ}`); // accents as typed
+    }
+  });
+
+  it("narrows with stock and category like any other search", () => {
+    // 15 in stock against a threshold of 6: adequate, not low
+    expect(ids(selectView(items, categories, view({ search: "creme", stock: "ok" })).visible)).toEqual([stored.id]);
+    expect(selectView(items, categories, view({ search: "creme", stock: "low" })).visible).toEqual([]);
+    expect(ids(selectView(items, categories, view({ search: "creme", category: { kind: "category", id: firstAid } })).visible)).toEqual([stored.id]);
+    expect(selectView(items, categories, view({ search: "creme", category: { kind: "category", id: antibiotics } })).visible).toEqual([]);
+  });
+
+  it("explains an empty result by quoting the accented search as it was typed", () => {
+    const search = `cr${E_GRAVE}me`;
+    const filter = view({ search, stock: "low" });
+    expect(selectView(items, categories, filter).visible).toEqual([]);
+    expect(describeEmpty(total, filter, categories)).toMatchObject({
+      kind: "no-match",
+      title: `No items match Stock: Low${DOT}Search ${LQ}${search}${RQ}.`,
+    });
+  });
+
+  it.each([
+    ["a lone combining accent", COMBINING_ACUTE],
+    ["a lone combining grave accent between spaces", ` ${COMBINING_GRAVE} `],
+    ["a spacing diaeresis", SPACING_DIAERESIS],
+  ])("treats %s as no search: nothing is hidden and no filter is reported", (_label, search) => {
+    // Nothing is left to look for once accents are ignored. Reporting a Search filter for it would be a chip, a summary
+    // line and an empty-state message about a filter that filters nothing.
+    for (const grouped of [true, false]) {
+      const result = selectView(items, categories, view({ search, grouped }));
+      expect(result.summary).toEqual({ total, shown: total, filtersActive: false, text: `Showing all ${total} items.` });
+      expect(result.visible).toHaveLength(total);
+    }
+    expect(matchesSearch(stored, search)).toBe(true);
+  });
+
+  it("still tells two categories apart by id when their names differ only by an accent, and shows each name as stored", () => {
+    const twins = [cat("c-accent", `Cr${E_GRAVE}me`), cat("c-plain", "Creme")];
+    const rows = [
+      item(1, { name: "A", category_id: "c-accent" }),
+      item(2, { name: "B", category_id: "c-plain" }),
+      item(3, { name: "C", category_id: "c-accent" }),
+    ];
+    const result = selectView(rows, twins, view());
+    expect(result.groups?.map((g) => [g.key, g.title, ids(g.items)])).toEqual([
+      ["c-accent", `Cr${E_GRAVE}me`, [1, 3]],
+      ["c-plain", "Creme", [2]],
+    ]);
+    expect(result.counts.byId).toEqual({ "c-accent": 2, "c-plain": 1 });
+    expect(ids(applyCategoryFilter(rows, { kind: "category", id: "c-plain" }, twins))).toEqual([2]);
+    expect(ids(applyCategoryFilter(rows, { kind: "category", id: "c-accent" }, twins))).toEqual([1, 3]);
   });
 });
 
@@ -1556,6 +1759,11 @@ const SEED_SEARCHES = [
   `${ZWSP}${SOFT_HYPHEN} ${ZWJ}`, // only invisible characters: no search at all
   `${ZWSP}zzz${SOFT_HYPHEN}`, // invisible around a term that matches nothing
   fullWidth("AMOX"), // full-width letters
+  // accents are ignored on both sides: the seed items hold one accented name, "Crème antiseptique 1 %, 30 g"
+  "creme", // plain letters for an accented name
+  `CR${E_GRAVE_UPPER}ME antiseptique`, // accented capitals, two terms
+  `cre${COMBINING_GRAVE}me`, // a decomposed accent
+  `antis${E_ACUTE}ptique`, // an accent typed where the stored name has none
 ];
 
 /** A search for failure labels: printable ASCII as is, everything else as \u{...}, so invisible characters show. */
@@ -1604,7 +1812,8 @@ function oracleBucket(m: Medication, categories: readonly Category[]): OracleBuc
 }
 
 // The oracle's own, explicit list of characters that render as nothing (the implementation uses Unicode property
-// classes instead), and its own folding: strip, NFKC, lower case.
+// classes instead), and its own folding: strip, NFKC, lower case, then accents out the classic way (NFD and the one
+// combining-diacritics block; the implementation drops every \p{M} mark and puts Hangul back together).
 const ORACLE_INVISIBLE_RANGES: readonly (readonly [number, number])[] = [
   [0x00ad, 0x00ad],
   [0x034f, 0x034f],
@@ -1635,7 +1844,7 @@ const oracleFoldCache = new Map<string, string>();
 function oracleFold(text: string): string {
   let folded = oracleFoldCache.get(text);
   if (folded === undefined) {
-    folded = oracleStrip(text).normalize("NFKC").toLowerCase();
+    folded = oracleStrip(text).normalize("NFKC").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
     oracleFoldCache.set(text, folded);
   }
   return folded;

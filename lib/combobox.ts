@@ -6,7 +6,7 @@
 // The searchable picker replaces a native <select> once a list is long. Callers switch with
 // shouldUseCombobox(realOptionCount): a native select up to 10 real options, the Combobox from 11.
 
-import { stripInvisibleCharacters } from "./text-safety";
+import { foldSearchText } from "./search-text";
 
 // ── Public types ────────────────────────────────────────────────────────────────
 
@@ -31,19 +31,16 @@ export function shouldUseCombobox(realOptionCount: number): boolean {
 
 // ── Search folding ──────────────────────────────────────────────────────────────
 
-// The SAME rule as `fold` in lib/inventory-view.ts (which is private there; tests/unit/combobox.test.ts compares the two so
-// they cannot drift apart): invisible characters are dropped first (stripInvisibleCharacters, lib/text-safety.ts: the one
-// definition both searches share) so an accent that one separated from its letter still composes, then NFKC (canonical
-// equivalence and look-alike forms: "µg" = "μg", full-width letters, ligatures), then lower case. Accents are NOT removed:
-// "cafe" does not find "Café". On top of that, whitespace runs become one space and the ends are trimmed.
+// The SAME folding as the Inventory search (foldSearchText in lib/search-text.ts, the one definition both share: invisible
+// characters dropped, look-alike forms equal, accents ignored, lower case; tests/unit/combobox.test.ts still compares the two
+// searches so they cannot drift apart). On top of that, whitespace runs become one space and the ends are trimmed.
 
 /**
- * Case-insensitive, accent-sensitive search form of `text`: invisible and format characters removed, NFKC, lower case,
- * whitespace collapsed to single spaces, trimmed. "" means "nothing to search for".
+ * Case- and accent-insensitive search form of `text`: invisible and format characters removed, NFKC, lower case, accents
+ * dropped, whitespace collapsed to single spaces, trimmed. "" means "nothing to search for".
  */
 export function foldForSearch(text: string): string {
-  if (typeof text !== "string") return "";
-  return stripInvisibleCharacters(text).normalize("NFKC").toLowerCase().replace(/\s+/g, " ").trim();
+  return foldSearchText(text).replace(/\s+/g, " ").trim();
 }
 
 function searchTerms(query: string): string[] {

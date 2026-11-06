@@ -4,12 +4,14 @@
 // ONE implementation, used by both screens, so the wording cannot drift. It did: the Admin chip left out the curly quotes that
 // the Inventory chip and both "Showing X of Y items" lines use. What a chip says about the search (invisible characters
 // dropped, ends trimmed, inner whitespace collapsed to single spaces) is exactly what lib/inventory-view.ts quotes in the
-// summary line; tests/unit/filter-chips.test.ts compares the two over many inputs, so changing one without the other fails.
+// summary line, because both call displaySearchText (lib/search-text.ts); tests/unit/filter-chips.test.ts still compares the
+// two over many inputs.
 //
 // Category ids are opaque strings (uuid in the live database, digit strings for the bigint schema). They are compared as
 // strings and nothing in here calls Number() on them.
 
 import type { Category } from "./db";
+import { idKey } from "./ids";
 import {
   UNKNOWN_CATEGORY_ID,
   isUnknownCategoryFilter,
@@ -17,7 +19,7 @@ import {
   type StockFilter,
   type ViewState,
 } from "./inventory-view";
-import { stripInvisibleCharacters } from "./text-safety";
+import { displaySearchText } from "./search-text";
 
 const OPEN_QUOTE = "“";
 const CLOSE_QUOTE = "”";
@@ -28,13 +30,9 @@ const UNNAMED_CATEGORY_TITLE = "Unnamed category";
 
 // ── Category titles ─────────────────────────────────────────────────────────────
 
-/** Comparison key for a category id, written exactly like lib/inventory-view.ts does it: trimmed, lower-cased, blank = null. */
-export function idKey(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" && !Number.isFinite(value)) return null;
-  const key = String(value).trim().toLowerCase();
-  return key === "" ? null : key;
-}
+// The comparison key for a category id (trimmed, lower-cased, blank = null) is defined once, in lib/ids.ts. It is re-exported
+// from here because the Inventory components import it from this module (through app/components/inventory/helpers.ts).
+export { idKey };
 
 /** One category a chip, a tag or a group heading can name. `key` is idKey(id); `position` is its place in the list. */
 export type CategoryTitle = { id: string; key: string; title: string; position: number };
@@ -67,11 +65,12 @@ export function categoryTitleByKey(categories: readonly Category[]): Map<string,
 
 /**
  * The search as the summary line quotes it: invisible characters dropped, ends trimmed, inner whitespace collapsed to single
- * spaces. "" means "no search" (and then there is no Search chip either). Whole: the chip cuts a long value short with CSS and
- * keeps the full text in its title.
+ * spaces, accents and everything else as typed. "" means "no search" (and then there is no Search chip either), which includes
+ * a search with nothing left to look for once accents are ignored. Whole: the chip cuts a long value short with CSS and keeps
+ * the full text in its title.
  */
 export function searchChipText(search: unknown): string {
-  return typeof search === "string" ? stripInvisibleCharacters(search).trim().replace(/\s+/g, " ") : "";
+  return displaySearchText(search);
 }
 
 /** What the Search chip says after "Search: ": the text between curly quotes, or null while there is no search. */

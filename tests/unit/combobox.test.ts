@@ -3,8 +3,8 @@
 // Layout: table-driven tests per function, boundary cases (0 / 1 / many options, only actions, duplicate labels, 1,000
 // options), a seeded property test that checks filterOptions against an independent naive oracle, an exhaustive sweep of
 // moveActive, a sweep of every BMP character through foldForSearch, and a cross-check that the search folding agrees
-// with the Inventory search (lib/inventory-view.ts keeps its own private `fold`; both drop invisible characters with the one
-// shared stripInvisibleCharacters of lib/text-safety.ts, the rest of the folding is written twice, hence this cross-check).
+// with the Inventory search (both fold with foldSearchText of lib/search-text.ts; the combobox adds its own whitespace
+// collapsing and joins label and description, so the two searches are still compared on the same texts and queries).
 // Synthetic data only. The component itself has no DOM test (no jsdom in this repo): it is checked in the browser.
 import { describe, expect, it, vi } from "vitest";
 import type { Medication } from "@/lib/db";
@@ -50,6 +50,13 @@ const LIGATURE_FI = String.fromCodePoint(0xfb01);
 const SQUARE_MG = String.fromCodePoint(0x338e);
 const FULLWIDTH_ABC = String.fromCodePoint(0xff21, 0xff22, 0xff23);
 const E_ACUTE = String.fromCodePoint(0x00e9);
+const E_ACUTE_UPPER = String.fromCodePoint(0x00c9);
+const E_GRAVE = String.fromCodePoint(0x00e8);
+const E_GRAVE_UPPER = String.fromCodePoint(0x00c8);
+const COMBINING_GRAVE = String.fromCodePoint(0x0300);
+const N_TILDE = String.fromCodePoint(0x00f1);
+const U_ACUTE = String.fromCodePoint(0x00fa);
+const SPACING_ACUTE = String.fromCodePoint(0x00b4); // NFKC turns it into a space plus a combining acute accent
 const A_UMLAUT = String.fromCodePoint(0x00e4);
 const INVISIBLES = [ZWSP, ZWJ, ZWNJ, SOFT_HYPHEN, WORD_JOINER, BOM, LRM, RLM, BIDI_ISOLATE, VARIATION_SELECTOR];
 
@@ -141,14 +148,17 @@ describe("foldForSearch", () => {
 
   it("treats a composed accent and a letter plus combining accent as the same text", () => {
     expect(foldForSearch(`caf${E_ACUTE}`)).toBe(foldForSearch(`cafe${COMBINING_ACUTE}`));
-    expect(foldForSearch(`CAFE${COMBINING_ACUTE}`)).toBe(`caf${E_ACUTE}`);
-    // an accent separated from its letter by an invisible character still composes
-    expect(foldForSearch(`cafe${ZWSP}${COMBINING_ACUTE}`)).toBe(`caf${E_ACUTE}`);
+    // the accent itself is dropped (see "ignores accents" below), so both fold to the plain letters
+    expect(foldForSearch(`CAFE${COMBINING_ACUTE}`)).toBe("cafe");
+    // an accent separated from its letter by an invisible character still composes (and is then dropped)
+    expect(foldForSearch(`cafe${ZWSP}${COMBINING_ACUTE}`)).toBe("cafe");
   });
 
-  it("is accent-sensitive: a letter without its accent is a different letter", () => {
-    expect(foldForSearch("cafe")).not.toBe(foldForSearch(`caf${E_ACUTE}`));
-    expect(foldForSearch("a")).not.toBe(foldForSearch(A_UMLAUT));
+  it("ignores accents: a letter with its accent and without it is the same letter, and a different letter is still different", () => {
+    expect(foldForSearch("cafe")).toBe(foldForSearch(`caf${E_ACUTE}`));
+    expect(foldForSearch("a")).toBe(foldForSearch(A_UMLAUT));
+    expect(foldForSearch("cafe")).not.toBe(foldForSearch("cafo"));
+    expect(foldForSearch(`caf${E_ACUTE}`)).not.toBe(foldForSearch("caff"));
   });
 
   it("is idempotent on a corpus of tricky text", () => {
@@ -288,14 +298,15 @@ describe("filterOptions", () => {
       expect(filterOptions(joined, "alpha beta")).toEqual(joined);
     });
 
-    it("is accent-sensitive and composition-insensitive", () => {
+    it("ignores accents and the way they are written: with or without one, composed or not, it is the same letter", () => {
       const cafes = [opt("1", `Caf${E_ACUTE}`), opt("2", "Cafe")];
       expect(filterOptions(cafes, "caf").map((o) => o.value)).toEqual(["1", "2"]); // the shared start finds both
-      expect(filterOptions(cafes, "cafe").map((o) => o.value)).toEqual(["2"]); // "cafe" is not inside "café"
-      expect(filterOptions(cafes, `caf${E_ACUTE}`).map((o) => o.value)).toEqual(["1"]); // the accent narrows it
-      expect(filterOptions(cafes, `cafe${COMBINING_ACUTE}`).map((o) => o.value)).toEqual(["1"]); // decomposed accent
-      expect(filterOptions(cafes, `CAF${E_ACUTE.toUpperCase()}`).map((o) => o.value)).toEqual(["1"]);
-      expect(filterOptions([opt("1", "Cafe")], `caf${E_ACUTE}`)).toEqual([]); // an accent is never ignored
+      expect(filterOptions(cafes, "cafe").map((o) => o.value)).toEqual(["1", "2"]); // "cafe" is "café" without its accent
+      expect(filterOptions(cafes, `caf${E_ACUTE}`).map((o) => o.value)).toEqual(["1", "2"]); // the accent does not narrow it
+      expect(filterOptions(cafes, `cafe${COMBINING_ACUTE}`).map((o) => o.value)).toEqual(["1", "2"]); // decomposed accent
+      expect(filterOptions(cafes, `CAF${E_ACUTE.toUpperCase()}`).map((o) => o.value)).toEqual(["1", "2"]);
+      expect(filterOptions([opt("1", "Cafe")], `caf${E_ACUTE}`).map((o) => o.value)).toEqual(["1"]); // an accent is never required
+      expect(filterOptions(cafes, "cafes")).toEqual([]); // different letters still do not match
     });
 
     it("ignores invisible characters in the query and in the label", () => {
@@ -405,17 +416,19 @@ describe("filterOptions", () => {
     });
 
     it("folds each option once per pass, however many words the query has (linear work, counted, not timed)", () => {
-      // foldForSearch normalizes exactly once per call, so the number of String.prototype.normalize calls is the number of
-      // folds: one for the query plus one per regular option. A fold per option AND per word (quadratic-ish) would be 3,000.
+      // foldForSearch normalizes a fixed number of times per call (NFKC, then NFD to find the accents, then NFC), so the
+      // number of String.prototype.normalize calls is that number times the number of folds: one for the query plus one per
+      // regular option. A fold per option AND per word (quadratic-ish) would be three times as many.
       const normalize = vi.spyOn(String.prototype, "normalize");
       foldForSearch("Probe");
-      const callsPerFold = normalize.mock.calls.length; // sanity: the spy sees a fold, and a fold normalizes once
+      const callsPerFold = normalize.mock.calls.length; // sanity: the spy sees a fold, and a fold normalizes a few times
       normalize.mockClear();
       filterOptions(WITH_ACTION, "category refrigerated check");
-      const folds = normalize.mock.calls.length;
+      const calls = normalize.mock.calls.length;
       normalize.mockRestore();
-      expect(callsPerFold).toBe(1);
-      expect(folds).toBeLessThanOrEqual(1 + 1000);
+      expect(callsPerFold).toBeGreaterThanOrEqual(1);
+      expect(callsPerFold).toBeLessThanOrEqual(3);
+      expect(calls).toBeLessThanOrEqual(callsPerFold * (1 + 1000));
     });
 
     it("stays fast: 200 filter passes over 1,000 options (about 100 ms here; the bound only catches a large slowdown)", () => {
@@ -504,6 +517,69 @@ describe("filterOptions", () => {
   });
 });
 
+// ── Accents ─────────────────────────────────────────────────────────────────────
+//
+// The category picker ignores accents in the query and in the label, like the Inventory search: staff type "creme" for a
+// category called "Crème" (and the other way round). Only the comparison ignores them: options come back untouched, and
+// "Crème" and "Creme" stay two options with two values.
+
+describe("filterOptions: accents are ignored in the query and in the label", () => {
+  const OPTIONS = [
+    opt("1", `Cr${E_GRAVE}me`),
+    opt("2", "Creme"),
+    opt("3", `Caf${E_ACUTE}`),
+    opt("4", `${E_ACUTE_UPPER}clair`),
+    opt("5", `${N_TILDE}and${U_ACUTE}`),
+    opt("6", "Pain & Fever", { description: `R${E_ACUTE}frig${E_ACUTE}r${E_ACUTE}` }),
+  ];
+
+  it.each<[string, string, string[]]>([
+    ["a plain query finds the accented label and the plain one", "creme", ["1", "2"]],
+    ["an accented query finds the plain label and the accented one", `cr${E_GRAVE}me`, ["1", "2"]],
+    ["an upper-case accented query", `CR${E_GRAVE_UPPER}ME`, ["1", "2"]],
+    ["an upper-case plain query", "CREME", ["1", "2"]],
+    ["a decomposed query", `cre${COMBINING_GRAVE}me`, ["1", "2"]],
+    ["a plain query finds the accent-bearing label", "cafe", ["3"]],
+    ["an accented query finds it", `caf${E_ACUTE}`, ["3"]],
+    ["a decomposed accent in the query", `cafe${COMBINING_ACUTE}`, ["3"]],
+    ["an upper-case accented label is found by lower-case plain letters", "eclair", ["4"]],
+    ["a tilde and an acute accent", "nandu", ["5"]],
+    ["the description is searched with the accents ignored", "refrigere", ["6"]],
+    ["terms are folded one by one, across label and description", `fever ${E_ACUTE}frig`, ["6"]],
+    ["a different base letter does not match", "crime", []],
+    ["dropping a letter does not match", "cree", []],
+  ])("%s", (_label, query, expected) => {
+    expect(filterOptions(OPTIONS, query).map((o) => o.value)).toEqual(expected);
+  });
+
+  it("returns the very same option objects, labels untouched, and never merges Crème with Creme", () => {
+    const result = filterOptions(OPTIONS, "creme");
+    expect(result).toHaveLength(2);
+    expect(result[0]).toBe(OPTIONS[0]);
+    expect(result[1]).toBe(OPTIONS[1]);
+    expect(result.map((o) => o.label)).toEqual([`Cr${E_GRAVE}me`, "Creme"]);
+    expect(result.map((o) => o.value)).toEqual(["1", "2"]); // two options, two values
+  });
+
+  it.each([[COMBINING_ACUTE], [SPACING_ACUTE], [` ${COMBINING_ACUTE} ${COMBINING_GRAVE} `]])(
+    "a query made only of accents (%j) has nothing to look for and returns everything",
+    (query) => {
+      expect(filterOptions(OPTIONS, query)).toEqual(OPTIONS);
+    }
+  );
+
+  it("still keeps actions last and never filters them out", () => {
+    const create = action("__new__", "+ Create new category…");
+    expect(filterOptions([...OPTIONS, create], "creme").map((o) => o.value)).toEqual(["1", "2", "__new__"]);
+    expect(filterOptions([...OPTIONS, create], "zzz")).toEqual([create]);
+  });
+
+  it("folds each of its inputs the same way the Inventory search does (see the agreement test below)", () => {
+    expect(foldForSearch(`Cr${E_GRAVE}me  ${ZWSP}ANTISEPTIQUE `)).toBe("creme antiseptique");
+    expect(foldForSearch(`Cre${COMBINING_GRAVE}me`)).toBe(foldForSearch("CREME"));
+  });
+});
+
 // ── Agreement with the Inventory search ─────────────────────────────────────────
 
 describe("search folding agrees with lib/inventory-view.ts", () => {
@@ -537,12 +613,21 @@ describe("search folding agrees with lib/inventory-view.ts", () => {
     `Anti${ZWSP}biotics`,
     `First${NBSP}Aid  kit`,
     "N-95 (masks)",
+    `Cr${E_GRAVE}me antiseptique`,
+    `Cre${COMBINING_GRAVE}me antiseptique`,
+    "Creme hydratante",
     "",
   ];
   const QUERIES = [
     "",
     "   ",
     ZWSP,
+    "creme",
+    `CR${E_GRAVE_UPPER}ME`,
+    `cre${COMBINING_GRAVE}me`,
+    `creme antis${E_ACUTE}ptique`,
+    COMBINING_ACUTE, // only an accent: no term left in either search
+    SPACING_ACUTE,
     "amox",
     "AMOX",
     "500 mg",

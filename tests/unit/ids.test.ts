@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCategoryId, parseMedicationId, sameId, toIdString } from "@/lib/ids";
+import { idKey, parseCategoryId, parseMedicationId, sameId, toIdString } from "@/lib/ids";
 
 // Odd characters are built from code points on purpose: written literally (or as \u escapes) they are unreadable in
 // review and some tooling rewrites them.
@@ -307,6 +307,68 @@ describe("sameId", () => {
   it("is symmetric", () => {
     const values: unknown[] = [null, undefined, "", "3", 3, UUID, UUID.toUpperCase(), 0, "0", NaN];
     for (const a of values) for (const b of values) expect(sameId(a, b)).toBe(sameId(b, a));
+  });
+});
+
+// The comparison key the view logic, the filter chips and the Inventory components all use for a category id: one definition
+// (it used to be written out in two modules).
+describe("idKey", () => {
+  it.each<[string, unknown]>([
+    ["null", null],
+    ["undefined", undefined],
+    ["empty text", ""],
+    ["blank text", "   \t\n"],
+    ["a no-break space", NBSP],
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    ["-Infinity", -Infinity],
+  ])("is null for %s (no id at all)", (_label, value) => {
+    expect(idKey(value)).toBeNull();
+  });
+
+  it("trims and lower-cases, so a UUID compares the way the view logic compares it", () => {
+    expect(idKey(`  ${UUID.toUpperCase()} `)).toBe(UUID);
+    expect(idKey("AbC")).toBe("abc");
+    expect(idKey(UUID)).toBe(UUID);
+  });
+
+  it("turns numbers and digit strings into the same key (bigint ids), and never reads them as numbers", () => {
+    expect(idKey(42)).toBe("42");
+    expect(idKey("42")).toBe("42");
+    expect(idKey(" 0042 ")).toBe("0042"); // leading zeros survive: "42" and "0042" are different keys
+    expect(idKey(0)).toBe("0");
+    expect(idKey(-1)).toBe("-1");
+  });
+
+  it("gives equal keys for the ids sameId calls equal, when neither has blanks around it", () => {
+    for (const [a, b] of [
+      [3, "3"],
+      [UUID, UUID.toUpperCase()],
+      ["abc", "ABC"],
+    ] as const) {
+      expect(sameId(a, b)).toBe(true);
+      expect(idKey(a)).toBe(idKey(b));
+    }
+  });
+});
+
+// Ids are identity, not search text: search ignores accents and look-alike forms, ids never do. A category is told apart
+// from another by its id, and two ids that differ in an accent or a look-alike letter are two ids.
+describe("ids are compared exactly: they are not folded the way search text is", () => {
+  const E_ACUTE = cp(0x00e9);
+  const E_GRAVE_UPPER = cp(0x00c8);
+  const COMBINING_ACUTE = cp(0x0301);
+
+  it("keeps an accented id apart from the plain one, in both comparisons", () => {
+    expect(sameId(`caf${E_ACUTE}`, "cafe")).toBe(false);
+    expect(sameId(`cafe${COMBINING_ACUTE}`, "cafe")).toBe(false);
+    expect(idKey(`caf${E_ACUTE}`)).not.toBe(idKey("cafe"));
+    expect(idKey(E_GRAVE_UPPER)).toBe(cp(0x00e8)); // lower-cased, accent kept
+  });
+
+  it("keeps look-alike forms apart", () => {
+    expect(sameId(FULLWIDTH_ONE + FULLWIDTH_TWO, "12")).toBe(false);
+    expect(idKey(FULLWIDTH_ONE + FULLWIDTH_TWO)).not.toBe("12");
   });
 });
 

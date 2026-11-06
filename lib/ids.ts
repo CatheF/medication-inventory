@@ -6,8 +6,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DIGITS_RE = /^[0-9]{1,18}$/;
 const MEDICATION_ID_RE = /^[1-9][0-9]{0,14}$/;
 
-export type CategoryId = string;
-
 export type ParsedId = { ok: true; value: string | null } | { ok: false; reason: string };
 
 const INVALID_CATEGORY = "Category id must be a UUID or a positive whole number.";
@@ -54,6 +52,19 @@ export function sameId(a: unknown, b: unknown): boolean {
   const y = toIdString(b);
   if (x === null || y === null) return x === y;
   return x.toLowerCase() === y.toLowerCase();
+}
+
+/**
+ * Comparison key for a category id: String() equality, trimmed and lower-cased (UUIDs are case-insensitive), blank and
+ * non-finite numbers = null. The view logic (lib/inventory-view.ts), the filter chips (lib/filter-chips.ts) and the Inventory
+ * components all compare category ids through this one rule, so they cannot disagree about which items belong together.
+ * It never folds accents or look-alike forms the way search text is folded (lib/search-text.ts): an id is an identity.
+ */
+export function idKey(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number" && !Number.isFinite(value)) return null;
+  const key = String(value).trim().toLowerCase();
+  return key === "" ? null : key;
 }
 
 /** Parses a medication id from a route param or number. Returns null when it is not a positive safe integer. */

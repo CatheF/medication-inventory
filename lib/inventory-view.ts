@@ -14,10 +14,13 @@
 //   * Chip counts reflect search + stock, not the category filter.
 //   * Search ignores characters that render as nothing (zero-width spaces and joiners, soft hyphen, direction marks,
 //     variation selectors...) in the typed text and in the item text, so a pasted blank is "no search" and never an
-//     empty-quotes message, and it treats look-alike forms as equal (NFKC: "µg" = "μg", full-width letters, ligatures).
+//     empty-quotes message, it treats look-alike forms as equal (NFKC: "µg" = "μg", full-width letters, ligatures) and it
+//     ignores accents ("creme" finds "Crème"). The rules are written once, in lib/search-text.ts. Only the comparison
+//     ignores accents: no text is rewritten, and a category is still told apart from another by its id.
 
 import type { Category, Medication } from "./db";
-import { stripInvisibleCharacters } from "./text-safety";
+import { idKey } from "./ids";
+import { displaySearchText, foldSearchText } from "./search-text";
 
 // ── Public types ────────────────────────────────────────────────────────────────
 
@@ -119,48 +122,17 @@ export function naturalCompare(a: string, b: string): number {
   return collator.compare(a, b);
 }
 
-// Characters that render as nothing (zero-width spaces and joiners, the soft hyphen, direction marks and isolates, the word
-// joiner, variation selectors, Hangul fillers, tag characters...) are dropped by stripInvisibleCharacters (lib/text-safety.ts,
-// the one rule shared with the combobox search and the filter chips). Text pasted from web pages, PDFs, chat apps and email
-// carries them. They are not whitespace, so left alone a search made only of them would count as real text (every item hidden
-// behind an empty-looking “” message) and one inside a word would stop it from matching.
-
-/**
- * Case-insensitive form used for search, applied to the typed search and to the searched text alike:
- *   1. invisible characters are dropped first, so an accent that one separated from its letter still composes;
- *   2. NFKC: canonical equivalence ("é" as one character equals "e" + combining accent) and compatibility forms
- *      (the micro sign and the Greek mu in "µg"/"μg", full-width letters, ligatures like "ﬁ", the one-character "㎎");
- *   3. lower case.
- * NFKC never produces an invisible character from a visible one, so one strip pass is enough.
- */
-function fold(text: string): string {
-  return stripInvisibleCharacters(text).normalize("NFKC").toLowerCase();
-}
-
-/**
- * The search as staff see it: invisible characters dropped, trimmed, inner whitespace collapsed to single spaces.
- * "" means "no search". Everything else stays as typed (full-width letters stay full-width). When it is not empty at
- * least one search term survives folding, so "a filter is active" and "the search has a term" never disagree (the
- * unit tests sweep every BMP character). Not treated as invisible: C0/C1 control characters and U+2800 (Braille
- * blank) still count as text.
- */
-function displaySearch(search: unknown): string {
-  return typeof search === "string" ? stripInvisibleCharacters(search).trim().replace(/\s+/g, " ") : "";
-}
+// How search text is cleaned for display (displaySearchText) and folded for comparison (foldSearchText: invisible characters,
+// look-alike forms, accents) is defined once, in lib/search-text.ts. The Admin category picker (lib/combobox.ts) folds with
+// the same foldSearchText and the filter chips of both screens (lib/filter-chips.ts) quote the same displaySearchText, so the
+// Inventory search, the picker and every chip can never disagree about what matches or about what the person typed.
 
 function pluralItems(count: number): string {
   return count === 1 ? "item" : "items";
 }
 
 // ── Category index (shared by counts, filter, sort and grouping so they cannot disagree) ──────────────────
-
-/** Comparison key for a category id: String() equality, trimmed and lower-cased (uuids are case-insensitive). */
-function idKey(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" && !Number.isFinite(value)) return null;
-  const key = String(value).trim().toLowerCase();
-  return key === "" ? null : key;
-}
+// Category ids are compared through idKey (lib/ids.ts): String() equality, trimmed and lower-cased (uuids are case-insensitive).
 
 type CategoryEntry = {
   key: string;
@@ -236,25 +208,25 @@ export function isLowStock(item: Pick<Medication, "stock" | "threshold">): boole
 }
 
 function searchTerms(search: unknown): string[] {
-  const text = displaySearch(search);
+  const text = displaySearchText(search);
   if (text === "") return [];
   // Split AFTER folding: NFKC can turn one character into several and some of them are spaces (the diaeresis "¨"
   // becomes " ̈"), which would otherwise leave a term with a space in it or an empty one.
-  return fold(text).split(/\s+/).filter((term) => term !== "");
+  return foldSearchText(text).split(/\s+/).filter((term) => term !== "");
 }
 
 function matchesTerms(item: Medication, terms: readonly string[]): boolean {
   if (terms.length === 0) return true;
   // The single spaces keep a term from matching across two fields (terms never contain whitespace).
-  const haystack = fold(`${item.name ?? ""} ${item.barcode ?? ""} ${item.supplier_order_number ?? ""}`);
+  const haystack = foldSearchText(`${item.name ?? ""} ${item.barcode ?? ""} ${item.supplier_order_number ?? ""}`);
   return terms.every((term) => haystack.includes(term));
 }
 
 /**
  * Trimmed, split on whitespace; EVERY term must appear (case-insensitive substring) in
  * "<name> <barcode> <supplier order number>". An empty search matches everything, and so does one made only of
- * invisible characters. Invisible characters are ignored and look-alike forms are equal (see `fold`). Unnamed items
- * match on their barcode (a missing name contributes nothing, never the text "null").
+ * invisible characters or only of accents. Invisible characters and accents are ignored and look-alike forms are equal
+ * (see foldSearchText). Unnamed items match on their barcode (a missing name contributes nothing, never the text "null").
  */
 export function matchesSearch(item: Medication, search: string): boolean {
   return matchesTerms(item, searchTerms(search));
@@ -489,7 +461,7 @@ function describeFilters(view: ViewState, index: CategoryIndex): string[] {
     parts.push(`Category: ${categoryFilterLabel(view.category, index).label}`);
   }
   if (view.stock === "low" || view.stock === "ok") parts.push(`Stock: ${STOCK_LABEL[view.stock]}`);
-  const search = displaySearch(view.search);
+  const search = displaySearchText(view.search);
   if (search !== "") parts.push(`Search ${OPEN_QUOTE}${search}${CLOSE_QUOTE}`);
   return parts;
 }
@@ -524,7 +496,7 @@ export function describeEmpty(
 
   const index = indexCategories(categories);
   const filters = describeFilters(view, index);
-  const searching = displaySearch(view.search) !== "";
+  const searching = displaySearchText(view.search) !== "";
 
   if (isCategoryFilterActive(view.category) && !searching && view.stock === "all") {
     const { label, resolved } = categoryFilterLabel(view.category, index);
