@@ -504,7 +504,8 @@ test.describe("Scan tab: Receive and Dispense", () => {
 
     await lookupManually(page, ibuprofen.barcode);
     await quantityBox(page).fill("");
-    await page.getByRole("button", { name: /^Dispense\s+units$/ }).click();
+    // An emptied quantity box means 1: the button, the request and the confirmation all say 1.
+    await page.getByRole("button", { name: "Dispense 1 units" }).click();
     await expect(page.getByText("New stock: 5")).toBeVisible();
 
     expect(mock.requestsTo("POST", TRANSACTIONS).map((r) => asRecord(r.body).quantity)).toEqual([12, 1]);

@@ -31,6 +31,12 @@ type Toast = { color: "green" | "red"; headline: string; sub?: string };
 // scanning again is always safe.
 const LOOKUP_FAILED_HINT = "Check the connection and scan again.";
 
+// The quantity of one Receive / Dispense. An emptied quantity box means 1 (the request, the button label and the
+// confirmation message all use this one value, so they can never disagree).
+function unitsToRecord(quantity: string): number {
+  return quantity === "" ? 1 : Number(quantity);
+}
+
 type ScanPhase =
   | { kind: "idle" }
   | { kind: "looking" }
@@ -543,7 +549,7 @@ export default function MainPage() {
     const med = phase.medication;
     // The quantity that is recorded: an emptied box means 1. The request and the success message below both use THIS number
     // (not the typed text), so the message always states what was actually recorded.
-    const units = quantity === "" ? 1 : Number(quantity);
+    const units = unitsToRecord(quantity);
     // A scan that arrives while the transaction is on its way must not swap the card under it.
     scanLockRef.current = true;
     setProcessing(true);
@@ -683,11 +689,11 @@ export default function MainPage() {
               that already exists is read out, one that arrives together with its region often is not. */}
           <div role="status" aria-live="polite" aria-atomic="true">
             {toast && (
-              // flex-wrap: on a narrow screen the line under the headline drops below it, instead of squeezing the headline
-              // into two lines and cutting that line off ("Check the connection …"). Wide screens look exactly as before.
-              <div className={`rounded-xl px-4 py-3 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 ${
-                toast.color === "green" ? "bg-green-700 text-white" : "bg-red-700 text-white"
-              }`}>
+              // The "Lookup failed" hint may wrap below its headline on a narrow screen instead of squeezing the headline into two
+              // lines and cutting the hint off ("Check the connection …"). Every other toast keeps its single-line layout.
+              <div className={`rounded-xl px-4 py-3 mb-4 flex items-center ${
+                toast.sub === LOOKUP_FAILED_HINT ? "flex-wrap gap-x-3 gap-y-1" : "gap-3"
+              } ${toast.color === "green" ? "bg-green-700 text-white" : "bg-red-700 text-white"}`}>
                 <span className="text-3xl font-bold tabular-nums leading-none">{toast.headline}</span>
                 {toast.sub && <span className="text-sm truncate">{toast.sub}</span>}
               </div>
@@ -837,8 +843,8 @@ export default function MainPage() {
                       {processing
                         ? "Processing..."
                         : mode === "dispense"
-                        ? `Dispense ${quantity} ${phase.medication.unit}`
-                        : `Receive ${quantity} ${phase.medication.unit}`}
+                        ? `Dispense ${unitsToRecord(quantity)} ${phase.medication.unit}`
+                        : `Receive ${unitsToRecord(quantity)} ${phase.medication.unit}`}
                     </button>
                   </div>
                 </div>

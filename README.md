@@ -60,7 +60,7 @@ The order sheet is a worklist for ordering; it never orders anything.
 * The **supplier order number** is free text that staff enter in Admin. It is never inferred from the barcode or the name; leading zeros and letters are kept exactly. Items without one print an em dash and are listed in a note.
 * Preparing, printing or exporting changes no stock and sends nothing.
 * The draft lives in this browser only (`localStorage`). If the browser refuses to save it, the page says so.
-* **Print / Save as PDF** opens the browser's print dialog. The printed page contains only the sheet (title, date, prepared by, a table with the header repeated on every page, notes, footer), in black and white, for Letter or A4. "Page N of M" appears in browsers that support page margin boxes (Chromium).
+* **Print / Save as PDF** opens the browser's print dialog. The printed page contains only the sheet (title, date, prepared by, a table with the header repeated on every page, notes, footer), in black and white, for Letter or A4. The notes stay together with the last item row, so the last page always has at least one item. If you press Ctrl/Cmd+P before the inventory has loaded (or after it failed to load), the printout is a one-page "Order sheet not printed" notice that says why, never a blank page. "Page N of M" appears in browsers that support page margin boxes (Chromium).
 * **Download Excel (.xlsx)** creates a real workbook on the server from the rows on the sheet (a read-only request). Every text cell is stored as text, so `0092` stays `0092` and a name such as `=HYPERLINK(...)` stays literal text. The workbook prints one page wide with the header row repeated.
 
 ## Testing
