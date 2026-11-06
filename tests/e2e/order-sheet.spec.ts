@@ -2542,14 +2542,31 @@ test.describe("Order sheet: Enter in 'Add an item' adds a single match", () => {
     expect(await sheetRowIds(page)).toEqual([]);
   });
 
-  test("an item that is already on the sheet: Enter does what its Add button does (says so, shows the row, adds no second row) and empties the box", async ({ page }) => {
+  test("an item that is already on the sheet: Enter says so, adds no second row, empties the box and keeps the keyboard in it, so the next scan is not lost", async ({ page }) => {
     await start(page, [{ id: SCAN_A.id }]);
     await page.getByTestId(`qty-input-${SCAN_A.id}`).fill("5");
     await scan(page, SCAN_A.barcode);
     await expect(page.getByTestId("add-status")).toHaveText(`Already on the sheet: ${nameOf(SCAN_A)}.`);
-    await expect(row(page, SCAN_A)).toBeFocused();
     expect(await typedRows(page)).toEqual([{ id: SCAN_A.id, qty: "5", unit: "" }]); // nothing was added, nothing was reset
     await expect(search(page)).toHaveValue("");
+    await expect(search(page), "the page shows the row, but the box keeps the keyboard").toBeFocused();
+
+    // The next scan goes straight into the box (no click, no focus call): it is added, and nothing leaked into the quantity.
+    await page.keyboard.type(SCAN_B.barcode);
+    await page.keyboard.press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([SCAN_A.id, SCAN_B.id]);
+    expect(await typedRows(page)).toEqual([{ id: SCAN_A.id, qty: "5", unit: "" }, { id: SCAN_B.id, qty: "", unit: "" }]);
+  });
+
+  test("a search made only of accents is no search: nothing is listed and Enter adds nothing", async ({ page }) => {
+    await start(page);
+    await search(page).fill("\u0308"); // a lone combining accent: nothing to look for once accents are ignored
+    await settle(page);
+    await expect(page.locator('[data-testid^="add-result-"]')).toHaveCount(0);
+    await expect(page.getByText(/No items match/)).toHaveCount(0);
+    await search(page).press("Enter");
+    await settle(page);
+    expect(await sheetRowIds(page)).toEqual([]);
   });
 
   test("Enter that confirms a text composition (IME) or is held down is not an add; a plain Enter afterwards is", async ({ page }) => {

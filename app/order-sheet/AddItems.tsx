@@ -4,6 +4,7 @@ import { useId, useMemo, useState } from "react";
 import type { Ref } from "react";
 import type { Medication } from "@/lib/db";
 import { matchesSearch, sortItems } from "@/lib/inventory-view";
+import { displaySearchText } from "@/lib/search-text";
 import { categoryLabel, displayName, pluralize } from "./format";
 import type { CategoryList } from "./format";
 import { CheckIcon, PlusIcon, SearchIcon } from "./icons";
@@ -36,7 +37,9 @@ export function AddItems({ items, categories, isOnSheet, onAdd, status, searchRe
   const [query, setQuery] = useState("");
   const inputId = useId();
   const helpId = useId();
-  const trimmed = query.trim();
+  // What the person typed, cleaned like the Inventory search is: "" when nothing is left to look for (blank, invisible characters
+  // or accents only), so such a box lists nothing instead of every item.
+  const trimmed = displaySearchText(query);
 
   const matches = useMemo(
     () => (trimmed === "" ? [] : sortItems(items.filter((item) => matchesSearch(item, trimmed)), "name", [])),
@@ -78,6 +81,9 @@ export function AddItems({ items, categories, isOnSheet, onAdd, status, searchRe
             const only = matches.length === 1 ? matches[0] : null;
             if (only === null) return;
             onAdd(only);
+            // An item that is already on the sheet makes the page jump to its row. The box takes the keyboard back at once, so
+            // the next scan still lands in it (the row stays shown and flashed) instead of going nowhere.
+            event.currentTarget.focus({ preventScroll: true });
             // Empty the box so the next scan starts clean instead of being glued onto this code.
             setQuery("");
           }}
