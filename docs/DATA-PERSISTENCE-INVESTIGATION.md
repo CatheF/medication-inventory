@@ -29,7 +29,7 @@
 
 ## What I could not see
 
-* Vercel projects, their environment variables and logs (the connection available here belongs to a different account). One of the two Vercel projects attached to this repository (`medication-inventory-dsav`) fails every build; the reason is not visible from here.
+* Vercel projects, their environment variables and logs (the Vercel connection available here belongs to a different account and cannot see the team). What GitHub's commit statuses show: two Vercel projects are attached to this repository. `medication-inventory` builds and deploys every push of the work branch successfully. `medication-inventory-dsav` has failed on every push of this branch (it does not appear on the commits before it), so its failure points at that project's own settings, not at the code. The most likely cause, reproduced locally: a build with no Supabase variables set stops at "Collecting page data" with "Missing NEXT_PUBLIC_SUPABASE_URL or a Supabase key", for the original commit and for this branch alike. So that project probably lacks `NEXT_PUBLIC_SUPABASE_URL` and a key variable for the **Preview** environment (variables that exist only for Production do not reach branch builds). This is a hypothesis; its build log is not readable from here; `npx vercel inspect dpl_Bm7AHUd98gxGiNzXeQJzQynD8AUx --logs` (run by someone signed in to that Vercel team) prints it.
 * Supabase billing, plan and pause/restore history, and any backups (free plans have no downloadable backups).
 * Whether the GitHub Action that pings the `keepalive` table still runs, and how often (the workflow is not in this repository).
 * API and database logs older than the retention window, so who deleted what cannot be reconstructed.
