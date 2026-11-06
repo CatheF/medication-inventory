@@ -541,7 +541,12 @@ export default function MainPage() {
 
   const handleManualLookup = (e: React.FormEvent) => {
     e.preventDefault();
-    lookupBarcode(manualInputRef.current?.value ?? manualBarcode);
+    const input = manualInputRef.current;
+    lookupBarcode(input?.value ?? manualBarcode);
+    // The looked-up code stays visible in the box, but selected: whatever is typed or scanned next replaces it. A handheld
+    // scanner types into the focused box like a keyboard, so without this its digits were added to the END of the previous
+    // code, and the lookup was for the two barcodes glued together, which no item has: it was saved as a junk "unknown" item.
+    input?.select();
   };
 
   const handleTransaction = async () => {
