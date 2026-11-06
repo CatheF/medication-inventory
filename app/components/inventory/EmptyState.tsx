@@ -55,7 +55,15 @@ export function EmptyState({ kind, title, detail, onClearFilters, onShowAll, onS
         primaryAction={plan.primary}
         secondaryAction={plan.secondary}
         headingLevel={3}
-      />
+      >
+        {kind === "no-items" ? (
+          // An empty answer can also mean the app is looking at the wrong database or that the database is hiding the rows,
+          // so do not only say "create the first item".
+          <p className="mt-2 text-sm text-gray-600">
+            Expecting items here? Make sure the app is connected to the right database before you add anything new.
+          </p>
+        ) : null}
+      </EmptyStateCard>
     </div>
   );
 }
