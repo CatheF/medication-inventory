@@ -73,6 +73,7 @@ The barcode scanner (USB scanner, camera, typed codes, Quick mode, kiosk) still 
 * **The manual barcode box selects its text when entered or after a lookup.** A handheld scanner types into a focused box like a keyboard; without this its digits were glued onto the code that was already there, and the lookup of the two codes together saved a junk item.
 * **The camera is released** when you leave the Scan tab or the page, or press Stop; the camera light used to stay on, and pressing Start Camera twice could leave a stream running.
 * **Manual mode states the quantity that was recorded** (an emptied quantity box records 1).
+* **The kiosk says a new barcode was saved only when it was.** After a refused or failed save it shows "Could not save barcode …" with Try Again; before, it said "Saved for staff review in Admin" whatever the answer. Nothing else in the kiosk changed.
 
 Not tested here: a real USB scanner, a real camera decoding a printed barcode, Safari or iOS. Before merging, do one real check on the preview deployment: receive and dispense one item with the USB scanner, scan one unknown barcode, and scan one barcode with the phone camera.
 
@@ -119,7 +120,7 @@ All test data is synthetic.
 * The order sheet badge in the top bar and the heading "Items on this sheet" also count rows whose item was deleted in Admin; the sheet itself marks those rows and leaves them out of the print-out and the Excel file.
 * On a phone, the Inventory tab shows the category chips above the search box, so the search box starts below the first screen.
 * `package.json` lists three packages that nothing imports (`@anthropic-ai/sdk`, `better-sqlite3`, `formidable`). They were there before this work; removing them is a separate, safe change.
-* The Usage and Kiosk pages were left as they were: an automated accessibility check finds low-contrast text on both and a scroll area that cannot be reached by keyboard on Usage.
+* The Usage and Kiosk pages were left as they were (apart from the kiosk's save message, see above): an automated accessibility check finds low-contrast text on both and a scroll area that cannot be reached by keyboard on Usage.
 * Not built: bulk category assignment, importing supplier order numbers from CSV, any ordering or purchasing integration, authentication.
 * Real Microsoft Excel, Safari/Firefox printing, real printers, screen readers and a real Supabase/PostgREST were not available when this was tested.
 
