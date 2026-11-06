@@ -10,10 +10,15 @@ import { CheckIcon, PlusIcon, SearchIcon } from "./icons";
 import { HELP, INPUT, LABEL } from "./ui";
 
 // "Add an item": a search box and a short list of matches, each with an Add button. Nothing is ever added unless
-// the person presses a button. An item that is already on the sheet is shown as "On sheet" and cannot be added
-// again (pressing it takes you to its row instead).
+// the person presses a button, or presses Enter while exactly one item matches (what a handheld barcode scanner sends after
+// the code). An item that is already on the sheet is shown as "On sheet" and cannot be added again (pressing it takes you to
+// its row instead; Enter does the same for a single match).
 
 const MAX_RESULTS = 8;
+
+const HELP_TEXT =
+  "Type to find an item, then press Add. When only one item matches (for example after scanning its barcode), press Enter to " +
+  "add it. An item that is already on the sheet is marked and is never added twice.";
 
 export type Announcement = { text: string; tick: number };
 
@@ -60,15 +65,28 @@ export function AddItems({ items, categories, isOnSheet, onAdd, status, searchRe
           type="search"
           autoComplete="off"
           spellCheck={false}
-          placeholder="Name, barcode or supplier no."
+          placeholder="Name, barcode or supplier order no."
           value={query}
           onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            // Whatever surrounds the box, Enter here never submits anything.
+            event.preventDefault();
+            // The Enter that confirms a text composition (IME), or a key that is held down, is not a scan.
+            if (event.nativeEvent.isComposing || event.repeat) return;
+            // Exactly one item is listed: it is the one that was meant. Zero or several: nothing happens, the query and the list stay.
+            const only = matches.length === 1 ? matches[0] : null;
+            if (only === null) return;
+            onAdd(only);
+            // Empty the box so the next scan starts clean instead of being glued onto this code.
+            setQuery("");
+          }}
           aria-describedby={helpId}
           className={`${INPUT} pl-10`}
         />
       </div>
       <p id={helpId} className={HELP}>
-        Type to find an item, then press Add. An item that is already on the sheet is marked and is never added twice.
+        {HELP_TEXT}
       </p>
 
       <p role="status" data-testid="add-status" className="mt-2 min-h-5 text-sm font-medium text-gray-900">
@@ -87,13 +105,17 @@ export function AddItems({ items, categories, isOnSheet, onAdd, status, searchRe
                 const name = displayName(item);
                 const category = categoryLabel(item, categories);
                 const supplier = typeof item.supplier_order_number === "string" ? item.supplier_order_number.trim() : "";
+                // When the typed text is found in the barcode, say so: a scanned or typed code matches its barcode, and the person
+                // can then see why this item is listed. (Searched like the list itself, so the two always agree.)
+                const matchedBarcode = matchesSearch({ ...item, name: null, supplier_order_number: null }, trimmed);
+                const barcodeNote = matchedBarcode ? ` (barcode ${item.barcode})` : "";
                 return (
                   <li key={item.id}>
                     <button
                       type="button"
                       data-testid={`add-result-${item.id}`}
                       aria-disabled={onSheet ? true : undefined}
-                      aria-label={onSheet ? `On sheet: ${name}. Press to go to its row.` : `Add ${name} to the sheet`}
+                      aria-label={onSheet ? `On sheet: ${name}${barcodeNote}. Press to go to its row.` : `Add ${name}${barcodeNote} to the sheet`}
                       onClick={() => onAdd(item)}
                       className={
                         "flex min-h-14 w-full items-center gap-3 rounded-lg border px-3 py-2 text-left focus-visible:outline-2 " +
@@ -109,6 +131,12 @@ export function AddItems({ items, categories, isOnSheet, onAdd, status, searchRe
                           Supplier order no.:{" "}
                           {supplier !== "" ? <span className="sheet-mono text-gray-800">{supplier}</span> : <span className="italic">Not set</span>}
                           {category ? ` · ${category}` : ""}
+                          {matchedBarcode ? (
+                            <>
+                              {" · Barcode: "}
+                              <span className="sheet-mono text-gray-800">{item.barcode}</span>
+                            </>
+                          ) : null}
                         </span>
                       </span>
                       <span

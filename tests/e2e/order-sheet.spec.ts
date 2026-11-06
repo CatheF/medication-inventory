@@ -11,6 +11,7 @@ import { buildCategories, buildMedications } from "../helpers/fixtures";
 import { readXlsx, type XlsxWorkbook } from "../helpers/xlsx-reader";
 // `test` with an automatic extra: a FAILED test also says so when the app server was showing its error overlay (see the helper).
 import { test } from "./helpers/app-server-guard";
+import { holdAnswers } from "./helpers/existing-behavior";
 import { installMockApi, type MockApi } from "./helpers/mock-api";
 
 // Without an action timeout a missing control would wait for the whole test timeout; this keeps failures quick and readable.
@@ -132,6 +133,22 @@ async function sheetRowIds(page: Page): Promise<number[]> {
   return page
     .locator('[data-testid^="sheet-row-"]')
     .evaluateAll((els) => els.map((el) => Number((el as HTMLElement).dataset.rowId)));
+}
+
+/** The rows on screen with what the quantity and unit boxes show (the boxes are what a person sees and prints from). */
+async function screenRows(page: Page): Promise<Array<{ id: number; qty: string; unit: string }>> {
+  return page.locator('[data-testid^="sheet-row-"]').evaluateAll((items) =>
+    items.map((item) => ({
+      id: Number((item as HTMLElement).dataset.rowId),
+      qty: item.querySelector<HTMLInputElement>('input[data-testid^="qty-input-"]')?.value ?? "",
+      unit: item.querySelector<HTMLInputElement>('input[data-testid^="unit-input-"]')?.value ?? "",
+    }))
+  );
+}
+
+/** The sheet on screen and the draft kept in localStorage must say the same thing after every step. */
+async function expectScreenMatchesDraft(page: Page): Promise<void> {
+  expect(await screenRows(page), "the rows on screen are the rows of the saved draft").toEqual(await typedRows(page));
 }
 
 /** What the screen shows for the printed table: header cells, and the body rows (cell texts as a person sees them). */
@@ -466,9 +483,11 @@ test.describe("Order sheet: choosing what goes on it", () => {
       await expect(page.getByTestId(`unit-input-${id}`)).toHaveValue("");
     }
 
-    // pressing it again adds nothing and says why
+    // pressing it again adds nothing and says why. The reason goes to the line under the search box: the message under the button,
+    // with the Undo of the first press, stays (a double tap must not cost the way back; see the Undo tests below).
     await button.click();
-    await expect(status).toContainText("already on the sheet. Nothing was added.");
+    await expect(page.getByTestId("add-status")).toContainText("already on the sheet. Nothing was added.");
+    await expect(status).toContainText("Added 4 low-stock items");
     expect(await sheetRowIds(page)).toHaveLength(lowIds.length + 1);
   });
 
@@ -649,7 +668,10 @@ test.describe("Order sheet: choosing what goes on it", () => {
 
     await page.getByTestId(`remove-row-${CETIRIZINE.id}`).click();
     await expect.poll(() => sheetRowIds(page)).toEqual([IBUPROFEN.id, AMOXICILLIN.id]);
-    await expect(page.getByTestId("add-status")).toContainText(`Removed ${nameOf(CETIRIZINE)} from the sheet. 2 items left.`);
+    // The message sits with its Undo (see the Undo tests below), under "Add all low-stock items"; the line under the search box
+    // stays quiet, so one removal is announced once.
+    await expect(page.getByTestId("low-stock-status")).toHaveText(`Removed ${nameOf(CETIRIZINE)}. 2 items left.`);
+    await expect(page.getByTestId("add-status")).toHaveText("");
     await expect(page.getByTestId(`remove-row-${AMOXICILLIN.id}`)).toBeFocused();
     expect((await previewRows(page)).map((cells) => cells[0])).toEqual([nameOf(IBUPROFEN), nameOf(AMOXICILLIN)]);
     expect((await readDraft(page))?.rows.map((r) => r.id)).toEqual([IBUPROFEN.id, AMOXICILLIN.id]);
@@ -905,7 +927,7 @@ test.describe("Order sheet: quantities and units are typed by staff and kept apa
     expect((await previewRows(page))[0][2]).toBe("25");
   });
 
-  test("the quantity box stops at 9 digits and shows what it kept; spaces and leading zeros are accepted and print as the plain number", async ({
+  test("the quantity box keeps every digit typed (a number of more than 9 digits is explained, never cut down to a valid one); spaces and leading zeros are accepted and print as the plain number", async ({
     page,
   }) => {
     await installMockApi(page);
@@ -915,8 +937,12 @@ test.describe("Order sheet: quantities and units are typed by staff and kept apa
     const first = page.getByTestId(`qty-input-${IBUPROFEN.id}`);
     await first.click();
     await first.pressSequentially("1234567890");
-    await expect(first).toHaveValue("123456789"); // the browser refuses the 10th digit: what is shown is what is stored
-    expect((await readDraft(page))?.rows[0].qty).toBe("123456789");
+    await expect(first).toHaveValue("1234567890"); // the 10th digit is kept: what is shown is what is stored
+    expect((await readDraft(page))?.rows[0].qty).toBe("1234567890");
+    await expect(row(page, IBUPROFEN).getByRole("alert")).toHaveText("Too large. Enter 999,999,999 or less.");
+    expect((await previewRows(page))[0][2]).toBe(""); // the printed sheet never shows a guessed number
+    await first.fill("123456789"); // nine digits is still a valid quantity
+    await expect(row(page, IBUPROFEN).getByRole("alert")).toHaveCount(0);
     expect((await previewRows(page))[0][2]).toBe("123456789");
 
     const second = page.getByTestId(`qty-input-${CETIRIZINE.id}`);
@@ -1922,5 +1948,775 @@ test.describe("Order sheet: a new sheet is dated with the local calendar day, no
       expect(filename).toBe("order-sheet-2026-03-10.xlsx");
       expect(exportBodies(mock)[0].date).toBe("2026-03-10");
     });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// A read that is accepted and then never answered (what a paused or half-reachable database looks like). The Home page and
+// Admin give up after 30 seconds (AbortSignal.timeout) and show an error with Retry; without that limit this page said
+// "Loading the inventory…" for ever, with no way out. The real limit is 30 s: these tests shorten it to a moment from inside
+// the page (the 30 s itself is checked by what the page asked for), so the behaviour can be watched without waiting.
+test.describe("Order sheet: an inventory request that is never answered", () => {
+  const TOO_SLOW = "The server took too long to answer while loading the inventory.";
+
+  async function shortenRequestLimit(page: Page, ms = 600): Promise<void> {
+    await page.addInitScript((short: number) => {
+      const w = window as unknown as { __limitsAsked: number[] };
+      w.__limitsAsked = [];
+      const original = AbortSignal.timeout.bind(AbortSignal);
+      AbortSignal.timeout = (asked: number) => {
+        w.__limitsAsked.push(asked);
+        return original(asked === 30_000 ? short : asked);
+      };
+    }, ms);
+  }
+
+  const limitsAsked = (page: Page): Promise<number[]> => page.evaluate(() => (window as unknown as { __limitsAsked: number[] }).__limitsAsked);
+
+  test("a first load nobody answers ends in the same error screen as any other load failure, with Retry; the saved sheet is untouched and Retry brings it back", async ({
+    page,
+  }) => {
+    await shortenRequestLimit(page);
+    const mock = await installMockApi(page);
+    const rows = [
+      { id: IBUPROFEN.id, qty: "12", unit: "boxes" },
+      { id: CETIRIZINE.id, qty: "3", unit: "case" },
+    ];
+    await seedDraft(page, rows, { title: "Kept title", notes: "Keep this note" });
+    const gate = await holdAnswers(page, "**/api/medications"); // the inventory is accepted and never answered
+    try {
+      await page.goto("/order-sheet");
+      const error = page.getByTestId("sheet-error");
+      await expect(error, "the page gave up waiting and said so").toBeVisible({ timeout: 10_000 });
+      await expect(error).toContainText("Couldn’t load the inventory");
+      await expect(error).toContainText("This does not mean the inventory is empty.");
+      await expect(error).toContainText(TOO_SLOW);
+      await expect(error).toContainText("Your order sheet (2 items) is still saved in this browser.");
+      await expect(page.getByTestId("sheet-loading"), "no spinner is left behind").toHaveCount(0);
+      expect(await limitsAsked(page), "the limit the page asked for is the real 30 seconds").toContain(30_000);
+
+      // nothing was lost, changed or sent meanwhile
+      const draft = await readDraft(page);
+      expect(draft?.rows.map(({ id, qty, unit }) => ({ id, qty, unit }))).toEqual(rows);
+      expect(draft?.title).toBe("Kept title");
+      expect(draft?.notes).toBe("Keep this note");
+      expect(writes(mock)).toEqual([]);
+
+      // Retry that is not answered either ends in the error again (it never sticks on the spinner)
+      const asked = gate.arrived();
+      await error.getByRole("button", { name: "Retry" }).click();
+      await expect.poll(() => gate.arrived(), { message: "Retry asked the server once more" }).toBe(asked + 1);
+      await expect(error).toBeVisible({ timeout: 10_000 });
+      await expect(error).toContainText(TOO_SLOW);
+
+      // and Retry that is answered shows the sheet exactly as it was saved
+      gate.release();
+      await error.getByRole("button", { name: "Retry" }).click();
+      await waitSheetReady(page);
+      expect(await sheetRowIds(page)).toEqual(rows.map((r) => r.id));
+      expect(await typedRows(page)).toEqual(rows);
+      await expect(page.getByTestId("sheet-title")).toHaveValue("Kept title");
+    } finally {
+      gate.release();
+    }
+  });
+
+  test("a Refresh nobody answers ends too: the warning appears, the earlier inventory and everything typed stay, and Refresh works again", async ({ page }) => {
+    await shortenRequestLimit(page);
+    await installMockApi(page);
+    await seedDraft(page, [{ id: IBUPROFEN.id, qty: "12", unit: "boxes" }]);
+    await openSheet(page);
+    const freshness = page.getByTestId("inventory-freshness");
+    await expect(freshness).toContainText("Inventory as of");
+
+    const gate = await holdAnswers(page, "**/api/medications"); // from now on the inventory is never answered
+    try {
+      await page.getByRole("button", { name: "Refresh inventory" }).click();
+      await expect(freshness, "the refresh gave up and said so").toContainText("Couldn’t refresh. Still showing the inventory as of", { timeout: 10_000 });
+      await expect(page.getByTestId(`qty-input-${IBUPROFEN.id}`)).toHaveValue("12");
+      expect(await typedRows(page)).toEqual([{ id: IBUPROFEN.id, qty: "12", unit: "boxes" }]);
+
+      gate.release();
+      await page.getByRole("button", { name: "Refresh inventory" }).click();
+      await expect(freshness).not.toContainText("Couldn’t refresh", { timeout: 10_000 });
+      await expect(freshness).toContainText("Inventory as of");
+    } finally {
+      gate.release();
+    }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// Undo. The Inventory tab's "Add all" has an Undo; the sheet's own "Add all low-stock items" and its Remove button had none, so a
+// mis-tap could only be reversed with "Clear sheet" (which also wipes rows added by hand and every typed quantity) or by hand,
+// one row at a time. One level of undo: the most recent bulk add or removal. The rules for when it stops being offered are the
+// Inventory tab's: it goes when it is used or dismissed, when the sheet is cleared, and when a newer action replaces it.
+test.describe("Order sheet: Undo for 'Add all low-stock items' and for Remove", () => {
+  const gloves = mk(7301, "Gloves, nitrile", { stock: 2, threshold: 10 }); // low
+  const masks = mk(7302, "Masks, surgical", { stock: 0, threshold: 10 }); // low
+  const gauze = mk(7303, "Gauze pads, sterile", { stock: 3, threshold: 10 }); // low
+  const syringes = mk(7304, "Syringes, 5 mL", { stock: 90, threshold: 10 }); // not low
+  const tape = mk(7305, "Tape, medical", { stock: 60, threshold: 10 }); // not low
+  const STOCK = [gloves, masks, gauze, syringes, tape];
+
+  const status = (page: Page): Locator => page.getByTestId("low-stock-status");
+  const undo = (page: Page): Locator => page.getByTestId("bulk-undo");
+  const dismiss = (page: Page): Locator => page.getByTestId("bulk-dismiss");
+  const addAll = (page: Page): Locator => page.getByTestId("add-low-stock");
+
+  async function start(page: Page, rows: Array<{ id: number; qty?: string; unit?: string }>): Promise<MockApi> {
+    const mock = await installMockApi(page, { medications: STOCK });
+    await seedDraft(page, rows);
+    await openSheet(page);
+    return mock;
+  }
+
+  test.describe("Add all low-stock items", () => {
+    test("says what it added and offers Undo; Undo takes off exactly the rows that action added and nothing else, whatever was typed meanwhile; the saved draft matches the screen at every step", async ({
+      page,
+    }) => {
+      const mock = await start(page, [
+        { id: gloves.id, qty: "12", unit: "boxes" }, // low, and already on the sheet before the action
+        { id: tape.id, qty: "3", unit: "cases" },
+      ]);
+      const before = inventorySnapshot(mock);
+
+      await addAll(page).click();
+      await expect(status(page)).toHaveText("Added 2 low-stock items (1 already on the sheet). Order quantities are left empty.");
+      await expect(undo(page)).toBeVisible();
+      await expect(undo(page)).toHaveText("Undo");
+      expect(await sheetRowIds(page)).toEqual([gloves.id, tape.id, gauze.id, masks.id]);
+      expect(await typedRows(page)).toEqual([
+        { id: gloves.id, qty: "12", unit: "boxes" },
+        { id: tape.id, qty: "3", unit: "cases" },
+        { id: gauze.id, qty: "", unit: "" },
+        { id: masks.id, qty: "", unit: "" },
+      ]);
+      await expectScreenMatchesDraft(page);
+
+      // staff keep working: a quantity typed in a row that was already there has nothing to do with the action
+      await page.getByTestId(`qty-input-${tape.id}`).fill("20");
+      await expect(undo(page), "typing a quantity does not end the offer").toBeVisible();
+      await undo(page).click();
+
+      await expect(status(page)).toHaveText("Undid adding 2 items.");
+      expect(await sheetRowIds(page)).toEqual([gloves.id, tape.id]);
+      expect(await typedRows(page)).toEqual([
+        { id: gloves.id, qty: "12", unit: "boxes" }, // the row that was on the sheet before keeps its place and what was typed
+        { id: tape.id, qty: "20", unit: "cases" }, // the edit made after the action is kept
+      ]);
+      await expectScreenMatchesDraft(page);
+      expect((await previewRows(page)).map((cells) => cells[0])).toEqual([nameOf(gloves), nameOf(tape)]);
+      await expect(page.getByRole("heading", { name: /Items on this sheet/ })).toContainText("(2)");
+      await expect(navSheetLink(page)).toHaveAccessibleName("Order sheet (2 items)");
+
+      // it is used up: Undo is gone and nothing can be undone a second time
+      await expect(undo(page)).toHaveCount(0);
+      await settle(page);
+      expect(await sheetRowIds(page)).toEqual([gloves.id, tape.id]);
+      expect(inventorySnapshot(mock)).toBe(before);
+      expect(writes(mock)).toEqual([]); // an Undo is a change of the draft in this browser only
+    });
+
+    test("one press of Undo undoes once, even when it is double-clicked: the second click does not dismiss the message", async ({ page }) => {
+      await start(page, []);
+      await addAll(page).click();
+      await expect(status(page)).toContainText("Added 3 low-stock items");
+      await undo(page).dblclick();
+      await expect(status(page)).toHaveText("Undid adding 3 items.");
+      await settle(page);
+      await expect(status(page), "the second click of the double-click did not dismiss the answer").toHaveText("Undid adding 3 items.");
+      expect(await sheetRowIds(page)).toEqual([]);
+      await expectScreenMatchesDraft(page);
+    });
+
+    test("the keyboard reaches Undo, Enter presses it once and keeps the focus on a button that stays; Dismiss clears the message and returns to 'Add all low-stock items'; a HELD Enter presses only once", async ({
+      page,
+    }) => {
+      await start(page, []);
+      await addAll(page).focus();
+      await page.keyboard.press("Enter");
+      await expect(status(page)).toContainText("Added 3 low-stock items");
+
+      await page.keyboard.press("Tab"); // the message is not a stop; the next control is Undo
+      await expect(undo(page)).toBeFocused();
+      await page.keyboard.down("Enter");
+      await page.keyboard.down("Enter"); // the key is held: the repeat must not press the button focus has just moved to
+      await page.keyboard.up("Enter");
+      await expect(status(page)).toHaveText("Undid adding 3 items.");
+      await expect(dismiss(page)).toBeFocused();
+      expect(await sheetRowIds(page)).toEqual([]);
+
+      await page.keyboard.press("Enter"); // a new press: Dismiss
+      await expect(status(page)).toHaveText("");
+      await expect(undo(page)).toHaveCount(0);
+      await expect(dismiss(page)).toHaveCount(0);
+      await expect(addAll(page)).toBeFocused();
+    });
+
+    test("the message is a polite live region of its own; the buttons are outside of it, so only the sentence is read out", async ({ page }) => {
+      await start(page, []);
+      await expect(status(page)).toHaveAttribute("role", "status"); // there before any result, so the first one is announced
+      await addAll(page).click();
+      await expect(status(page)).toContainText("Added 3 low-stock items");
+      await expect(status(page)).toHaveAttribute("aria-live", "polite");
+      await expect(status(page)).not.toContainText("Undo");
+      await expect(status(page)).not.toContainText("Dismiss");
+      await expect(page.getByRole("button", { name: "Undo" })).toHaveCount(1);
+    });
+
+    test("Dismiss takes the message and its Undo away and leaves the rows alone", async ({ page }) => {
+      await start(page, []);
+      await addAll(page).click();
+      await dismiss(page).click();
+      await expect(status(page)).toHaveText("");
+      await expect(undo(page)).toHaveCount(0);
+      expect(await sheetRowIds(page)).toHaveLength(3);
+      await expect(addAll(page)).toBeFocused();
+    });
+
+    test("an item added by hand ends the offer (the Inventory tab's rule for an item ticked by hand); the rows stay", async ({ page }) => {
+      await start(page, []);
+      await addAll(page).click();
+      await expect(undo(page)).toBeVisible();
+      await addFromSearch(page, "syringes", syringes);
+      await expect(page.getByTestId("add-status")).toContainText(`Added ${nameOf(syringes)}`);
+      await expect(undo(page)).toHaveCount(0);
+      await expect(status(page)).toHaveText("");
+      expect(await sheetRowIds(page)).toHaveLength(4);
+      await expectScreenMatchesDraft(page);
+    });
+
+    test("Clear sheet ends the offer: nothing is left to undo on an empty sheet", async ({ page }) => {
+      await start(page, []);
+      await addAll(page).click();
+      await expect(undo(page)).toBeVisible();
+      await page.getByTestId("clear-sheet").click();
+      await page.getByTestId("clear-sheet-confirm").click();
+      await expect(page.getByTestId("sheet-empty")).toBeVisible();
+      await expect(undo(page)).toHaveCount(0);
+      await expect(status(page)).toHaveText("");
+      expect(await sheetRowIds(page)).toEqual([]);
+    });
+
+    test("a second press that adds nothing keeps the first Undo (a double-tap must not cost the way back); the explanation goes to the line under the search box", async ({
+      page,
+    }) => {
+      await start(page, []);
+      await addAll(page).click();
+      await expect(status(page)).toHaveText("Added 3 low-stock items. Order quantities are left empty.");
+      await addAll(page).click(); // nothing left to add
+      await expect(page.getByTestId("add-status")).toContainText("All 3 low-stock items are already on the sheet. Nothing was added.");
+      await expect(status(page)).toHaveText("Added 3 low-stock items. Order quantities are left empty.");
+      await expect(undo(page)).toBeVisible();
+      expect(await sheetRowIds(page)).toHaveLength(3);
+
+      await undo(page).click();
+      await expect(status(page)).toHaveText("Undid adding 3 items.");
+      expect(await sheetRowIds(page)).toEqual([]);
+    });
+
+    test("when nothing is on offer, a press that adds nothing says why in the message line (no Undo, no Dismiss)", async ({ page }) => {
+      await start(page, [{ id: gloves.id }, { id: masks.id }, { id: gauze.id }]);
+      await addAll(page).click();
+      await expect(status(page)).toHaveText("All 3 low-stock items are already on the sheet. Nothing was added.");
+      await expect(undo(page)).toHaveCount(0);
+      await expect(dismiss(page)).toHaveCount(0);
+    });
+
+    test("only the latest action can be undone: a new Add all after a Remove replaces the offer, and Undo then takes off just what that action added", async ({
+      page,
+    }) => {
+      await start(page, [{ id: gloves.id, qty: "7", unit: "box" }]);
+      await addAll(page).click(); // adds Gauze and Masks
+      await expect(status(page)).toContainText("Added 2 low-stock items");
+      await page.getByTestId(`remove-row-${masks.id}`).click(); // a newer action replaces the offer
+      await expect(status(page)).toHaveText(`Removed ${nameOf(masks)}. 2 items left.`);
+      await addAll(page).click(); // adds Masks again
+      await expect(status(page)).toHaveText("Added 1 low-stock item (2 already on the sheet). Order quantities are left empty.");
+      await undo(page).click();
+      await expect(status(page)).toHaveText("Undid adding 1 item.");
+      expect(await typedRows(page)).toEqual([
+        { id: gloves.id, qty: "7", unit: "box" },
+        { id: gauze.id, qty: "", unit: "" },
+      ]);
+      await expectScreenMatchesDraft(page);
+    });
+
+    test("when another tab emptied the sheet in the meantime, Undo says there is nothing to undo and changes nothing", async ({ page }) => {
+      await start(page, []);
+      await addAll(page).click();
+      await expect(undo(page)).toBeVisible();
+
+      const other = await page.context().newPage();
+      await installMockApi(other, { medications: STOCK });
+      await other.goto("/order-sheet");
+      await expect(other.getByTestId("sheet-preview")).toBeVisible();
+      await other.getByTestId("clear-sheet").click();
+      await other.getByTestId("clear-sheet-confirm").click();
+      await expect(other.getByTestId("sheet-empty")).toBeVisible();
+      await other.close();
+
+      await expect(page.getByTestId("sheet-empty")).toBeVisible(); // this tab follows the other one
+      await undo(page).click();
+      await expect(status(page)).toHaveText("Nothing to undo: those items are no longer on the sheet.");
+      expect(await sheetRowIds(page)).toEqual([]);
+      await expect(undo(page)).toHaveCount(0);
+    });
+  });
+
+  test.describe("Remove", () => {
+    const THREE = [
+      { id: IBUPROFEN.id, qty: "12", unit: "boxes" },
+      { id: CETIRIZINE.id, qty: "24", unit: "bottles" },
+      { id: AMOXICILLIN.id, qty: "6", unit: "packs" },
+    ];
+
+    async function startThree(page: Page): Promise<MockApi> {
+      const mock = await installMockApi(page);
+      await seedDraft(page, THREE);
+      await openSheet(page);
+      return mock;
+    }
+
+    test("Remove says which item went and how many are left, and offers Undo; Undo puts the row back at its place WITH its quantity and unit; a second Undo is not possible", async ({
+      page,
+    }) => {
+      const mock = await startThree(page);
+      const before = inventorySnapshot(mock);
+
+      await page.getByTestId(`remove-row-${CETIRIZINE.id}`).click(); // the middle row
+      await expect(status(page)).toHaveText(`Removed ${nameOf(CETIRIZINE)}. 2 items left.`);
+      await expect(undo(page)).toBeVisible();
+      expect(await sheetRowIds(page)).toEqual([IBUPROFEN.id, AMOXICILLIN.id]);
+      await expect(page.getByTestId(`remove-row-${AMOXICILLIN.id}`), "the keyboard moved on to the next row").toBeFocused();
+      await expectScreenMatchesDraft(page);
+
+      await undo(page).click();
+      await expect(status(page)).toHaveText(`Put ${nameOf(CETIRIZINE)} back on the sheet. 3 items on the sheet.`);
+      expect(await sheetRowIds(page)).toEqual([IBUPROFEN.id, CETIRIZINE.id, AMOXICILLIN.id]); // in the middle again
+      expect(await typedRows(page)).toEqual(THREE); // 12 boxes, 24 bottles, 6 packs: nothing was lost
+      await expectScreenMatchesDraft(page);
+      expect((await previewRows(page)).map((cells) => cells.slice(2))).toEqual([["12", "boxes"], ["24", "bottles"], ["6", "packs"]]);
+      await expect(navSheetLink(page)).toHaveAccessibleName("Order sheet (3 items)");
+
+      await expect(undo(page)).toHaveCount(0); // used: nothing to undo a second time
+      await settle(page);
+      expect(await typedRows(page)).toEqual(THREE);
+      expect(inventorySnapshot(mock)).toBe(before);
+      expect(writes(mock)).toEqual([]);
+    });
+
+    test("Undo keeps what was typed in another row after the removal", async ({ page }) => {
+      await startThree(page);
+      await page.getByTestId(`remove-row-${CETIRIZINE.id}`).click();
+      await page.getByTestId(`qty-input-${AMOXICILLIN.id}`).fill("99");
+      await page.getByTestId(`unit-input-${IBUPROFEN.id}`).fill("cases");
+      await expect(undo(page), "typing does not end the offer").toBeVisible();
+      await undo(page).click();
+      expect(await typedRows(page)).toEqual([
+        { id: IBUPROFEN.id, qty: "12", unit: "cases" },
+        { id: CETIRIZINE.id, qty: "24", unit: "bottles" },
+        { id: AMOXICILLIN.id, qty: "99", unit: "packs" },
+      ]);
+      await expectScreenMatchesDraft(page);
+    });
+
+    test("the first and the last row are put back where they were", async ({ page }) => {
+      await startThree(page);
+      await page.getByTestId(`remove-row-${IBUPROFEN.id}`).click();
+      await undo(page).click();
+      expect(await sheetRowIds(page)).toEqual([IBUPROFEN.id, CETIRIZINE.id, AMOXICILLIN.id]);
+      await page.getByTestId(`remove-row-${AMOXICILLIN.id}`).click();
+      await expect(status(page)).toHaveText(`Removed ${nameOf(AMOXICILLIN)}. 2 items left.`);
+      await undo(page).click();
+      expect(await typedRows(page)).toEqual(THREE);
+    });
+
+    test("one level only: removing a second row replaces the offer, and Undo puts back just that one", async ({ page }) => {
+      await startThree(page);
+      await page.getByTestId(`remove-row-${IBUPROFEN.id}`).click();
+      await page.getByTestId(`remove-row-${AMOXICILLIN.id}`).click();
+      await expect(status(page)).toHaveText(`Removed ${nameOf(AMOXICILLIN)}. 1 item left.`);
+      await undo(page).click();
+      expect(await typedRows(page)).toEqual([
+        { id: CETIRIZINE.id, qty: "24", unit: "bottles" },
+        { id: AMOXICILLIN.id, qty: "6", unit: "packs" },
+      ]); // Ibuprofen stays removed
+      await expect(undo(page)).toHaveCount(0);
+      await expectScreenMatchesDraft(page);
+    });
+
+    test("removing the only row leaves an empty sheet that Undo fills again; the empty-sheet card is shown meanwhile", async ({ page }) => {
+      await installMockApi(page);
+      await seedDraft(page, [{ id: IBUPROFEN.id, qty: "5", unit: "box" }]);
+      await openSheet(page);
+      await page.getByTestId(`remove-row-${IBUPROFEN.id}`).click();
+      await expect(status(page)).toHaveText(`Removed ${nameOf(IBUPROFEN)}. 0 items left.`);
+      await expect(page.getByTestId("sheet-empty")).toBeVisible();
+      await expect(undo(page)).toBeVisible();
+      await undo(page).click();
+      await expect(page.getByTestId("sheet-empty")).toHaveCount(0);
+      expect(await typedRows(page)).toEqual([{ id: IBUPROFEN.id, qty: "5", unit: "box" }]);
+      await expectScreenMatchesDraft(page);
+    });
+
+    test("an item added by hand, a Clear sheet and Dismiss each end the offer", async ({ page }) => {
+      await startThree(page);
+      await page.getByTestId(`remove-row-${CETIRIZINE.id}`).click();
+      await expect(undo(page)).toBeVisible();
+      await addFromSearch(page, "thermometer", THERMOMETER);
+      await expect(undo(page)).toHaveCount(0);
+      await expect(status(page)).toHaveText("");
+
+      await page.getByTestId(`remove-row-${THERMOMETER.id}`).click();
+      await expect(undo(page)).toBeVisible();
+      await dismiss(page).click();
+      await expect(undo(page)).toHaveCount(0);
+      await expect(status(page)).toHaveText("");
+
+      await page.getByTestId(`remove-row-${IBUPROFEN.id}`).click();
+      await expect(undo(page)).toBeVisible();
+      await page.getByTestId("clear-sheet").click();
+      await page.getByTestId("clear-sheet-confirm").click();
+      await expect(undo(page)).toHaveCount(0);
+      await expect(status(page)).toHaveText("");
+      expect(await sheetRowIds(page)).toEqual([]);
+    });
+
+    test("when the item is on the sheet again by the time Undo is pressed (another tab ticked it), nothing is duplicated and the message says so", async ({ page }) => {
+      await startThree(page);
+      await page.getByTestId(`remove-row-${CETIRIZINE.id}`).click();
+      await expect(undo(page)).toBeVisible();
+
+      const other = await page.context().newPage();
+      await installMockApi(other);
+      await other.goto("/?tab=inventory");
+      await expect(other.getByTestId("inventory-summary")).toBeVisible();
+      await other.getByTestId(`order-checkbox-${CETIRIZINE.id}`).check();
+      await expect.poll(async () => (await readDraft(other))?.rows.length).toBe(3);
+      await other.close();
+
+      await expect.poll(() => sheetRowIds(page)).toEqual([IBUPROFEN.id, AMOXICILLIN.id, CETIRIZINE.id]); // this tab follows
+      await undo(page).click();
+      await expect(status(page)).toHaveText(`Nothing to undo: ${nameOf(CETIRIZINE)} is already on the sheet.`);
+      expect(await sheetRowIds(page)).toEqual([IBUPROFEN.id, AMOXICILLIN.id, CETIRIZINE.id]);
+    });
+
+    test("when the sheet has filled up meanwhile (another tab), Undo says the row could not be put back, adds nothing and is used up", async ({ page }) => {
+      // 499 rows whose items are gone from the inventory plus one real row: the sheet holds the most it can (500)
+      const ghosts = Array.from({ length: 499 }, (_, index) => ({ id: 60_000 + index, qty: "", unit: "" }));
+      await installMockApi(page);
+      await seedDraft(page, [{ id: IBUPROFEN.id, qty: "5", unit: "box" }, ...ghosts]);
+      await openSheet(page);
+      await page.getByTestId(`remove-row-${IBUPROFEN.id}`).click();
+      await expect(status(page)).toHaveText(`Removed ${nameOf(IBUPROFEN)}. 499 items left.`);
+
+      // another tab fills the sheet up to 500 again, with a different item
+      const other = await page.context().newPage();
+      await installMockApi(other);
+      await other.goto("/order-sheet");
+      await other.evaluate(
+        ([key, rows]) => {
+          const draft: { rows: unknown } = JSON.parse(window.localStorage.getItem(key) ?? "{}");
+          draft.rows = rows;
+          window.localStorage.setItem(key, JSON.stringify(draft));
+        },
+        [STORAGE_KEY, [...ghosts, { id: 69_999, qty: "", unit: "" }]] as const
+      );
+      await other.close();
+      await expect.poll(async () => (await readDraft(page))?.rows.length).toBe(500);
+
+      await undo(page).click();
+      await expect(status(page)).toHaveText(`The sheet is full (500 items), so ${nameOf(IBUPROFEN)} could not be put back.`);
+      await expect(undo(page)).toHaveCount(0); // the offer is used up: it cannot wait for room
+      expect((await readDraft(page))?.rows).toHaveLength(500);
+      expect((await readDraft(page))?.rows.map((r) => r.id)).not.toContain(IBUPROFEN.id); // and nothing was added
+    });
+
+    test("a row whose item is gone from the inventory can be removed and put back like any other", async ({ page }) => {
+      await installMockApi(page);
+      await seedDraft(page, [{ id: IBUPROFEN.id, qty: "2", unit: "box" }, { id: 99_999, qty: "4", unit: "case" }]);
+      await openSheet(page);
+      await page.getByTestId("remove-row-99999").click();
+      await expect(status(page)).toHaveText("Removed missing item 99999. 1 item left.");
+      await undo(page).click();
+      expect(await typedRows(page)).toEqual([{ id: IBUPROFEN.id, qty: "2", unit: "box" }, { id: 99_999, qty: "4", unit: "case" }]);
+    });
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// A handheld scanner types the code and then Enter. Enter in "Add an item" did nothing, so a scan only filled the box and the
+// next scan was glued onto it. With exactly one match Enter now adds it and empties the box; in every other case it does nothing.
+test.describe("Order sheet: Enter in 'Add an item' adds a single match", () => {
+  const SCAN_A = mk(7501, "Zinc lozenges, 24 count", { barcode: "0049000028911", supplier_order_number: "ZL-24" });
+  const SCAN_B = mk(7502, "Vitamin C chewables", { barcode: "0073210045512" });
+  const SCAN_C = mk(7503, "Vitamin D drops", { barcode: "0073210045529" });
+  const STOCK = [SCAN_A, SCAN_B, SCAN_C];
+
+  const search = (page: Page): Locator => page.getByTestId("add-search");
+
+  async function start(page: Page, rows: Array<{ id: number }> = []): Promise<MockApi> {
+    const mock = await installMockApi(page, { medications: STOCK });
+    await seedDraft(page, rows);
+    await openSheet(page);
+    return mock;
+  }
+
+  /** What a scanner does: the characters one after the other, then Enter. */
+  async function scan(page: Page, code: string): Promise<void> {
+    await search(page).focus();
+    await page.keyboard.type(code);
+    await page.keyboard.press("Enter");
+  }
+
+  test("a scanned barcode that matches one item adds it, says so and empties the box; the next scan starts clean and is not glued onto the first", async ({ page }) => {
+    const mock = await start(page);
+    await scan(page, SCAN_A.barcode);
+    await expect.poll(() => sheetRowIds(page)).toEqual([SCAN_A.id]);
+    await expect(page.getByTestId("add-status")).toHaveText(`Added ${nameOf(SCAN_A)}. 1 item on the sheet.`);
+    await expect(search(page)).toHaveValue("");
+    await expect(search(page), "the box keeps the keyboard, so the next scan lands in it").toBeFocused();
+    await expect(page.locator('[data-testid^="add-result-"]')).toHaveCount(0);
+
+    await scan(page, SCAN_B.barcode);
+    await expect.poll(() => sheetRowIds(page)).toEqual([SCAN_A.id, SCAN_B.id]);
+    await expect(search(page)).toHaveValue("");
+    expect(await typedRows(page)).toEqual([{ id: SCAN_A.id, qty: "", unit: "" }, { id: SCAN_B.id, qty: "", unit: "" }]);
+    await expectScreenMatchesDraft(page);
+    expect(writes(mock)).toEqual([]); // looking for an item never writes to the inventory
+  });
+
+  test("a name or a supplier order number that matches exactly one item works the same way", async ({ page }) => {
+    await start(page);
+    await search(page).fill("zinc loz");
+    await expect(page.locator('[data-testid^="add-result-"]')).toHaveCount(1);
+    await search(page).press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([SCAN_A.id]);
+    await expect(search(page)).toHaveValue("");
+
+    await search(page).fill("chewables");
+    await search(page).press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([SCAN_A.id, SCAN_B.id]);
+
+    await search(page).fill("vitamin d");
+    await search(page).press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([SCAN_A.id, SCAN_B.id, SCAN_C.id]);
+  });
+
+  test("several matches: Enter does nothing visible, keeps the query and the list, and submits nothing", async ({ page }) => {
+    const mock = await start(page);
+    const navigations: string[] = [];
+    page.on("request", (request) => {
+      if (request.isNavigationRequest()) navigations.push(request.url());
+    });
+    const requestsBefore = mock.requests.length;
+    await search(page).fill("vitamin");
+    await expect(page.locator('[data-testid^="add-result-"]')).toHaveCount(2);
+    await search(page).press("Enter");
+    await settle(page);
+    expect(await sheetRowIds(page)).toEqual([]);
+    await expect(search(page)).toHaveValue("vitamin");
+    await expect(page.locator('[data-testid^="add-result-"]')).toHaveCount(2);
+    await expect(page.getByTestId("add-status")).toHaveText("");
+    expect(navigations).toEqual([]);
+    expect(mock.requests.length).toBe(requestsBefore);
+    expect(writes(mock)).toEqual([]);
+    await expect(page.getByTestId("sheet-empty")).toBeVisible();
+  });
+
+  test("no match: Enter does nothing visible and keeps what was typed", async ({ page }) => {
+    await start(page);
+    await search(page).fill("no such item anywhere");
+    await expect(page.getByText(/No items match/)).toBeVisible();
+    await search(page).press("Enter");
+    await settle(page);
+    expect(await sheetRowIds(page)).toEqual([]);
+    await expect(search(page)).toHaveValue("no such item anywhere");
+    await expect(page.getByTestId("add-status")).toHaveText("");
+
+    await search(page).fill("");
+    await search(page).press("Enter"); // an empty box: nothing to add either
+    await settle(page);
+    expect(await sheetRowIds(page)).toEqual([]);
+  });
+
+  test("an item that is already on the sheet: Enter does what its Add button does (says so, shows the row, adds no second row) and empties the box", async ({ page }) => {
+    await start(page, [{ id: SCAN_A.id }]);
+    await page.getByTestId(`qty-input-${SCAN_A.id}`).fill("5");
+    await scan(page, SCAN_A.barcode);
+    await expect(page.getByTestId("add-status")).toHaveText(`Already on the sheet: ${nameOf(SCAN_A)}.`);
+    await expect(row(page, SCAN_A)).toBeFocused();
+    expect(await typedRows(page)).toEqual([{ id: SCAN_A.id, qty: "5", unit: "" }]); // nothing was added, nothing was reset
+    await expect(search(page)).toHaveValue("");
+  });
+
+  test("Enter that confirms a text composition (IME) or is held down is not an add; a plain Enter afterwards is", async ({ page }) => {
+    await start(page);
+    await search(page).fill(SCAN_A.barcode);
+    await search(page).evaluate((input) => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", isComposing: true, bubbles: true, cancelable: true }));
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", repeat: true, bubbles: true, cancelable: true }));
+    });
+    await settle(page);
+    expect(await sheetRowIds(page)).toEqual([]);
+    await expect(search(page)).toHaveValue(SCAN_A.barcode);
+    await search(page).press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([SCAN_A.id]);
+  });
+
+  test("the help text under the box says that Enter adds a single match, and the box is described by it", async ({ page }) => {
+    await start(page);
+    const help = page.locator("#" + (await search(page).getAttribute("aria-describedby")));
+    await expect(help).toContainText("Enter");
+    await expect(help).toContainText("one item");
+    await expect(help).toContainText("Add");
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// Wording the review found wrong or inconsistent, and limits that cut text off without saying so.
+test.describe("Order sheet: wording that says what the controls do", () => {
+  test("the on-hand and barcode checkboxes say that they change the Excel file too, and they do", async ({ page }) => {
+    const mock = await installMockApi(page);
+    await seedDraft(page, [{ id: IBUPROFEN.id, qty: "2", unit: "box" }]);
+    await openSheet(page);
+    const onHand = page.getByLabel("Show on-hand column (printed sheet and Excel file)");
+    const barcode = page.getByLabel("Show barcode column (printed sheet and Excel file)");
+    await expect(onHand).toHaveAttribute("data-testid", "show-on-hand");
+    await expect(barcode).toHaveAttribute("data-testid", "show-barcode");
+    await expect(page.getByText("Show on-hand column on the printed sheet")).toHaveCount(0);
+    await expect(page.getByText("Show barcode column", { exact: true })).toHaveCount(0);
+
+    // the label is true: both files follow the checkbox
+    expect(await previewHeaders(page)).toEqual(["Item", "Supplier order no.", "Order qty", "Unit"]);
+    await onHand.check();
+    await barcode.check();
+    expect(await previewHeaders(page)).toEqual(["Item", "Supplier order no.", "Order qty", "Unit", "On hand", "Barcode"]);
+    const { workbook } = await downloadXlsx(page);
+    expect(workbook.sheet("Order sheet").table().headers).toEqual(["No.", "Item", "Supplier order no.", "Order qty", "Unit", "On hand", "Barcode"]);
+    expect(exportBodies(mock)[0]).toMatchObject({ showOnHand: true, showBarcode: true });
+  });
+
+  test("the notes under the rows read right for one item and for several (1 item: 'It prints'; 2 items: 'They print')", async ({ page }) => {
+    await installMockApi(page);
+    await seedDraft(page, [{ id: ASPIRIN.id }]); // no supplier order number, no quantity yet
+    await openSheet(page);
+    const supplier = page.getByTestId("missing-supplier-summary");
+    const quantity = page.getByTestId("empty-qty-summary");
+    await expect(supplier).toHaveText("1 item has no supplier order number. It prints as “—”. Add the number on the Admin page.");
+    await expect(quantity).toHaveText("1 row has no order quantity yet. It prints with an empty box to fill in by hand.");
+
+    await addFromSearch(page, "thermometer", THERMOMETER); // a second item without both
+    await expect(supplier).toHaveText("2 items have no supplier order number. They print as “—”. Add the number on the Admin page.");
+    await expect(quantity).toHaveText("2 rows have no order quantity yet. They print with an empty box to fill in by hand.");
+  });
+
+  test("the search boxes and the empty-sheet card call it a 'supplier order number', like every label", async ({ page }) => {
+    await installMockApi(page);
+    await openSheet(page);
+    await expect(page.getByTestId("add-search")).toHaveAttribute("placeholder", "Name, barcode or supplier order no.");
+    await expect(page.getByTestId("sheet-empty")).toContainText("find one here by name, barcode or supplier order number.");
+    await expect(page.getByTestId("sheet-empty")).not.toContainText("supplier number");
+    await openInventory(page);
+    await expect(page.getByTestId("search-input")).toHaveAttribute("placeholder", "Name, barcode or supplier order no.");
+  });
+
+  test("a search result shows the barcode when the barcode is what matched, so the person can see why it is listed", async ({ page }) => {
+    await installMockApi(page);
+    await openSheet(page);
+    await page.getByTestId("add-search").fill(CETIRIZINE.barcode);
+    const byBarcode = page.getByTestId(`add-result-${CETIRIZINE.id}`);
+    await expect(byBarcode).toContainText(`Barcode: ${CETIRIZINE.barcode}`);
+    await page.getByTestId("add-search").fill("cetirizine");
+    await expect(page.getByTestId(`add-result-${CETIRIZINE.id}`)).not.toContainText("Barcode");
+    await page.getByTestId("add-search").fill("CT-10"); // matched by the supplier order number: that is already on the line
+    await expect(page.getByTestId(`add-result-${CETIRIZINE.id}`)).not.toContainText("Barcode");
+  });
+});
+
+test.describe("Order sheet: no box cuts typed text off without saying so", () => {
+  /** Pastes (an input event the browser limits like a paste) instead of setting the value, so a maxLength would cut it. */
+  async function paste(page: Page, box: Locator, text: string): Promise<void> {
+    await box.focus();
+    await page.keyboard.insertText(text);
+  }
+
+  test("a pasted 12-digit quantity stays as pasted, a message names the limit, Print and Excel stay blocked until it is fixed, and the saved draft keeps it as typed", async ({
+    page,
+  }) => {
+    const mock = await installMockApi(page);
+    await seedDraft(page, [{ id: IBUPROFEN.id }, { id: CETIRIZINE.id, qty: "6", unit: "box" }]);
+    await openSheet(page);
+    const qty = page.getByTestId(`qty-input-${IBUPROFEN.id}`);
+    const rowError = row(page, IBUPROFEN).getByRole("alert");
+
+    await paste(page, qty, "999999999999");
+    await expect(qty, "the box keeps every digit that was pasted").toHaveValue("999999999999");
+    await expect(qty).toHaveAttribute("aria-invalid", "true");
+    await expect(rowError).toHaveText("Too large. Enter 999,999,999 or less.");
+    await expect(page.getByTestId("invalid-qty-summary")).toContainText("1 row has an order quantity that isn’t valid");
+    await expect(page.getByTestId("invalid-qty-summary")).toContainText("999,999,999");
+    await expect(page.getByTestId("print-button")).toBeDisabled();
+    await expect(page.getByTestId("export-xlsx")).toBeDisabled();
+    await expect(page.getByText(/Fix the order quantity on 1 row first/)).toBeVisible();
+    expect((await readDraft(page))?.rows.find((r) => r.id === IBUPROFEN.id)?.qty).toBe("999999999999"); // never a different, valid number
+    expect((await previewRows(page))[0][2]).toBe("");
+    await expectScreenMatchesDraft(page);
+
+    // it survives a reload as typed: it is not cut down to a valid number on the way back in
+    await page.reload();
+    await waitSheetReady(page);
+    await expect(page.getByTestId(`qty-input-${IBUPROFEN.id}`)).toHaveValue("999999999999");
+    await expect(page.getByTestId("print-button")).toBeDisabled();
+
+    // typing a 10th digit works the same way
+    const second = page.getByTestId(`qty-input-${IBUPROFEN.id}`);
+    await second.fill("");
+    await second.focus();
+    await page.keyboard.type("1234567890");
+    await expect(second).toHaveValue("1234567890");
+    await expect(row(page, IBUPROFEN).getByRole("alert")).toHaveText("Too large. Enter 999,999,999 or less.");
+
+    expect(mock.requestsTo("POST", /xlsx/)).toHaveLength(0); // nothing was exported while it was wrong
+    await second.fill("250000000"); // fixed: the largest valid size is still accepted
+    await expect(row(page, IBUPROFEN).getByRole("alert")).toHaveCount(0);
+    await expect(page.getByTestId("print-button")).toBeEnabled();
+    await expect(page.getByTestId("export-xlsx")).toBeEnabled();
+    expect((await previewRows(page))[0][2]).toBe("250000000");
+  });
+
+  test("a row's order unit says so when it reaches its 40-character limit (and the other boxes say so at theirs)", async ({ page }) => {
+    await installMockApi(page);
+    await seedDraft(page, [{ id: IBUPROFEN.id }]);
+    await openSheet(page);
+
+    const unit = page.getByTestId(`unit-input-${IBUPROFEN.id}`);
+    const unitNote = page.getByTestId(`unit-limit-${IBUPROFEN.id}`);
+    await paste(page, unit, "u".repeat(60));
+    await expect(unit).toHaveValue("u".repeat(40));
+    await expect(unitNote, "the cut is explained next to the box").toContainText("40 characters");
+    await expect(unitNote).toBeVisible();
+    await unit.fill("box");
+    await expect(unitNote).toBeHidden(); // nothing to say while there is room
+
+    const boxes: Array<[string, string, number]> = [
+      ["sheet-title", "sheet-title-limit", 120],
+      ["sheet-prepared-by", "sheet-prepared-by-limit", 80],
+      ["sheet-notes", "sheet-notes-limit", 1000],
+    ];
+    for (const [boxId, noteId, limit] of boxes) {
+      const box = page.getByTestId(boxId);
+      const note = page.getByTestId(noteId);
+      await expect(note, `${boxId}: no message while there is room`).toBeHidden();
+      await box.fill("");
+      await paste(page, box, "x".repeat(limit + 30));
+      await expect(box, `${boxId} holds ${limit} characters`).toHaveValue("x".repeat(limit));
+      await expect(note, `${boxId}: the cut is explained`).toBeVisible();
+      await expect(note).toContainText(`${limit.toLocaleString("en-US")} characters`);
+      await box.fill("short");
+      await expect(note).toBeHidden();
+    }
   });
 });

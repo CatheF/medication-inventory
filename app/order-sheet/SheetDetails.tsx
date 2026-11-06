@@ -5,6 +5,7 @@ import type { OrderDraft } from "@/lib/order-sheet/draft";
 import { ORDER_SHEET_LIMITS } from "@/lib/order-sheet/types";
 import { SHEET_DATE_MAX, SHEET_DATE_MIN, formatSheetDate, isSheetDate } from "./format";
 import { WarnIcon } from "./icons";
+import { LimitNote, atLimit } from "./LimitNote";
 import { CARD, FOCUS, H2, HELP, INPUT, INPUT_INVALID, LABEL } from "./ui";
 
 // "Sheet details": the title, date, who prepared it, notes to the supplier and the two optional columns. Every value
@@ -20,11 +21,15 @@ type SheetDetailsProps = {
 
 export function SheetDetails({ draft, resolvedDate, today, update }: SheetDetailsProps) {
   const titleId = useId();
+  const titleLimitId = useId();
   const dateId = useId();
   const dateHelpId = useId();
   const dateErrorId = useId();
   const byId = useId();
+  const byLimitId = useId();
   const notesId = useId();
+  const notesHelpId = useId();
+  const notesLimitId = useId();
 
   return (
     <section aria-labelledby="details-heading" className={`${CARD} print:hidden`}>
@@ -48,8 +53,10 @@ export function SheetDetails({ draft, resolvedDate, today, update }: SheetDetail
               const title = event.target.value;
               update((d) => ({ ...d, title }));
             }}
+            aria-describedby={atLimit(draft.title, ORDER_SHEET_LIMITS.title) ? titleLimitId : undefined}
             className={INPUT}
           />
+          <LimitNote id={titleLimitId} testId="sheet-title-limit" value={draft.title} limit={ORDER_SHEET_LIMITS.title} />
         </div>
 
         <div>
@@ -85,8 +92,10 @@ export function SheetDetails({ draft, resolvedDate, today, update }: SheetDetail
               const preparedBy = event.target.value;
               update((d) => ({ ...d, preparedBy }));
             }}
+            aria-describedby={atLimit(draft.preparedBy, ORDER_SHEET_LIMITS.preparedBy) ? byLimitId : undefined}
             className={INPUT}
           />
+          <LimitNote id={byLimitId} testId="sheet-prepared-by-limit" value={draft.preparedBy} limit={ORDER_SHEET_LIMITS.preparedBy} />
         </div>
 
         <div className="sm:col-span-2 lg:col-span-3">
@@ -104,22 +113,28 @@ export function SheetDetails({ draft, resolvedDate, today, update }: SheetDetail
               const notes = event.target.value;
               update((d) => ({ ...d, notes }));
             }}
+            aria-describedby={atLimit(draft.notes, ORDER_SHEET_LIMITS.notes) ? `${notesHelpId} ${notesLimitId}` : notesHelpId}
             className={`${INPUT} block`}
           />
-          <p className={HELP}>Printed under the table. Line breaks are kept.</p>
+          <p id={notesHelpId} className={HELP}>
+            Printed under the table. Line breaks are kept.
+          </p>
+          <LimitNote id={notesLimitId} testId="sheet-notes-limit" value={draft.notes} limit={ORDER_SHEET_LIMITS.notes} />
         </div>
       </div>
 
+      {/* Both columns also change the Excel file, and the on-hand figure is internal stock a person may not mean to send to a
+          supplier, so the labels say that these switches are not about paper alone. */}
       <div className="mt-4 space-y-1">
         <CheckOption
           testId="show-on-hand"
-          label="Show on-hand column on the printed sheet"
+          label="Show on-hand column (printed sheet and Excel file)"
           checked={draft.showOnHand}
           onChange={(showOnHand) => update((d) => ({ ...d, showOnHand }))}
         />
         <CheckOption
           testId="show-barcode"
-          label="Show barcode column"
+          label="Show barcode column (printed sheet and Excel file)"
           checked={draft.showBarcode}
           onChange={(showBarcode) => update((d) => ({ ...d, showBarcode }))}
         />

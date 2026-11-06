@@ -37,13 +37,34 @@ function isControlCodePoint(cp: number): boolean {
 
 export type NormalizedQty = { ok: true; value: string } | { ok: false; reason: string };
 
-const QTY_REASON = "Order quantity must be a whole number from 1 to 999,999,999 (digits only), or left blank.";
+/**
+ * The largest order quantity as people read it (nine 9s with thousands separators). Built from the number of digits in
+ * ORDER_SHEET_LIMITS (the one place the limit is defined), so no message can ever name a different limit than the rule enforces.
+ */
+export const MAX_QTY_TEXT: string = "9".repeat(ORDER_SHEET_LIMITS.qtyInput).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+
+const QTY_REASON = `Order quantity must be a whole number from 1 to ${MAX_QTY_TEXT} (digits only), or left blank.`;
 const DIGITS_ONLY = /^[0-9]+$/;
+
+/** The digits of an already trimmed, digits-only quantity without the zeros in front ("" when it was zero). */
+function withoutLeadingZeros(digits: string): string {
+  return digits.replace(/^0+/, "");
+}
+
+/**
+ * True for a quantity that is only digits but has more of them than the largest quantity (zeros in front do not count). It is
+ * not malformed, it is too big: the page says so instead of telling the person to "use digits only".
+ */
+export function isQtyTooLarge(input: string): boolean {
+  if (typeof input !== "string") return false;
+  const trimmed = input.trim();
+  return DIGITS_ONLY.test(trimmed) && withoutLeadingZeros(trimmed).length > ORDER_SHEET_LIMITS.qtyInput;
+}
 
 /**
  * Normalizes what staff typed into the "Order quantity" box.
  *  - Surrounding whitespace is ignored. Blank is valid: staff may fill the quantity in by hand after printing.
- *  - Otherwise digits only; leading zeros are stripped ("007" becomes "7"); the number must be 1..999999999.
+ *  - Otherwise digits only; leading zeros are stripped ("007" becomes "7"); the number must be 1 up to the largest quantity.
  *  - Decimals, negatives, signs, separators, letters, "0" and everything else are rejected (never "fixed" silently).
  */
 export function normalizeQty(input: string): NormalizedQty {
@@ -51,8 +72,8 @@ export function normalizeQty(input: string): NormalizedQty {
   const trimmed = input.trim();
   if (trimmed === "") return { ok: true, value: "" };
   if (!DIGITS_ONLY.test(trimmed)) return { ok: false, reason: QTY_REASON };
-  const stripped = trimmed.replace(/^0+/, "");
-  // "" means the value was zero. More than 9 digits is above the maximum (checked by length, never by Number()).
+  const stripped = withoutLeadingZeros(trimmed);
+  // "" means the value was zero. More digits than the largest quantity has is above the maximum (checked by length, never by Number()).
   if (stripped === "" || stripped.length > ORDER_SHEET_LIMITS.qtyInput) return { ok: false, reason: QTY_REASON };
   return { ok: true, value: stripped };
 }

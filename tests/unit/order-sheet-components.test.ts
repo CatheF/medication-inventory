@@ -3,14 +3,20 @@
 //    Print button, so the paper copy must never silently lose what staff typed). Real printing is covered by the
 //    Playwright spec (page.pdf + pdftotext); here the classes that make it print-only are pinned down.
 //  * SheetRows: a row whose item was deleted says which item it was ("<name> - no longer in inventory").
+// and the structure of what the Undo / limit / Enter changes added (UndoLine, LimitNote, the quantity and unit boxes, AddItems, SheetDetails).
 import { createElement, createRef } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import type { Medication } from "@/lib/db";
+import { AddItems } from "@/app/order-sheet/AddItems";
+import { LimitNote, atLimit } from "@/app/order-sheet/LimitNote";
 import { PrintSheet } from "@/app/order-sheet/PrintSheet";
+import { SheetDetails } from "@/app/order-sheet/SheetDetails";
 import { SheetRows } from "@/app/order-sheet/SheetRows";
+import { UndoLine } from "@/app/order-sheet/UndoLine";
 import { INVALID_QTY_PRINT_NOTE } from "@/app/order-sheet/format";
 import { buildSheet } from "@/lib/order-sheet/build";
+import { DEFAULT_DRAFT } from "@/lib/order-sheet/draft";
 import type { BuiltSheet, SheetOptions, SheetRow, SheetRowInput } from "@/lib/order-sheet/types";
 import { buildMedications } from "@/tests/helpers/fixtures";
 
@@ -205,5 +211,163 @@ describe("SheetRows: a row whose item is no longer in the inventory", () => {
     );
     const order = [...html.matchAll(/data-testid="sheet-row-(\d+)"/g)].map((m) => Number(m[1]));
     expect(order).toEqual([acet.id, 105000, ibu.id]);
+  });
+});
+
+describe("UndoLine: the message under 'Add all low-stock items', with Undo and Dismiss", () => {
+  function lineMarkup(props: Partial<{ text: string; canUndo: boolean; canDismiss: boolean }> = {}): string {
+    return renderToStaticMarkup(
+      createElement(UndoLine, {
+        text: "Added 3 low-stock items. Order quantities are left empty.",
+        tick: 1,
+        canUndo: true,
+        canDismiss: true,
+        rootRef: createRef<HTMLDivElement>(),
+        onUndo: vi.fn(),
+        onDismiss: vi.fn(),
+        ...props,
+      })
+    );
+  }
+
+  it("the sentence is a polite live region of its own; Undo and Dismiss are outside of it, so only the sentence is read out", () => {
+    const html = lineMarkup();
+    const regionEnd = html.indexOf("</p>") + "</p>".length;
+    const region = html.slice(0, regionEnd);
+    const after = html.slice(regionEnd);
+    expect(region).toContain('role="status"');
+    expect(region).toContain('aria-live="polite"');
+    expect(region).toContain('aria-atomic="true"');
+    expect(region).toContain('data-testid="low-stock-status"');
+    expect(textOf(region)).toBe("Added 3 low-stock items. Order quantities are left empty.");
+    expect(region).not.toMatch(/Undo|Dismiss/);
+    expect(after).toMatch(/<button[^>]*data-testid="bulk-undo"[^>]*>Undo<\/button>/);
+    expect(after).toMatch(/<button[^>]*data-testid="bulk-dismiss"[^>]*>Dismiss<\/button>/);
+    expect(after.indexOf("bulk-undo")).toBeLessThan(after.indexOf("bulk-dismiss")); // Undo first: it is the one Tab reaches first
+  });
+
+  it("with no message only the empty, visually hidden live region is drawn (no buttons), so the first message is announced when it appears", () => {
+    const html = lineMarkup({ text: "", canUndo: false, canDismiss: false });
+    expect(html).toContain('role="status"');
+    expect(html).toContain("sr-only");
+    expect(html).not.toContain("<button");
+    expect(textOf(html)).toBe("");
+  });
+
+  it("offers only what applies: Dismiss alone once Undo is used, and nothing at all next to an explanation", () => {
+    const used = lineMarkup({ text: "Undid adding 3 items.", canUndo: false, canDismiss: true });
+    expect(used).not.toContain("bulk-undo");
+    expect(used).toContain("bulk-dismiss");
+    const explanation = lineMarkup({ text: "All 3 low-stock items are already on the sheet. Nothing was added.", canUndo: false, canDismiss: false });
+    expect(explanation).not.toContain("<button");
+    expect(textOf(explanation)).toBe("All 3 low-stock items are already on the sheet. Nothing was added.");
+  });
+});
+
+describe("LimitNote: a box that cuts text off says so", () => {
+  const note = (value: string, limit: number): string => renderToStaticMarkup(createElement(LimitNote, { id: "n", testId: "t", value, limit }));
+
+  it("is in the page but empty (no text, no styling) while there is room", () => {
+    expect(note("a".repeat(39), 40)).toBe('<p id="n" data-testid="t" role="status"></p>');
+  });
+
+  it("names the limit, with thousands separators, once the box is full", () => {
+    expect(textOf(note("a".repeat(40), 40))).toBe("Limit: 40 characters. Anything more is cut off.");
+    expect(textOf(note("a".repeat(1000), 1000))).toBe("Limit: 1,000 characters. Anything more is cut off.");
+  });
+
+  it("counts like maxLength does (UTF-16 units), so the note appears exactly when the browser stops accepting characters", () => {
+    expect(atLimit("a".repeat(40), 40)).toBe(true);
+    expect(atLimit("a".repeat(39), 40)).toBe(false);
+    expect(atLimit("\u{1F600}".repeat(20), 40)).toBe(true); // a character outside the basic plane is two units: 20 of them fill a 40-unit box
+  });
+});
+
+describe("SheetRows: the quantity box keeps what was typed, the unit box says when it is full", () => {
+  const sheet = buildSheet(items, [{ id: acet.id, qty: "", unit: "" }], OPTIONS);
+  const details = new Map(sheet.rows.map((row) => [row.id, row] as const));
+
+  function rowMarkup(qty: string, unit: string): string {
+    return renderToStaticMarkup(
+      createElement(SheetRows, {
+        rows: [{ id: acet.id, qty, unit }],
+        details,
+        showBarcode: false,
+        flashId: null,
+        listRef: createRef<HTMLUListElement>(),
+        onQty: vi.fn(),
+        onUnit: vi.fn(),
+        onRemove: vi.fn(),
+      })
+    );
+  }
+  const tag = (html: string, testId: string): string => new RegExp(`<input[^>]*data-testid="${testId}"[^>]*>`).exec(html)?.[0] ?? "";
+
+  it("the quantity box has no maxLength (a pasted 12-digit number is kept) and the row says it is too large, naming the limit", () => {
+    const html = rowMarkup("999999999999", "");
+    const qty = tag(html, `qty-input-${acet.id}`);
+    expect(qty).not.toMatch(/maxlength/i);
+    expect(qty).toContain('value="999999999999"');
+    expect(qty).toContain('aria-invalid="true"');
+    expect(textOf(html)).toContain("Too large. Enter 999,999,999 or less.");
+  });
+
+  it("the unit box keeps its limit of 40 and explains it only once it is reached", () => {
+    const room = rowMarkup("", "box");
+    expect(tag(room, `unit-input-${acet.id}`)).toContain('maxLength="40"');
+    expect(room).toContain(`<p id="unit-limit-note-${acet.id}" data-testid="unit-limit-${acet.id}" role="status"></p>`);
+    expect(tag(room, `unit-input-${acet.id}`)).not.toContain("aria-describedby");
+
+    const full = rowMarkup("", "u".repeat(40));
+    expect(tag(full, `unit-input-${acet.id}`)).toContain(`aria-describedby="unit-limit-note-${acet.id}"`);
+    expect(textOf(full)).toContain("Limit: 40 characters. Anything more is cut off.");
+  });
+});
+
+describe("AddItems and SheetDetails: wording", () => {
+  const addItems = (): string =>
+    renderToStaticMarkup(
+      createElement(AddItems, {
+        items,
+        categories: { status: "loading" },
+        isOnSheet: () => false,
+        onAdd: vi.fn(),
+        status: { text: "", tick: 0 },
+        searchRef: createRef<HTMLInputElement>(),
+      })
+    );
+  const details = (draft = DEFAULT_DRAFT): string =>
+    renderToStaticMarkup(createElement(SheetDetails, { draft, resolvedDate: "2026-11-05", today: "2026-11-05", update: vi.fn() }));
+
+  it("the search box calls it a 'supplier order no.' like every label, and its help text says that Enter adds a single match", () => {
+    const html = addItems();
+    expect(html).toContain('placeholder="Name, barcode or supplier order no."');
+    const text = textOf(html);
+    expect(text).toContain("When only one item matches (for example after scanning its barcode), press Enter to add it.");
+    expect(text).toContain("An item that is already on the sheet is marked and is never added twice.");
+    expect(html).toMatch(/<input[^>]*data-testid="add-search"[^>]*aria-describedby="[^"]+"/);
+  });
+
+  it("the two column switches say that they change the Excel file too, and keep their test ids", () => {
+    const html = details();
+    expect(textOf(html)).toContain("Show on-hand column (printed sheet and Excel file)");
+    expect(textOf(html)).toContain("Show barcode column (printed sheet and Excel file)");
+    expect(textOf(html)).not.toContain("Show on-hand column on the printed sheet");
+    expect(html).toMatch(/<input[^>]*data-testid="show-on-hand"/);
+    expect(html).toMatch(/<input[^>]*data-testid="show-barcode"/);
+  });
+
+  it("title, prepared-by and notes keep their limits and each explains it when full (and only then)", () => {
+    const quiet = details();
+    for (const id of ["sheet-title-limit", "sheet-prepared-by-limit", "sheet-notes-limit"]) {
+      expect(quiet, id).toMatch(new RegExp(`<p id="[^"]+" data-testid="${id}" role="status"></p>`));
+    }
+    const full = details({ ...DEFAULT_DRAFT, title: "t".repeat(120), preparedBy: "p".repeat(80), notes: "n".repeat(1000) });
+    const text = textOf(full);
+    expect(text).toContain("Limit: 120 characters.");
+    expect(text).toContain("Limit: 80 characters.");
+    expect(text).toContain("Limit: 1,000 characters.");
+    expect(full).toMatch(/<input[^>]*data-testid="sheet-title"[^>]*maxLength="120"/);
+    expect(full).toMatch(/<textarea[^>]*data-testid="sheet-notes"[^>]*maxLength="1000"/);
   });
 });

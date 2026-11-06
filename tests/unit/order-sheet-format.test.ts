@@ -19,6 +19,7 @@ import {
   sheetFooter,
 } from "@/app/order-sheet/format";
 import type { CategoryList } from "@/app/order-sheet/format";
+import { MAX_QTY_TEXT } from "@/lib/order-sheet/build";
 import { isValidISODate } from "@/lib/order-sheet/draft";
 import { buildCategories, categoryId } from "@/tests/helpers/fixtures";
 
@@ -85,9 +86,22 @@ describe("order quantity wording", () => {
     expect(qtyProblem("1.5")).toBe("Digits only, for example 12.");
     expect(qtyProblem("abc")).toBe("Digits only, for example 12.");
     expect(qtyProblem("-3")).toBe("Digits only, for example 12.");
-    expect(qtyProblem("1000000000")).toBe("Digits only, for example 12.");
     expect(qtyProblem("0")).toBe("Enter 1 or more, or leave blank.");
     expect(qtyProblem("000")).toBe("Enter 1 or more, or leave blank.");
+  });
+
+  // A pasted 12-digit number used to be cut to 9 digits by the box (and so became a different, valid quantity) without a word.
+  // The box keeps what was pasted now, so the message has to say what is wrong with it: it IS digits only, it is too big.
+  it("a number with too many digits is called too large and names the limit; it is not told to use digits only", () => {
+    for (const typed of ["1000000000", "999999999999", " 123456789012 ", "00000000001000000000"]) {
+      expect(qtyProblem(typed), JSON.stringify(typed)).toBe(`Too large. Enter ${MAX_QTY_TEXT} or less.`);
+    }
+    expect(qtyProblem("999999999999")).toBe("Too large. Enter 999,999,999 or less.");
+  });
+
+  it("zeros in front of a valid number are not too many digits", () => {
+    expect(qtyProblem("0000000000000012")).toBeNull();
+    expect(qtyProblem("000000000999999999")).toBeNull();
   });
 });
 

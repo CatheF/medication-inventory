@@ -4,6 +4,7 @@ import type { SheetRow, SheetRowInput } from "@/lib/order-sheet/types";
 import { ORDER_SHEET_LIMITS } from "@/lib/order-sheet/types";
 import { qtyProblem } from "./format";
 import { TrashIcon, WarnIcon } from "./icons";
+import { LimitNote, atLimit } from "./LimitNote";
 import { BTN_DANGER, INPUT, INPUT_INVALID } from "./ui";
 
 // The builder: one row per item on the sheet, in the order they were added. Staff type the order quantity and the
@@ -153,6 +154,7 @@ const RowEditor = memo(function RowEditor({
 }: RowEditorProps) {
   const problem = qtyProblem(qty);
   const errorId = `qty-error-${id}`;
+  const unitNoteId = `unit-limit-note-${id}`;
   const tone = flash ? "border-amber-400 bg-amber-50 ring-2 ring-amber-300" : "border-gray-200 bg-white";
   return (
     <li tabIndex={-1} data-testid={`sheet-row-${id}`} data-row-id={id} className={`${ROW_BASE} ${GRID} ${tone}`}>
@@ -188,7 +190,8 @@ const RowEditor = memo(function RowEditor({
           inputMode="numeric"
           autoComplete="off"
           spellCheck={false}
-          maxLength={ORDER_SHEET_LIMITS.qtyInput}
+          // No maxLength: a box that silently drops the digits after the ninth would turn a pasted 12-digit number into a
+          // different, valid-looking quantity. The box keeps what was typed and the message under it names the limit.
           value={qty}
           onChange={(event) => onQty(id, event.target.value)}
           aria-label={`Order quantity for ${name}`}
@@ -219,8 +222,10 @@ const RowEditor = memo(function RowEditor({
           value={unit}
           onChange={(event) => onUnit(id, event.target.value)}
           aria-label={`Order unit for ${name}`}
+          aria-describedby={atLimit(unit, ORDER_SHEET_LIMITS.unit) ? unitNoteId : undefined}
           className={INPUT}
         />
+        <LimitNote id={unitNoteId} testId={`unit-limit-${id}`} value={unit} limit={ORDER_SHEET_LIMITS.unit} compact />
       </div>
 
       <div className="order-3 min-w-0 self-center text-sm text-gray-600 lg:order-none lg:self-start lg:py-2.5">

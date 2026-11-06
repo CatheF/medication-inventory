@@ -92,7 +92,7 @@ export function InventoryToolbar({ view, categories, counts, onChange, searchRef
               type="search"
               value={view.search}
               onChange={(event) => onChange({ search: event.target.value })}
-              placeholder="Name, barcode or supplier no."
+              placeholder="Name, barcode or supplier order no."
               autoComplete="off"
               spellCheck={false}
               maxLength={SEARCH_MAX_LENGTH}

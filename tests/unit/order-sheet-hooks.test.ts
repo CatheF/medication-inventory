@@ -68,7 +68,10 @@ function installFetch() {
         },
       };
       calls.push(call);
-      init?.signal?.addEventListener("abort", () => call.reject(new DOMException("The operation was aborted.", "AbortError")));
+      // Like a browser: an aborted request fails with the reason the signal was aborted with (a TimeoutError for AbortSignal.timeout).
+      init?.signal?.addEventListener("abort", () =>
+        call.reject(init.signal?.reason instanceof DOMException ? init.signal.reason : new DOMException("The operation was aborted.", "AbortError"))
+      );
     });
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -374,5 +377,159 @@ describe("refresh (Refresh button and coming back to the tab)", () => {
     await answer(net.pending("/api/medications")[0], 200, [med(1, "Fresh")]);
     expect(view.latest.meds.state).toMatchObject({ status: "ready", data: [{ name: "Fresh" }] });
     await settle();
+  });
+});
+
+// ── A request that never answers ──────────────────────────────────────────────────────────────────────────────────
+// The Home page and Admin give up on a read after 30 seconds (AbortSignal.timeout) and show an error with Retry. A paused or
+// half-reachable database is exactly the case where a request is accepted and then never answered: without a limit the
+// Order sheet would say "Loading the inventory…" for ever, with no Retry.
+describe("a request that never answers (30-second limit)", () => {
+  /** AbortSignal.timeout under the test's control: it records the delay it was asked for and runs out only when told to. */
+  function installTimeLimits() {
+    const limits: Array<{ ms: number; signal: AbortSignal; expire(): void }> = [];
+    vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      const controller = new AbortController();
+      limits.push({
+        ms,
+        signal: controller.signal,
+        expire: () => controller.abort(new DOMException("The operation timed out.", "TimeoutError")),
+      });
+      return controller.signal;
+    });
+    return {
+      limits,
+      /** The time limit of one request runs out (what the browser does 30 seconds after the request was sent). */
+      async expire(call: Call | undefined) {
+        const limit = limits.find((candidate) => candidate.signal === call?.signal);
+        expect(limit, `${call?.url ?? "the request"} was sent with a time limit`).toBeDefined();
+        await act(async () => {
+          limit?.expire();
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+      },
+    };
+  }
+
+  const TOO_SLOW_INVENTORY = "The server took too long to answer while loading the inventory.";
+
+  it("both lists are read with a 30-second time limit, ONE limit per request even though React Strict Mode runs the effect twice", async () => {
+    const time = installTimeLimits();
+    const net = installFetch();
+    const view = mountProbe({ strict: true });
+    await view.render();
+
+    expect(net.calls).toHaveLength(2);
+    for (const call of net.calls) expect(call.signal, `${call.url} carries a time limit`).toBeInstanceOf(AbortSignal);
+    expect(time.limits.map((limit) => limit.ms)).toEqual([30_000, 30_000]);
+    for (const call of net.calls) expect(call.signal?.aborted ?? false, `${call.url} is not aborted by React`).toBe(false);
+  });
+
+  it("a request nobody answers ends in the plain 'took too long' error (not a spinner for ever), the categories are unaffected, and Retry asks once more and recovers", async () => {
+    const time = installTimeLimits();
+    const net = installFetch();
+    const view = mountProbe({ strict: true });
+    await view.render();
+    expect(view.latest.meds.state).toEqual({ status: "loading" });
+
+    await time.expire(net.pending("/api/medications")[0]);
+    expect(view.latest.meds.state).toEqual({ status: "error", message: TOO_SLOW_INVENTORY });
+    expect(view.latest.cats.state).toEqual({ status: "loading" }); // its own request, its own limit
+
+    await act(async () => {
+      view.latest.meds.reload();
+    });
+    expect(view.latest.meds.state).toEqual({ status: "loading" });
+    expect(net.urls().filter((url) => url === "/api/medications")).toHaveLength(2);
+    await answer(net.pending("/api/medications")[0], 200, [med(4)]);
+    expect(view.latest.meds.state).toMatchObject({ status: "ready", data: [{ id: 4 }] });
+    expect(net.urls().filter((url) => url === "/api/medications")).toHaveLength(2); // Retry made exactly one more request
+  });
+
+  it("a categories list nobody answers ends in an error as well, so the page stops waiting for category names", async () => {
+    const time = installTimeLimits();
+    const net = installFetch();
+    const view = mountProbe({ strict: true });
+    await view.render();
+    await time.expire(net.pending("/api/categories")[0]);
+    expect(view.latest.cats.state).toEqual({ status: "error", message: "The server took too long to answer while loading the category list." });
+    expect(view.latest.meds.state).toEqual({ status: "loading" });
+  });
+
+  it("an answer whose body never finishes arriving is a timeout too (not 'data this page doesn’t understand')", async () => {
+    const time = installTimeLimits();
+    const net = installFetch();
+    const view = mountProbe({ strict: true });
+    await view.render();
+    const call = net.pending("/api/medications")[0];
+    await act(async () => {
+      call.resolve({
+        ok: true,
+        status: 200,
+        // The headers came, the body stalls; the browser fails the read when the signal runs out.
+        json: () =>
+          new Promise<unknown>((_resolve, reject) => {
+            call.signal?.addEventListener("abort", () => reject(call.signal?.reason));
+          }),
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(view.latest.meds.state).toEqual({ status: "loading" });
+    await time.expire(call);
+    expect(view.latest.meds.state).toEqual({ status: "error", message: TOO_SLOW_INVENTORY });
+  });
+
+  it("a request the browser aborts (AbortError) is an error too: the page never keeps loading", async () => {
+    installTimeLimits();
+    const net = installFetch();
+    const view = mountProbe({ strict: true });
+    await view.render();
+    await act(async () => {
+      net.pending("/api/medications")[0].reject(new DOMException("The user aborted a request.", "AbortError"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(view.latest.meds.state).toEqual({ status: "error", message: TOO_SLOW_INVENTORY });
+  });
+
+  it("where the browser has no AbortSignal.timeout (an old browser) the request is simply sent without a limit, like on the Home page, and everything else works", async () => {
+    const original = Object.getOwnPropertyDescriptor(AbortSignal, "timeout");
+    Reflect.deleteProperty(AbortSignal, "timeout");
+    try {
+      expect("timeout" in AbortSignal).toBe(false);
+      const net = installFetch();
+      const view = mountProbe({ strict: true });
+      await view.render();
+      expect(net.calls).toHaveLength(2);
+      for (const call of net.calls) expect(call.signal ?? null, `${call.url} is sent without a time limit`).toBeNull();
+      await answer(net.pending("/api/medications")[0], 200, [med(1)]);
+      expect(view.latest.meds.state).toMatchObject({ status: "ready", data: [{ id: 1 }] });
+    } finally {
+      if (original) Object.defineProperty(AbortSignal, "timeout", original);
+    }
+  });
+
+  it("a refresh that runs out of time resolves false, keeps the list that is on screen and is no longer 'refreshing' (the Refresh button works again)", async () => {
+    const time = installTimeLimits();
+    const net = installFetch();
+    const view = mountProbe({ strict: true });
+    await view.render();
+    await answer(net.pending("/api/medications")[0], 200, [med(1, "Before")]);
+    await answer(net.pending("/api/categories")[0], 200, []);
+
+    let outcome: Promise<boolean> | undefined;
+    await act(async () => {
+      outcome = view.latest.meds.refresh();
+    });
+    expect(view.latest.meds.refreshing).toBe(true);
+    await time.expire(net.pending("/api/medications")[0]);
+    await expect(outcome).resolves.toBe(false);
+    expect(view.latest.meds.refreshing).toBe(false);
+    expect(view.latest.meds.state).toMatchObject({ status: "ready", data: [{ name: "Before" }] });
+
+    // and the next refresh is a fresh request with its own limit (it did not join the one that ran out)
+    await act(async () => {
+      void view.latest.meds.refresh();
+    });
+    expect(net.pending("/api/medications")).toHaveLength(1);
   });
 });

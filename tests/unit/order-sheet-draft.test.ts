@@ -15,7 +15,9 @@ import {
   isValidISODate,
   parseDraft,
   removeRow,
+  removeRows,
   rememberNames,
+  restoreRow,
   resolveDate,
   sanitizeDraft,
   serializeDraft,
@@ -205,11 +207,19 @@ describe("parseDraft never throws on garbage", () => {
     expect(Array.from(parsed.preparedBy)).toHaveLength(ORDER_SHEET_LIMITS.preparedBy);
     expect(Array.from(parsed.notes)).toHaveLength(ORDER_SHEET_LIMITS.notes);
     expect(parsed.notes.isWellFormed()).toBe(true);
-    expect(parsed.rows[0].qty).toBe("123456789");
+    expect(parsed.rows[0].qty).toBe("1234567890123"); // 13 digits: kept whole (it is shown with a message), never cut to a valid 9-digit number
     expect(parsed.rows[0].unit).toBe("u".repeat(ORDER_SHEET_LIMITS.unit));
     expect([ORDER_SHEET_LIMITS.title, ORDER_SHEET_LIMITS.preparedBy, ORDER_SHEET_LIMITS.notes, ORDER_SHEET_LIMITS.unit]).toEqual([
       120, 80, 1000, 40,
     ]);
+  });
+
+  it("keeps a stored quantity of more than 9 digits exactly as it was typed (the page explains it); only absurd lengths are cut", () => {
+    const stored = (qty: string) => parseDraft(JSON.stringify({ version: 1, rows: [{ id: 1, qty, unit: "" }] })).rows[0].qty;
+    expect(stored("999999999999")).toBe("999999999999");
+    expect(stored("0".repeat(30) + "12")).toBe("0".repeat(30) + "12");
+    expect(stored("9".repeat(500))).toBe("9".repeat(ORDER_SHEET_LIMITS.qtyTyped));
+    expect(ORDER_SHEET_LIMITS.qtyTyped).toBeGreaterThan(ORDER_SHEET_LIMITS.qtyInput);
   });
 
   it("survives a huge (but under the size guard) string field", () => {
@@ -382,11 +392,12 @@ describe("row operations", () => {
     expect(updateRow(d, 2, { qty: "3" }).rows.map((r) => r.id)).toEqual([1]);
   });
 
-  it("updateRow bounds the length like a maxLength would", () => {
+  it("updateRow bounds the unit like a maxLength would, but keeps a long quantity so the page can explain it", () => {
     const d = addRows(DEFAULT_DRAFT, [1]);
     const longTyped = updateRow(d, 1, { qty: "12345678901234", unit: "u".repeat(80) });
-    expect(longTyped.rows[0].qty).toBe("123456789");
+    expect(longTyped.rows[0].qty).toBe("12345678901234"); // not cut to 9 digits: that would turn a mistake into a valid, wrong quantity
     expect(longTyped.rows[0].unit).toBe("u".repeat(40));
+    expect(updateRow(d, 1, { qty: "7".repeat(300) }).rows[0].qty).toBe("7".repeat(ORDER_SHEET_LIMITS.qtyTyped));
   });
 
   it("clearRows removes the rows but keeps the typed options", () => {
@@ -771,6 +782,101 @@ describe("remembered item names (the optional `name` of a draft row)", () => {
     const text = serializeDraft(draftWith({ rows }));
     expect(text.length).toBeLessThan(200_000);
     expect(parseDraft(text).rows).toHaveLength(ORDER_SHEET_LIMITS.rows);
+  });
+});
+
+describe("putting rows back (Undo of a removal) and taking exactly some rows off (Undo of an Add all)", () => {
+  const A = { id: 1, qty: "12", unit: "boxes", name: "Alpha" };
+  const B = { id: 2, qty: "24", unit: "bottles", name: "Beta" };
+  const C = { id: 3, qty: "6", unit: "packs", name: "Gamma" };
+
+  it("restoreRow puts a removed row back at its place with its quantity, unit and remembered name", () => {
+    const before = draftWith({ rows: [A, B, C] });
+    const afterRemove = removeRow(before, B.id);
+    expect(afterRemove.rows.map((r) => r.id)).toEqual([1, 3]);
+    const restored = restoreRow(afterRemove, B, 1);
+    expect(restored.rows).toEqual([A, B, C]);
+    expect(restored).toEqual(before);
+  });
+
+  it("restoreRow keeps whatever was typed in other rows in the meantime", () => {
+    const afterRemove = removeRow(draftWith({ rows: [A, B, C] }), B.id);
+    const edited = updateRow(afterRemove, C.id, { qty: "99", unit: "cases" });
+    const restored = restoreRow(edited, B, 1);
+    expect(restored.rows).toEqual([A, B, { ...C, qty: "99", unit: "cases" }]);
+  });
+
+  it("restoreRow puts the first and the last row back where they were", () => {
+    const d = draftWith({ rows: [A, B, C] });
+    expect(restoreRow(removeRow(d, A.id), A, 0).rows).toEqual([A, B, C]);
+    expect(restoreRow(removeRow(d, C.id), C, 2).rows).toEqual([A, B, C]);
+  });
+
+  it("restoreRow clamps a position that no longer exists: too big appends, negative or not a number goes by the rules", () => {
+    const d = draftWith({ rows: [A] });
+    expect(restoreRow(d, B, 99).rows.map((r) => r.id)).toEqual([1, 2]);
+    expect(restoreRow(d, B, -4).rows.map((r) => r.id)).toEqual([2, 1]);
+    expect(restoreRow(d, B, Number.NaN).rows.map((r) => r.id)).toEqual([1, 2]);
+    expect(restoreRow(d, B, 0.5).rows.map((r) => r.id)).toEqual([1, 2]);
+    expect(restoreRow(draftWith(), B, 5).rows).toEqual([B]); // an emptied sheet
+  });
+
+  it("restoreRow never makes a second row for an item that is on the sheet again, and returns the SAME draft then", () => {
+    const d = draftWith({ rows: [A, { ...B, qty: "1", unit: "x" }] });
+    expect(restoreRow(d, B, 1)).toBe(d);
+    expect(d.rows).toHaveLength(2);
+  });
+
+  it("restoreRow stops at the row limit instead of growing past it", () => {
+    const full = draftWith({ rows: Array.from({ length: ORDER_SHEET_LIMITS.rows }, (_, i) => ({ id: i + 10, qty: "", unit: "" })) });
+    expect(restoreRow(full, B, 0)).toBe(full);
+  });
+
+  it("restoreRow ignores a row it cannot use (no valid id) and cleans lengths like every other way into the draft", () => {
+    const d = draftWith({ rows: [A] });
+    expect(restoreRow(d, { id: 0, qty: "1", unit: "" }, 0)).toBe(d);
+    expect(restoreRow(d, { id: 1.5, qty: "1", unit: "" }, 0)).toBe(d);
+    expect(restoreRow(d, null as unknown as typeof B, 0)).toBe(d);
+    const long = restoreRow(d, { id: 5, qty: "9".repeat(300), unit: "u".repeat(99), name: "N".repeat(400) }, 1).rows[1];
+    expect(long.qty).toHaveLength(ORDER_SHEET_LIMITS.qtyTyped);
+    expect(long.unit).toBe("u".repeat(ORDER_SHEET_LIMITS.unit));
+    expect(Array.from(long.name ?? "")).toHaveLength(ORDER_SHEET_LIMITS.name);
+  });
+
+  it("restoreRow never changes its input (works on a deeply frozen draft and row)", () => {
+    const frozen = deepFreeze(draftWith({ rows: [A, C] }));
+    const row = deepFreeze({ ...B });
+    expect(() => restoreRow(frozen, row, 1)).not.toThrow();
+    expect(restoreRow(frozen, row, 1).rows.map((r) => r.id)).toEqual([1, 2, 3]);
+  });
+
+  it("removeRows takes off exactly the listed rows and leaves the others, in order, with what was typed", () => {
+    const d = draftWith({ rows: [A, B, C], title: "Kept" });
+    const next = removeRows(d, [2, 3]);
+    expect(next.rows).toEqual([A]);
+    expect(next.title).toBe("Kept");
+    expect(next.rows[0]).toBe(d.rows[0]); // the row that stays is not re-created
+  });
+
+  it("removeRows ignores ids that are not on the sheet, repeated ids and junk, and returns the SAME draft when nothing matches", () => {
+    const d = draftWith({ rows: [A, B] });
+    expect(removeRows(d, [7, 8])).toBe(d);
+    expect(removeRows(d, [])).toBe(d);
+    expect(removeRows(d, undefined as unknown as number[])).toBe(d);
+    expect(removeRows(d, [2, 2, 2, Number.NaN, -1, "x" as unknown as number]).rows).toEqual([A]);
+  });
+
+  it("an Add all followed by removeRows of exactly what it added gives back the sheet as it was (typed values included)", () => {
+    const before = draftWith({ rows: [{ id: 1, qty: "5", unit: "box", name: "Alpha" }] });
+    const added = addRows(before, [1, 2, 3], new Map([[2, "Beta"], [3, "Gamma"]]));
+    const addedIds = added.rows.slice(before.rows.length).map((r) => r.id);
+    expect(addedIds).toEqual([2, 3]); // row 1 was already there: it is not part of the action
+    expect(removeRows(added, addedIds)).toEqual(before);
+  });
+
+  it("removeRows never changes its input", () => {
+    const frozen = deepFreeze(draftWith({ rows: [A, B, C] }));
+    expect(removeRows(frozen, [1]).rows.map((r) => r.id)).toEqual([2, 3]);
   });
 });
 

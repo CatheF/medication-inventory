@@ -84,8 +84,9 @@ function sanitizeRows(value: unknown): SheetRowInput[] {
     seen.add(id);
     const row: SheetRowInput = {
       id,
-      // Kept exactly as typed (even if it is not a valid quantity yet); only the length is bounded.
-      qty: typeof entry.qty === "string" ? clampText(entry.qty, ORDER_SHEET_LIMITS.qtyInput) : "",
+      // Kept exactly as typed (even if it is not a valid quantity yet, or has too many digits: the page says so); only an
+      // absurd length is cut.
+      qty: typeof entry.qty === "string" ? clampText(entry.qty, ORDER_SHEET_LIMITS.qtyTyped) : "",
       unit: typeof entry.unit === "string" ? clampText(entry.unit, ORDER_SHEET_LIMITS.unit) : "",
     };
     // A draft saved before names existed has none: the key is simply absent (never `name: undefined`).
@@ -210,6 +211,49 @@ export function removeRow(d: OrderDraft, id: number): OrderDraft {
   return { ...d, rows: d.rows.filter((row) => row.id !== id) };
 }
 
+/**
+ * Removes exactly the rows with these ids and leaves every other row as it is: in its place, with what was typed in it. Built for
+ * the Undo of an "Add all", where the ids are the ones that action added (rows that were on the sheet before it, and whatever was
+ * typed in them, stay). Ids that are not on the sheet, repeated ids and junk are ignored; when nothing matches, the SAME draft
+ * comes back.
+ */
+export function removeRows(d: OrderDraft, ids: readonly number[]): OrderDraft {
+  if (!isIterable(ids)) return d; // total: "no ids" removes nothing
+  const drop = new Set<number>();
+  for (const candidate of ids) {
+    const id = parseMedicationId(candidate);
+    if (id !== null) drop.add(id);
+  }
+  if (drop.size === 0) return d;
+  const rows = d.rows.filter((row) => !drop.has(row.id));
+  return rows.length === d.rows.length ? d : { ...d, rows };
+}
+
+/**
+ * Puts a removed row back at `index` (the place it had) with what was typed in it: quantity, unit and remembered name. Built for
+ * the Undo of a single Remove.
+ *  - An item that is on the sheet again by now is never added twice: the SAME draft comes back, so the caller can say so.
+ *  - A sheet that is full takes nothing more (the same draft comes back).
+ *  - A position that no longer exists is clamped (past the end: the end; below 0: the start); one that is not a whole number
+ *    goes to the end.
+ *  - Lengths are cleaned like every other way into the draft, and a row without a usable id is ignored.
+ * The other rows, and whatever was typed in them since the removal, are not touched.
+ */
+export function restoreRow(d: OrderDraft, row: SheetRowInput, index: number): OrderDraft {
+  if (!isRecord(row)) return d;
+  const id = parseMedicationId(row.id);
+  if (id === null || hasRow(d, id) || d.rows.length >= ORDER_SHEET_LIMITS.rows) return d;
+  const restored: SheetRowInput = {
+    id,
+    qty: typeof row.qty === "string" ? clampText(row.qty, ORDER_SHEET_LIMITS.qtyTyped) : "",
+    unit: typeof row.unit === "string" ? clampText(row.unit, ORDER_SHEET_LIMITS.unit) : "",
+  };
+  const name = cleanRowName(row.name);
+  if (name !== undefined) restored.name = name;
+  const at = Number.isInteger(index) ? Math.min(Math.max(index, 0), d.rows.length) : d.rows.length;
+  return { ...d, rows: [...d.rows.slice(0, at), restored, ...d.rows.slice(at)] };
+}
+
 /** Removes the row when it is on the sheet, otherwise adds it (remembering `name` when it is text). */
 export function toggleRow(d: OrderDraft, id: number, name?: string): OrderDraft {
   if (hasRow(d, id)) return removeRow(d, id);
@@ -220,7 +264,9 @@ export function toggleRow(d: OrderDraft, id: number, name?: string): OrderDraft 
 }
 
 /**
- * Stores what staff typed for one row. Only the length is bounded (like a maxLength); nothing is interpreted.
+ * Stores what staff typed for one row. Only the length is bounded; nothing is interpreted. The unit is held to the length its box
+ * allows. A quantity is kept as typed even when it has more digits than any valid one (the page explains it next to the box):
+ * cutting it down to nine digits would turn a mistake into a different, valid quantity without a word.
  * The row's id and remembered name are never changed by it (a patch can only carry `qty` and `unit`).
  */
 export function updateRow(
@@ -232,7 +278,7 @@ export function updateRow(
   let changed = false;
   const rows = d.rows.map((row) => {
     if (row.id !== id) return row;
-    const qty = typeof patch.qty === "string" ? clampText(patch.qty, ORDER_SHEET_LIMITS.qtyInput) : row.qty;
+    const qty = typeof patch.qty === "string" ? clampText(patch.qty, ORDER_SHEET_LIMITS.qtyTyped) : row.qty;
     const unit = typeof patch.unit === "string" ? clampText(patch.unit, ORDER_SHEET_LIMITS.unit) : row.unit;
     if (qty === row.qty && unit === row.unit) return row;
     changed = true;

@@ -8,10 +8,11 @@ import { Notice } from "@/app/components/Notice";
 import type { Medication } from "@/lib/db";
 import { isLowStock, sortItems } from "@/lib/inventory-view";
 import { buildSheet } from "@/lib/order-sheet/build";
-import { rememberNames, resolveDate, updateRow } from "@/lib/order-sheet/draft";
+import { addRows, hasRow, rememberNames, removeRow, removeRows, resolveDate, restoreRow, updateRow } from "@/lib/order-sheet/draft";
 import { ORDER_SHEET_LIMITS } from "@/lib/order-sheet/types";
-import type { PaperSize, SheetRow } from "@/lib/order-sheet/types";
+import type { PaperSize, SheetRow, SheetRowInput } from "@/lib/order-sheet/types";
 import { useOrderDraft } from "@/lib/order-sheet/use-order-draft";
+import { ignoreHeldEnter } from "@/app/components/inventory/helpers";
 import { AddItems } from "./AddItems";
 import type { Announcement } from "./AddItems";
 import { InventoryFreshness } from "./InventoryFreshness";
@@ -20,7 +21,8 @@ import { PrintSheet, PrintUnavailable } from "./PrintSheet";
 import { SheetDetails } from "./SheetDetails";
 import { SheetLoadError } from "./SheetLoadError";
 import { SheetRows } from "./SheetRows";
-import { displayName, pageStyleText, pluralize, printDocumentTitle } from "./format";
+import { UndoLine } from "./UndoLine";
+import { QTY_RANGE_WORDS, displayName, pageStyleText, pluralize, printDocumentTitle } from "./format";
 import type { CategoryList } from "./format";
 import { useCategories, useMedications, useToday } from "./hooks";
 import { InfoIcon, PlusIcon, SpinnerIcon, TrashIcon, WarnIcon } from "./icons";
@@ -41,16 +43,37 @@ const FLASH_MS = 2400;
 /** How long the screen-reader message about a manual refresh stays in the page. */
 const REFRESH_NOTE_MS = 6000;
 
+/**
+ * What one press of Undo does. There is ONE level: the most recent "Add all low-stock items" or Remove; a newer action replaces
+ * it, and it is gone once used. `added` takes off exactly the rows that action put on the sheet (rows that were there before it,
+ * and what was typed in them, stay). `removed` puts one row back where it was, with its quantity, unit and remembered name.
+ */
+type UndoStep =
+  | { kind: "added"; ids: readonly number[] }
+  | { kind: "removed"; row: SheetRowInput; index: number; name: string };
+
+/**
+ * The message under "Add all low-stock items" and whether it carries Undo / Dismiss. The rules for when Undo stops being offered are
+ * the Inventory tab's: it ends when it is used, dismissed or replaced by a newer action, when the sheet is cleared and when an item
+ * is added by hand; typing a quantity does not end it and there is no timer. `reveal` scrolls the message into view (an "Add all"
+ * inserts its rows ABOVE the button, so the message would otherwise be far below the screen).
+ */
+type StatusLine = { text: string; tick: number; undo: UndoStep | null; dismissable: boolean; reveal: boolean };
+const NO_LINE: StatusLine = { text: "", tick: 0, undo: null, dismissable: false, reveal: false };
+
 export default function OrderSheetPage() {
-  const { draft, update, add, remove, clear, has, count, storage } = useOrderDraft();
+  const { draft, update, add, clear, has, count, storage } = useOrderDraft();
   const medications = useMedications();
   const categoriesLoad = useCategories();
   const today = useToday();
   const mounted = today !== "";
 
   const [announcement, setAnnouncement] = useState<Announcement>({ text: "", tick: 0 });
-  // The result of "Add all low-stock items" has its own message, shown right under that button (see handleAddLowStock).
-  const [bulkNote, setBulkNote] = useState<Announcement>({ text: "", tick: 0 });
+  // The result of "Add all low-stock items" and of Remove has its own message, shown right under that button (see UndoLine).
+  const [line, setLine] = useState<StatusLine>(NO_LINE);
+  // The same message, readable from an event handler without waiting for a render: Undo must act exactly once, and "is an offer
+  // on screen" decides where an explanation goes. Only ever written by setStatusLine.
+  const lineRef = useRef<StatusLine>(NO_LINE);
   // The result of the Refresh button (automatic refreshes stay quiet). A failed refresh is remembered as the load time of
   // the data that is still on screen, so the failure note disappears by itself as soon as newer data arrives.
   const [refreshNote, setRefreshNote] = useState<Announcement>({ text: "", tick: 0 });
@@ -60,7 +83,8 @@ export default function OrderSheetPage() {
   const listRef = useRef<HTMLUListElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const clearButtonRef = useRef<HTMLButtonElement>(null);
-  const bulkNoteRef = useRef<HTMLParagraphElement>(null);
+  const addLowStockRef = useRef<HTMLButtonElement>(null);
+  const statusRef = useRef<HTMLDivElement>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const loadingRef = useRef<HTMLDivElement>(null);
   const loadErrorRef = useRef<HTMLDivElement>(null);
@@ -70,7 +94,16 @@ export default function OrderSheetPage() {
   const refreshNoteTimer = useRef<number | null>(null);
 
   const announce = useCallback((text: string) => setAnnouncement((previous) => ({ text, tick: previous.tick + 1 })), []);
-  const announceBulk = useCallback((text: string) => setBulkNote((previous) => ({ text, tick: previous.tick + 1 })), []);
+  /** Shows a message under "Add all low-stock items" (null: nothing to say, which also ends any Undo that was on offer). */
+  const setStatusLine = useCallback((next: Pick<StatusLine, "text" | "undo" | "dismissable"> & { reveal?: boolean } | null) => {
+    const previous = lineRef.current;
+    const written: StatusLine =
+      next === null
+        ? { ...NO_LINE, tick: previous.tick }
+        : { text: next.text, undo: next.undo, dismissable: next.dismissable, reveal: next.reveal === true, tick: previous.tick + 1 };
+    lineRef.current = written;
+    setLine(written);
+  }, []);
 
   // ── What the page knows ────────────────────────────────────────────────────────────────────────────────────────
   // The rows are only listed once the page has mounted (the first client render shows the empty draft, then the stored
@@ -111,7 +144,7 @@ export default function OrderSheetPage() {
   else if (sheet.rows.length === 0) {
     disabledReason = "None of the items on the sheet are in the inventory any more. Remove them, then add items to print or download.";
   } else if (invalidCount > 0) {
-    disabledReason = `Fix the order quantity on ${invalidCount} ${pluralize(invalidCount, "row", "rows")} first: digits only.`;
+    disabledReason = `Fix the order quantity on ${invalidCount} ${pluralize(invalidCount, "row", "rows")} first: digits only, ${QTY_RANGE_WORDS}.`;
   }
 
   // The browser suggests the page title as the file name for "Save as PDF", so give it a useful one while printing. Only when
@@ -176,12 +209,13 @@ export default function OrderSheetPage() {
   }, [loadStatus]);
 
   // The "Add all low-stock items" rows are inserted ABOVE the button, which pushes the button (and the message under it)
-  // far below the screen on a long sheet. Bring the message back into view so the result is seen.
+  // far below the screen on a long sheet. Bring the message back into view so the result is seen. Only that message asks for it:
+  // a Remove must not move the page away from the row the person is working on.
   useEffect(() => {
-    if (bulkNote.tick === 0) return;
-    const frame = window.requestAnimationFrame(() => bulkNoteRef.current?.scrollIntoView({ block: "nearest" }));
+    if (!line.reveal) return;
+    const frame = window.requestAnimationFrame(() => statusRef.current?.scrollIntoView({ block: "nearest" }));
     return () => window.cancelAnimationFrame(frame);
-  }, [bulkNote]);
+  }, [line]);
 
   // ── Actions ────────────────────────────────────────────────────────────────────────────────────────────────────
   const retryLoad = () => {
@@ -235,15 +269,25 @@ export default function OrderSheetPage() {
       return;
     }
     add([item.id], new Map([[item.id, name]])); // the row remembers the item's name
+    setStatusLine(null); // an item added by hand ends the Undo that was on offer (the Inventory tab's rule for an item ticked by hand)
     announce(`Added ${name}. ${count + 1} ${pluralize(count + 1, "item", "items")} on the sheet.`);
   };
 
+  // A press of "Add all low-stock items" that changed nothing says why. An Undo that is on screen is still exact and must not be
+  // lost to a double tap, so then the reason goes to the line under the search box; with nothing on offer it goes under the button.
+  const explainNothingChanged = (text: string) => {
+    if (lineRef.current.undo !== null) announce(text);
+    else setStatusLine({ text, undo: null, dismissable: false });
+  };
+
   // The result is written under the "Add all low-stock items" button (not under the search box at the top), so it is
-  // seen where the person pressed, however long the sheet is.
+  // seen where the person pressed, however long the sheet is. The rows this action adds are read INSIDE the update, so "which rows
+  // did it add" stays exact even when another tab changed the sheet a moment ago: addRows appends, so the new rows are the ones
+  // after the old length. Undo takes off exactly those.
   const handleAddLowStock = () => {
     const low = items.filter(isLowStock);
     if (low.length === 0) {
-      announceBulk("No items are at or below their low-stock level.");
+      explainNothingChanged("No items are at or below their low-stock level.");
       return;
     }
     const notOnSheet = sortItems(
@@ -251,34 +295,59 @@ export default function OrderSheetPage() {
       "name",
       []
     );
+    const alreadyOnSheet = `All ${low.length} low-stock ${pluralize(low.length, "item is", "items are")} already on the sheet. Nothing was added.`;
     if (notOnSheet.length === 0) {
-      announceBulk(`All ${low.length} low-stock ${pluralize(low.length, "item is", "items are")} already on the sheet. Nothing was added.`);
+      explainNothingChanged(alreadyOnSheet);
       return;
     }
     const room = Math.max(0, ORDER_SHEET_LIMITS.rows - count);
     const batch = notOnSheet.slice(0, room);
     if (batch.length === 0) {
-      announceBulk(`The sheet is full (${ORDER_SHEET_LIMITS.rows} items). Nothing was added.`);
+      explainNothingChanged(`The sheet is full (${ORDER_SHEET_LIMITS.rows} items). Nothing was added.`);
       return;
     }
-    add(
-      batch.map((item) => item.id),
-      new Map(batch.map((item) => [item.id, displayName(item)]))
-    );
+    const names = new Map(batch.map((item) => [item.id, displayName(item)]));
+    const result: { added: number[] } = { added: [] };
+    update((current) => {
+      const next = addRows(current, batch.map((item) => item.id), names);
+      result.added = next.rows.slice(current.rows.length).map((row) => row.id);
+      return next;
+    });
+    if (result.added.length === 0) {
+      explainNothingChanged(alreadyOnSheet); // another tab put them on the sheet a moment ago
+      return;
+    }
+    const added = result.added.length;
     const alreadyThere = low.length - notOnSheet.length;
-    const skipped = notOnSheet.length - batch.length;
-    let text = `Added ${batch.length} low-stock ${pluralize(batch.length, "item", "items")}`;
+    const skipped = notOnSheet.length - added;
+    let text = `Added ${added} low-stock ${pluralize(added, "item", "items")}`;
     if (alreadyThere > 0) text += ` (${alreadyThere} already on the sheet)`;
     text += skipped > 0 ? `. The sheet is full (${ORDER_SHEET_LIMITS.rows} items), so ${skipped} could not be added.` : ". Order quantities are left empty.";
-    announceBulk(text);
+    setStatusLine({ text, undo: { kind: "added", ids: result.added }, dismissable: true, reveal: true });
   };
 
   const handleRemove = useCallback(
     (id: number, name: string) => {
       const rows = Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-row-id]") ?? []);
       const index = rows.findIndex((row) => row.dataset.rowId === String(id));
-      remove(id);
-      announce(`Removed ${name} from the sheet. ${count - 1} ${pluralize(count - 1, "item", "items")} left.`);
+      // The row is read from the latest draft, inside the update, so Undo puts back exactly what was typed in it at this moment.
+      const result: { row: SheetRowInput | null; position: number; left: number } = { row: null, position: -1, left: 0 };
+      update((current) => {
+        const position = current.rows.findIndex((row) => row.id === id);
+        if (position < 0) return current; // already gone (another tab removed it): nothing to take off, nothing to offer back
+        const next = removeRow(current, id);
+        result.row = current.rows[position];
+        result.position = position;
+        result.left = next.rows.length;
+        return next;
+      });
+      if (result.row !== null) {
+        setStatusLine({
+          text: `Removed ${name}. ${result.left} ${pluralize(result.left, "item", "items")} left.`,
+          undo: { kind: "removed", row: result.row, index: result.position, name },
+          dismissable: true,
+        });
+      }
       // Put keyboard focus on the next row's Remove button (or the search box when the sheet is now empty).
       window.setTimeout(() => {
         const remaining = Array.from(listRef.current?.querySelectorAll<HTMLElement>("[data-row-id]") ?? []);
@@ -287,8 +356,66 @@ export default function OrderSheetPage() {
         target?.focus();
       }, 0);
     },
-    [announce, count, remove]
+    [setStatusLine, update]
   );
+
+  // Undo of the latest "Add all" or Remove. The offer is read from the ref and used up before anything else can run, so a second
+  // press (a double-click, a repeated key) can never undo twice; what was typed in other rows is never touched.
+  const handleUndo = () => {
+    const step = lineRef.current.undo;
+    if (step === null) return;
+    if (step.kind === "added") {
+      const result = { removed: 0 };
+      update((current) => {
+        const next = removeRows(current, step.ids);
+        result.removed = current.rows.length - next.rows.length;
+        return next;
+      });
+      setStatusLine({
+        text:
+          result.removed > 0
+            ? `Undid adding ${result.removed} ${pluralize(result.removed, "item", "items")}.`
+            : "Nothing to undo: those items are no longer on the sheet.",
+        undo: null,
+        dismissable: true,
+      });
+      return;
+    }
+    const result = { onSheet: false, restored: false, total: 0 };
+    update((current) => {
+      if (hasRow(current, step.row.id)) {
+        result.onSheet = true;
+        return current;
+      }
+      const next = restoreRow(current, step.row, step.index);
+      result.restored = next !== current;
+      result.total = next.rows.length;
+      return next;
+    });
+    if (result.restored) {
+      setStatusLine({
+        text: `Put ${step.name} back on the sheet. ${result.total} ${pluralize(result.total, "item", "items")} on the sheet.`,
+        undo: null,
+        dismissable: true,
+      });
+    } else if (result.onSheet) {
+      setStatusLine({ text: `Nothing to undo: ${step.name} is already on the sheet.`, undo: null, dismissable: true });
+    } else {
+      // The sheet filled up meanwhile (another tab), so the row cannot be put back. Like every Undo, this one is used up: the offer
+      // cannot wait for room, because removing an item would replace it with that removal's own Undo.
+      setStatusLine({
+        text: `The sheet is full (${ORDER_SHEET_LIMITS.rows} items), so ${step.name} could not be put back.`,
+        undo: null,
+        dismissable: true,
+      });
+    }
+  };
+
+  const handleDismissLine = () => {
+    // The Dismiss button goes away with the message: keep keyboard focus on the button the message belongs to.
+    addLowStockRef.current?.focus();
+    setStatusLine(null);
+  };
 
   const handleQty = useCallback((id: number, qty: string) => update((d) => updateRow(d, id, { qty })), [update]);
   const handleUnit = useCallback((id: number, unit: string) => update((d) => updateRow(d, id, { unit })), [update]);
@@ -303,7 +430,7 @@ export default function OrderSheetPage() {
   const confirmClear = () => {
     clear();
     setConfirmingClear(false);
-    setBulkNote({ text: "", tick: 0 }); // "Added 27 low-stock items" is no longer true of an empty sheet
+    setStatusLine(null); // "Added 27 low-stock items" is no longer true of an empty sheet, and there is nothing left to undo
     announce("Sheet cleared. No items on the sheet.");
     searchRef.current?.focus();
   };
@@ -378,14 +505,15 @@ export default function OrderSheetPage() {
                 ) : null}
               </div>
 
-              {/* Static card (not a live region): "Sheet cleared" and "Removed … 0 items left" are announced by the status line of
-                  the search box below it, so the card itself says nothing when it appears. */}
+              {/* Static card (not a live region): "Sheet cleared" is announced by the status line of the search box below it and
+                  "Removed … 0 items left" by the message under "Add all low-stock items", so the card itself says nothing when it
+                  appears. */}
               {count === 0 ? (
                 <EmptyStateCard
                   testId="sheet-empty"
                   icon="cart"
                   title="No items on the order sheet yet"
-                  description="Pick items on the Inventory tab, or find one here by name, barcode or supplier number."
+                  description="Pick items on the Inventory tab, or find one here by name, barcode or supplier order number."
                   primaryAction={{ label: "Pick items on the Inventory tab", href: INVENTORY_TAB_HREF, testId: "empty-inventory-link" }}
                   secondaryAction={{ label: "Find an item here", onClick: findItemHere, testId: "empty-find-item" }}
                   className="mt-4"
@@ -431,7 +559,8 @@ export default function OrderSheetPage() {
                           <strong>
                             {invalidCount} {pluralize(invalidCount, "row has", "rows have")} an order quantity that isn’t valid.
                           </strong>{" "}
-                          Use digits only, or leave it blank. Print and the Excel file are unavailable until this is fixed.
+                          Use digits only ({QTY_RANGE_WORDS}), or leave it blank. Print and the Excel file are unavailable until this is
+                          fixed.
                         </NoteLine>
                       ) : null}
                       {noSupplierCount > 0 ? (
@@ -439,7 +568,7 @@ export default function OrderSheetPage() {
                           <strong>
                             {noSupplierCount} {pluralize(noSupplierCount, "item has", "items have")} no supplier order number.
                           </strong>{" "}
-                          They print as “—”. Add the number on the{" "}
+                          {pluralize(noSupplierCount, "It prints", "They print")} as “—”. Add the number on the{" "}
                           <Link href="/admin" className={TEXT_LINK}>
                             Admin
                           </Link>{" "}
@@ -451,7 +580,7 @@ export default function OrderSheetPage() {
                           <strong>
                             {noQtyCount} {pluralize(noQtyCount, "row has", "rows have")} no order quantity yet.
                           </strong>{" "}
-                          They print with an empty box to fill in by hand.
+                          {pluralize(noQtyCount, "It prints", "They print")} with an empty box to fill in by hand.
                         </NoteLine>
                       ) : null}
                     </ul>
@@ -461,19 +590,28 @@ export default function OrderSheetPage() {
 
               <div className="mt-6 flex flex-col gap-4 border-t border-gray-200 pt-5 sm:flex-row sm:items-start sm:justify-between">
                 <div className="max-w-xl">
-                  <button type="button" data-testid="add-low-stock" onClick={handleAddLowStock} className={BTN_SECONDARY}>
+                  <button
+                    ref={addLowStockRef}
+                    type="button"
+                    data-testid="add-low-stock"
+                    onKeyDown={ignoreHeldEnter}
+                    onClick={handleAddLowStock}
+                    className={BTN_SECONDARY}
+                  >
                     <PlusIcon className="h-4 w-4" />
                     Add all low-stock items
                   </button>
-                  {/* Always mounted, so screen readers announce the text when it appears; invisible until there is a result. */}
-                  <p
-                    ref={bulkNoteRef}
-                    role="status"
-                    data-testid="low-stock-status"
-                    className={bulkNote.text !== "" ? "mt-2 scroll-mb-10 text-sm font-medium text-gray-900" : "sr-only"}
-                  >
-                    <span key={bulkNote.tick}>{bulkNote.text}</span>
-                  </p>
+                  {/* The result of the latest "Add all" or Remove, with Undo and Dismiss. The message is a live region that is always
+                      in the page; it is invisible until there is a result. */}
+                  <UndoLine
+                    text={line.text}
+                    tick={line.tick}
+                    canUndo={line.undo !== null}
+                    canDismiss={line.dismissable}
+                    rootRef={statusRef}
+                    onUndo={handleUndo}
+                    onDismiss={handleDismissLine}
+                  />
                   <p className={HELP}>
                     Optional shortcut. Adds every item at or below its low-stock level (including out of stock) that is not already
                     on the sheet. Nothing is added unless you press this button.

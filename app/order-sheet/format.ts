@@ -2,7 +2,7 @@
 
 import type { Category, Medication } from "@/lib/db";
 import { sameId } from "@/lib/ids";
-import { normalizeQty } from "@/lib/order-sheet/build";
+import { MAX_QTY_TEXT, isQtyTooLarge, normalizeQty } from "@/lib/order-sheet/build";
 import { MAX_SHEET_YEAR, MIN_SHEET_YEAR, isValidISODate } from "@/lib/order-sheet/draft";
 import type { SheetOptions } from "@/lib/order-sheet/types";
 
@@ -49,12 +49,18 @@ export function categoryLabel(item: Pick<Medication, "category_id">, list: Categ
  */
 export const INVALID_QTY_PRINT_NOTE = "Some quantities are not valid numbers (marked ?). Fix them before using this sheet.";
 
+/** "1 to <largest quantity>": the range of a valid order quantity, for the notes that say a quantity is not valid. */
+export const QTY_RANGE_WORDS = `1 to ${MAX_QTY_TEXT}`;
+
 /**
  * Explains why a typed order quantity is not valid (null when it is valid or blank). The text is never changed
  * for the person: this only describes the problem. normalizeQty() is the rule; this only words it.
+ * A number that is only digits but longer than any valid quantity is called too large and names the limit: telling the person to
+ * "use digits only" would be wrong, and the box keeps every digit that was pasted instead of cutting it down to a valid number.
  */
 export function qtyProblem(typed: string): string | null {
   if (normalizeQty(typed).ok) return null;
+  if (isQtyTooLarge(typed)) return `Too large. Enter ${MAX_QTY_TEXT} or less.`;
   return /^[\s0]+$/.test(typed) ? "Enter 1 or more, or leave blank." : "Digits only, for example 12.";
 }
 

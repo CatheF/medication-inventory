@@ -19,27 +19,51 @@ export const STALE_AFTER_MS = 30_000;
 const NETWORK_MESSAGE = "Can’t reach the server. Check your internet connection and try again.";
 const UNEXPECTED_MESSAGE = "The server sent data this page doesn’t understand. Try again.";
 
+/**
+ * How long a read may take before the page gives up and shows the error with Retry: the same 30 seconds the Home page and Admin
+ * use. A paused or half-reachable database is the case where a request is accepted and then never answered; without a limit the
+ * page would say "Loading the inventory…" for ever, with no way out.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 type FetchOutcome = { ok: true; data: unknown } | { ok: false; message: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/** A fresh time limit for ONE request (never shared: a limit that has run out stays out). Undefined where the browser has none. */
+function timeLimit(): AbortSignal | undefined {
+  return typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(REQUEST_TIMEOUT_MS) : undefined;
+}
+
+/** True for what a request fails with when its time limit runs out (TimeoutError) or the browser stops it (AbortError). */
+function isTimeoutError(error: unknown): boolean {
+  const name = typeof error === "object" && error !== null && "name" in error ? error.name : null;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
 /**
  * Fetches JSON. Failures become a plain-language message (the server's own `error` text when it sent one). Never rejects.
- * The request is never aborted: a request that is no longer wanted is simply ignored when it answers (see useLoaded).
+ * `noun` says what is being loaded ("inventory", "category list"), so the message for a request that ran out of time is the same
+ * one the Home page and Admin show.
+ * The only abort is that time limit: a request that is no longer wanted is simply ignored when it answers (see useLoaded).
  */
-async function fetchJson(url: string): Promise<FetchOutcome> {
+async function fetchJson(url: string, noun: string): Promise<FetchOutcome> {
+  const tooSlow: FetchOutcome = { ok: false, message: `The server took too long to answer while loading the ${noun}.` };
   let response: Response;
   try {
-    response = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" } });
-  } catch {
-    return { ok: false, message: NETWORK_MESSAGE };
+    response = await fetch(url, { cache: "no-store", headers: { Accept: "application/json" }, signal: timeLimit() });
+  } catch (error) {
+    return isTimeoutError(error) ? tooSlow : { ok: false, message: NETWORK_MESSAGE };
   }
   let body: unknown = null;
   try {
     body = await response.json();
-  } catch {
+  } catch (error) {
+    // The answer began and then stopped coming: the same time limit covers reading it, and that is not "data this page
+    // doesn’t understand".
+    if (isTimeoutError(error)) return tooSlow;
     body = null;
   }
   if (!response.ok) {
@@ -72,7 +96,7 @@ function toList<T>(data: unknown, guard: (entry: unknown) => entry is T): T[] | 
   return entries.every(guard) ? (entries as T[]) : null;
 }
 
-function useLoaded<T>(url: string, guard: (entry: unknown) => entry is T) {
+function useLoaded<T>(url: string, guard: (entry: unknown) => entry is T, noun: string) {
   const [state, setState] = useState<Loaded<T[]>>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
@@ -97,7 +121,7 @@ function useLoaded<T>(url: string, guard: (entry: unknown) => entry is T) {
     const key = `${attempt}\u0000${url}`;
     let entry = loading.current;
     if (entry === null || entry.key !== key) {
-      const started = { key, request: fetchJson(url) };
+      const started = { key, request: fetchJson(url, noun) };
       loading.current = started;
       void started.request.then(() => {
         if (loading.current === started) loading.current = null;
@@ -116,7 +140,7 @@ function useLoaded<T>(url: string, guard: (entry: unknown) => entry is T) {
     return () => {
       waiting = false;
     };
-  }, [url, guard, attempt]);
+  }, [url, guard, noun, attempt]);
 
   /** Shows the loading state again and fetches again. */
   const reload = useCallback(() => {
@@ -134,7 +158,7 @@ function useLoaded<T>(url: string, guard: (entry: unknown) => entry is T) {
     const mine = newest.current;
     setRefreshing(true);
     const run = (async () => {
-      const outcome = await fetchJson(url);
+      const outcome = await fetchJson(url, noun);
       const list = outcome.ok ? toList(outcome.data, guard) : null;
       if (list && mine === newest.current) setState({ status: "ready", data: list, loadedAt: Date.now() });
       return list !== null;
@@ -144,7 +168,7 @@ function useLoaded<T>(url: string, guard: (entry: unknown) => entry is T) {
     });
     running.current = run;
     return run;
-  }, [url, guard]);
+  }, [url, guard, noun]);
 
   return { state, reload, refresh, refreshing };
 }
@@ -177,14 +201,14 @@ function useRefreshOnReturn(enabled: boolean, loadedAt: number | null, refresh: 
 }
 
 export function useMedications() {
-  const loaded = useLoaded<Medication>("/api/medications", isMedication);
+  const loaded = useLoaded<Medication>("/api/medications", isMedication, "inventory");
   const ready = loaded.state.status === "ready";
   useRefreshOnReturn(ready, loaded.state.status === "ready" ? loaded.state.loadedAt : null, loaded.refresh);
   return loaded;
 }
 
 export function useCategories() {
-  return useLoaded<Category>("/api/categories", isCategory);
+  return useLoaded<Category>("/api/categories", isCategory, "category list");
 }
 
 // ── "Today" and "has the page mounted" ───────────────────────────────────────────────────────────────────────────

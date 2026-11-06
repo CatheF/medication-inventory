@@ -1,6 +1,9 @@
+import fs from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import type { Medication } from "@/lib/db";
-import { buildSheet, clampText, exceedsLength, normalizeQty, normalizeUnit } from "@/lib/order-sheet/build";
+import { MAX_QTY_TEXT, buildSheet, clampText, exceedsLength, isQtyTooLarge, normalizeQty, normalizeUnit } from "@/lib/order-sheet/build";
+import * as limits from "@/lib/order-sheet/types";
 import type { SheetOptions, SheetRowInput } from "@/lib/order-sheet/types";
 import {
   FORMULA_NAMES,
@@ -392,5 +395,68 @@ describe("buildSheet", () => {
     // Long-name and missing-code items are included unchanged.
     expect(sheet.rows[2].name.length).toBeGreaterThan(100);
     expect(sheet.rows[3].nameIsFallback).toBe(true);
+  });
+});
+
+// ── One limit, written once ───────────────────────────────────────────────────────────────────────────────────────
+// The largest order quantity used to exist in three forms: an unused MAX_ORDER_QTY constant, ORDER_SHEET_LIMITS.qtyInput (its
+// number of digits) and the text "999,999,999" typed into the error message. The digit count is now the only source; every
+// text that names the limit is derived from it, so changing it can never leave a message that disagrees with the rule.
+describe("the order quantity limit is written once", () => {
+  const WORDS = "Order quantity must be a whole number from 1 to 999,999,999 (digits only), or left blank.";
+
+  it("MAX_ORDER_QTY (no users anywhere) is gone; the limit is the digit count ORDER_SHEET_LIMITS.qtyInput", () => {
+    expect(Object.keys(limits)).not.toContain("MAX_ORDER_QTY");
+    expect(limits.ORDER_SHEET_LIMITS.qtyInput).toBe(9);
+  });
+
+  it("the limit as people read it is derived from the digit count", () => {
+    expect(MAX_QTY_TEXT).toBe("999,999,999");
+    expect(MAX_QTY_TEXT.replace(/,/g, "")).toBe("9".repeat(limits.ORDER_SHEET_LIMITS.qtyInput));
+  });
+
+  it("every rejection says exactly what it said before", () => {
+    for (const typed of ["0", "000", "abc", "1.5", "-3", "1,000", "12 boxes", "1000000000", "99999999999999999999"]) {
+      expect(normalizeQty(typed), JSON.stringify(typed)).toEqual({ ok: false, reason: WORDS });
+    }
+    expect(normalizeQty("999999999")).toEqual({ ok: true, value: "999999999" }); // the largest valid quantity is still accepted
+    expect(normalizeQty(" 0000000000000999999999 ")).toEqual({ ok: true, value: "999999999" }); // zeros in front do not count as digits
+  });
+
+  it("no source file of the order sheet spells the limit out (999,999,999 or 999999999): the words are built from the digit count", () => {
+    const sources: string[] = [];
+    for (const folder of ["lib/order-sheet", "app/order-sheet"]) {
+      const dir = path.resolve(process.cwd(), folder);
+      for (const file of fs.readdirSync(dir)) if (/\.(ts|tsx)$/.test(file)) sources.push(path.join(dir, file));
+    }
+    expect(sources.length, "the order sheet sources were found").toBeGreaterThan(10);
+    const spelledOut = sources.filter((file) => /999,?999,?999/.test(fs.readFileSync(file, "utf8"))).map((file) => path.relative(process.cwd(), file));
+    expect(spelledOut, "files that write the limit out instead of deriving it").toEqual([]);
+  });
+});
+
+describe("isQtyTooLarge: digits only, but more of them than any valid quantity", () => {
+  it("is true for a number of 10 or more digits, with or without spaces around it", () => {
+    for (const typed of ["1000000000", "999999999999", " 123456789012 ", "\t1234567890\n", "9".repeat(60)]) {
+      expect(isQtyTooLarge(typed), JSON.stringify(typed)).toBe(true);
+      expect(normalizeQty(typed).ok, `${JSON.stringify(typed)} is not a valid quantity`).toBe(false);
+    }
+  });
+
+  it("zeros in front are not digits of the number: 12 written with 15 zeros is valid, a 10-digit number with zeros in front is not", () => {
+    expect(isQtyTooLarge("0".repeat(15) + "12")).toBe(false);
+    expect(normalizeQty("0".repeat(15) + "12")).toEqual({ ok: true, value: "12" });
+    expect(isQtyTooLarge("0".repeat(5) + "1000000000")).toBe(true);
+  });
+
+  it("is false for everything that is wrong in some other way (so it is not told it is too large) and for valid or blank input", () => {
+    for (const typed of ["", "   ", "0", "000", "12", "999999999", "1.5", "-3", "1,000,000,000", "12 boxes", "1e12", "٣٣٣٣٣٣٣٣٣٣٣", "abc"]) {
+      expect(isQtyTooLarge(typed), JSON.stringify(typed)).toBe(false);
+    }
+  });
+
+  it("never throws on a value that is not text", () => {
+    expect(isQtyTooLarge(undefined as unknown as string)).toBe(false);
+    expect(isQtyTooLarge(1_000_000_000_000 as unknown as string)).toBe(false);
   });
 });
