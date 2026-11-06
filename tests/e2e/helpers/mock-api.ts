@@ -3,6 +3,7 @@
 // It lets the real Next.js pages run end-to-end without a database. The real routes are covered separately by
 // the vitest route tests; keep this file in step with them.
 import type { Page, Route } from "@playwright/test";
+import { rejectUnsafeRequest } from "@/app/api/_guard";
 import type { Category, Medication } from "@/lib/db";
 import { parseCategoryId, sameId } from "@/lib/ids";
 import { parseSupplierOrderNumber } from "@/lib/supplier-order-number";
@@ -48,13 +49,52 @@ export type MockApi = {
   requestsTo(method: string, path: RegExp): RecordedRequest[];
 };
 
+// What the real routes answer (lib/api-errors.ts): plain words in `error` for staff, the technical cause in `technical`.
+// tests/api/e2e-mock-contract.test.ts compares every one of these with the real mapping, so they cannot drift.
 const CATEGORIES_BLOCKED_MESSAGE =
-  "Couldn’t create the category: the database refused the change (row-level security). " +
-  "The categories access migration hasn’t been applied yet — see supabase/migrations/.";
+  "Categories cannot be saved yet. This needs a one-time database update by whoever looks after this app. " +
+  "You can still save the item without a category.";
+const CATEGORIES_BLOCKED_TECHNICAL =
+  "Row-level security refused the insert into the categories table (code 42501). " +
+  "The categories access migration has not been applied to this database: see supabase/migrations/.";
+/** An edit the database refuses as a whole: nothing on the item changes. */
 const SUPPLIER_MISSING_MESSAGE =
-  "Supplier order numbers aren’t available yet: the database is missing the supplier_order_number column. " +
-  "Apply the latest migration.";
-const NO_CATEGORY_MESSAGE = "That category no longer exists. Reload and choose another.";
+  "Supplier order numbers cannot be saved yet. This needs a one-time database update by whoever looks after this app. " +
+  "Nothing was changed on this item.";
+/** A create the database refuses: no item is made. */
+const SUPPLIER_MISSING_ON_CREATE_MESSAGE =
+  "Supplier order numbers cannot be saved yet. This needs a one-time database update by whoever looks after this app. " +
+  "The item was not created.";
+const SUPPLIER_MISSING_TECHNICAL =
+  "The medications table has no supplier_order_number column (code PGRST204). Apply the latest migration in supabase/migrations/.";
+const NO_CATEGORY_MESSAGE = "That category no longer exists, so nothing was saved. Reload the page and choose another category.";
+const ITEM_NOT_FOUND_MESSAGE = "Item not found. It may have been deleted by someone else. Reload the list to see what is there.";
+const DUPLICATE_BARCODE_MESSAGE = "Barcode already exists: another item uses it, so nothing was saved. Search for that item, or use a different barcode.";
+
+/** The mock's fixed answers, exported so a unit test can hold them against the real routes' wording. */
+export const MOCK_ERROR_TEXT = {
+  categoriesBlocked: CATEGORIES_BLOCKED_MESSAGE,
+  categoriesBlockedTechnical: CATEGORIES_BLOCKED_TECHNICAL,
+  supplierMissingOnUpdate: SUPPLIER_MISSING_MESSAGE,
+  supplierMissingOnCreate: SUPPLIER_MISSING_ON_CREATE_MESSAGE,
+  supplierMissingTechnical: SUPPLIER_MISSING_TECHNICAL,
+  noCategory: NO_CATEGORY_MESSAGE,
+  itemNotFound: ITEM_NOT_FOUND_MESSAGE,
+  duplicateBarcode: DUPLICATE_BARCODE_MESSAGE,
+} as const;
+
+type PwRequest = ReturnType<Route["request"]>;
+
+/**
+ * The real routes refuse a POST that is not declared as JSON (415) or that the browser marks as cross-site (403) before they
+ * read it. This runs the real check (app/api/_guard.ts) on the request the page made, so a caller that forgot its
+ * Content-Type fails these browser tests the way it would fail against the real server.
+ */
+async function refusedByGuard(request: PwRequest): Promise<{ status: number; body: unknown } | null> {
+  const probe = new Request(request.url(), { method: request.method(), headers: request.headers() });
+  const refused = rejectUnsafeRequest(probe);
+  return refused ? { status: refused.status, body: (await refused.json()) as unknown } : null;
+}
 
 const UPDATABLE = [
   "name",
@@ -123,7 +163,7 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
           if (typeof v !== "string" || !v.trim()) return { status: 400, body: { error: "Barcode is required", field: "barcode" } };
           const barcode = v.trim();
           if (medications.some((m) => m.id !== target.id && m.barcode === barcode)) {
-            return { status: 409, body: { error: "Barcode already exists" } };
+            return { status: 409, body: { error: DUPLICATE_BARCODE_MESSAGE } };
           }
           target.barcode = barcode;
           break;
@@ -149,7 +189,15 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
           if (!parsed.ok) return { status: 400, body: { error: parsed.reason, field: key } };
           // The real route only writes the column when it was provided; pre-migration that fails with 409.
           if (flags.supplierColumnMissing && (parsed.value !== null || !isCreate)) {
-            return { status: 409, body: { error: SUPPLIER_MISSING_MESSAGE, field: key } };
+            return {
+              status: 409,
+              body: {
+                error: isCreate ? SUPPLIER_MISSING_ON_CREATE_MESSAGE : SUPPLIER_MISSING_MESSAGE,
+                code: "PGRST204",
+                technical: SUPPLIER_MISSING_TECHNICAL,
+                field: key,
+              },
+            };
           }
           target.supplier_order_number = parsed.value;
           break;
@@ -196,9 +244,13 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
         return json(route, 200, sorted);
       }
       if (method === "POST") {
+        const refused = await refusedByGuard(req);
+        if (refused) return json(route, refused.status, refused.body);
         const name = isDict(body) && typeof body.name === "string" ? body.name.trim() : "";
         if (!name || name.length > 60) return json(route, 400, { error: "Category name is required (1–60 characters)." });
-        if (flags.categoriesBlocked) return json(route, 403, { error: CATEGORIES_BLOCKED_MESSAGE, code: "42501" });
+        if (flags.categoriesBlocked) {
+          return json(route, 403, { error: CATEGORIES_BLOCKED_MESSAGE, code: "42501", technical: CATEGORIES_BLOCKED_TECHNICAL });
+        }
         const existing = categories.find((c) => c.name.toLowerCase() === name.toLowerCase());
         if (existing) return json(route, 200, existing);
         nextCategoryNumber += 1;
@@ -229,6 +281,8 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
         return json(route, 200, sorted);
       }
       if (method === "POST") {
+        const refused = await refusedByGuard(req);
+        if (refused) return json(route, refused.status, refused.body);
         if (!isDict(body)) return json(route, 400, { error: "Invalid request body." });
         const created: Medication = {
           id: ++nextMedicationId,
@@ -268,7 +322,7 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
       const target = medications.find((m) => m.id === id);
       if (method === "GET") return target ? json(route, 200, target) : json(route, 404, { error: "Medication not found" });
       if (method === "PUT") {
-        if (!target) return json(route, 404, { error: "Item not found. It may have been deleted." });
+        if (!target) return json(route, 404, { error: ITEM_NOT_FOUND_MESSAGE });
         if (!isDict(body) || !UPDATABLE.some((k) => k in body)) return json(route, 400, { error: "Nothing to update." });
         const draft = { ...target };
         const err = applyFields(draft, body, false);
@@ -277,7 +331,7 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
         return json(route, 200, target);
       }
       if (method === "DELETE") {
-        if (!target) return json(route, 404, { error: "Item not found. It may have been deleted." });
+        if (!target) return json(route, 404, { error: ITEM_NOT_FOUND_MESSAGE });
         medications.splice(medications.indexOf(target), 1);
         return json(route, 200, { success: true });
       }
@@ -309,6 +363,8 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
     // ── order-sheet export: the REAL sheet builder and workbook writer run here; only the database read is replaced
     // by the mock's rows. The real route's validation and read-only behavior are covered by tests/api.
     if (path === "/api/order-sheet/xlsx" && method === "POST") {
+      const refused = await refusedByGuard(req);
+      if (refused) return json(route, refused.status, refused.body);
       if (!isDict(body) || !Array.isArray(body.rows) || body.rows.length === 0) {
         return json(route, 400, { error: "Add at least one item to the order sheet before exporting.", field: "rows" });
       }

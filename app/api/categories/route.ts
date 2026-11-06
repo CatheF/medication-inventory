@@ -1,13 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase, type Category } from "@/lib/db";
 import { mapSupabaseError, type ErrorContext } from "@/lib/api-errors";
+import { CATEGORY_NAME_MAX_LENGTH, exceedsLength } from "@/lib/limits";
 import { normalizeCategory } from "@/lib/normalize";
 import { hasInvisibleOrControlCharacter } from "@/lib/text-safety";
+import { readJsonBody, rejectUnsafeRequest } from "../_guard";
+import { readAllRows } from "../_paging";
 
 // Never serve a cached category list: a stale response makes saved categories look like they vanished.
 export const dynamic = "force-dynamic";
-
-const NAME_MAX_LENGTH = 60;
 
 function json(body: unknown, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
@@ -16,7 +17,10 @@ function json(body: unknown, status = 200): NextResponse {
 function failure(err: unknown, ctx: ErrorContext): NextResponse {
   const { status, body } = mapSupabaseError(err, ctx);
   if (status >= 500 || status === 403) {
-    console.error(`[/api/categories] ${ctx}: ${status}${body.code ? ` ${body.code}` : ""}${body.detail ? ` ${body.detail}` : ""}`);
+    // The browser gets the plain message; the log also carries the technical facts for whoever looks after the app.
+    console.error(
+      `[/api/categories] ${ctx}: ${status}${body.code ? ` ${body.code}` : ""}${body.detail ? ` ${body.detail}` : ""}${body.technical ? ` | ${body.technical}` : ""}`
+    );
   }
   return json(body, status);
 }
@@ -44,18 +48,36 @@ function parseName(input: unknown): ParsedName {
   if (hasInvisibleOrControlCharacter(name)) {
     return { ok: false, error: "Category name can’t contain line breaks, tabs or other invisible control characters." };
   }
-  if ([...name].length > NAME_MAX_LENGTH) {
-    return { ok: false, error: `Category name is too long (maximum ${NAME_MAX_LENGTH} characters).` };
+  if (exceedsLength(name, CATEGORY_NAME_MAX_LENGTH)) {
+    return { ok: false, error: `Category name is too long (maximum ${CATEGORY_NAME_MAX_LENGTH} characters).` };
   }
   return { ok: true, value: name };
 }
 
+type AllCategories = { ok: true; categories: Category[] } | { ok: false; response: NextResponse };
+
+/**
+ * Reads EVERY category, page by page (the same loop and the same 50-page safety limit as the item list). The database may
+ * answer at most N rows per request, and a list that is silently short would hide categories from the screens and let a
+ * duplicate name slip past the check in POST. Pages are ordered by id so none is skipped or repeated; the answer is sorted
+ * by name afterwards.
+ */
+async function readAllCategories(ctx: ErrorContext): Promise<AllCategories> {
+  const result = await readAllRows((from, to, withCount) =>
+    supabase.from("categories").select("*", withCount ? { count: "exact" } : {}).order("id", { ascending: true }).range(from, to)
+  );
+  if (result.ok) return { ok: true, categories: result.rows.map(normalizeCategory) };
+  // A list that is too long to read is an error, like a database error: never a short list that looks complete.
+  if ("tooLarge" in result) return { ok: false, response: json({ error: "The category list is too large to load in one request." }, 500) };
+  return { ok: false, response: failure(result.error, ctx) };
+}
+
 export async function GET() {
   try {
-    const { data, error } = await supabase.from("categories").select("*");
     // A database error must never become an empty list: "No categories" and "couldn't load categories" are different.
-    if (error) return failure(error, "categories.read");
-    return json((data ?? []).map(normalizeCategory).sort(byName));
+    const all = await readAllCategories("categories.read");
+    if (!all.ok) return all.response;
+    return json(all.categories.sort(byName));
   } catch (err) {
     return failure(err, "categories.read");
   }
@@ -63,12 +85,17 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
-    let raw: unknown;
-    try {
-      raw = await request.json();
-    } catch {
-      return json({ error: "Request body must be valid JSON." }, 400);
+    // A web page on another site must not be able to create categories with a "simple" POST: see app/api/_guard.ts.
+    const refused = rejectUnsafeRequest(request);
+    if (refused) return refused;
+
+    const read = await readJsonBody(request);
+    if (!read.ok) {
+      return read.reason === "too-large"
+        ? json({ error: "The request is too large." }, 413)
+        : json({ error: "Request body must be valid JSON." }, 400);
     }
+    const raw = read.value;
     if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
       return json({ error: "Request body must be a JSON object." }, 400);
     }
@@ -78,10 +105,10 @@ export async function POST(request: NextRequest) {
     const name = parsed.value;
 
     // Same name in a different case (or accent composition) is the same category: hand back the existing one.
-    const existing = await supabase.from("categories").select("*");
-    if (existing.error) return failure(existing.error, "categories.create");
+    const existing = await readAllCategories("categories.create");
+    if (!existing.ok) return existing.response;
     const key = nameKey(name);
-    const duplicate = (existing.data ?? []).map(normalizeCategory).find((c) => nameKey(c.name) === key);
+    const duplicate = existing.categories.find((c) => nameKey(c.name) === key);
     if (duplicate) return json(duplicate, 200);
 
     const { data, error } = await supabase.from("categories").insert({ name }).select("*").single();

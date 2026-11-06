@@ -41,8 +41,9 @@
  *        beforeEach(() => { fake = installFake(LIVE_AFTER_MIGRATION); });     // fresh empty database per test
  *
  *        it("creates a category", async () => {
+ *          // The routes that parse a JSON body refuse any other Content-Type (415), so a request carries the header.
  *          const res = await POST(new NextRequest("http://localhost/api/categories", {
- *            method: "POST", body: JSON.stringify({ name: "Antibiotics" }) }));
+ *            method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ name: "Antibiotics" }) }));
  *          expect(res.status).toBe(201);
  *          expect(fake.dump("categories")).toHaveLength(1);
  *          expect(fake.writes()).toHaveLength(1);

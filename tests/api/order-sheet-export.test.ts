@@ -38,7 +38,8 @@ function sheetBody(rows: readonly unknown[], overrides: Record<string, unknown> 
 }
 
 function rawExport(raw: string): Promise<Response> {
-  return exportRoute(new NextRequest("http://localhost/api/order-sheet/xlsx", { method: "POST", body: raw }));
+  // The body is the test's own (not necessarily JSON), but the request is declared as JSON like the page's own call.
+  return exportRoute(new NextRequest("http://localhost/api/order-sheet/xlsx", { method: "POST", headers: { "content-type": "application/json" }, body: raw }));
 }
 
 /** Every database call the export made was a plain read of the medications table (nothing else, ever). */
@@ -372,35 +373,35 @@ describe.each(ID_SHAPES)("POST /api/order-sheet/xlsx on the $label", ({ options,
       {
         label: "an unreachable database",
         status: 503,
-        message: /^Can.t reach the database\. Check the connection, and that the Supabase project isn.t paused\./,
+        message: /^Can.t reach the database\. Check the internet connection and try again in a minute\./,
         body: sheetBody([{ id: 100 }]),
         prepare: (f) => f.failNext({ code: "", message: "TypeError: fetch failed" }, { table: "medications" }),
       },
       {
         label: "a rejected API key",
         status: 500,
-        message: /^The database rejected the app.s API key/,
+        message: /^The app.s connection to the database was refused, so the app cannot read anything right now\./,
         body: sheetBody([{ id: 100 }]),
         prepare: (f) => f.failNext({ code: "PGRST301", message: "JWT expired" }, { table: "medications" }),
       },
       {
         label: "a missing table privilege",
         status: 403,
-        message: /isn.t allowed to read this data \(permission denied\)/,
+        message: /^The app does not have permission to read this data\./,
         body: sheetBody([{ id: 100 }]),
         prepare: (f) => f.failNext({ code: "42501", message: "permission denied for table medications" }, { table: "medications" }),
       },
       {
         label: "an unexpected database error",
         status: 500,
-        message: /^Unexpected database error/,
+        message: /^Something went wrong while reading from the database\./,
         body: sheetBody([{ id: 100 }]),
         prepare: (f) => f.failNext({ code: "XX000", message: "internal error" }, { table: "medications" }),
       },
       {
         label: "a database client that throws",
         status: 500,
-        message: /^Unexpected database error/,
+        message: /^Something went wrong while reading from the database\./,
         body: sheetBody([{ id: 100 }]),
         prepare: (f) =>
           f.onCall(() => {
@@ -652,6 +653,7 @@ describe("when the workbook cannot be built", () => {
     const res = await POST(
       new NextRequest("http://localhost/api/order-sheet/xlsx", {
         method: "POST",
+        headers: { "content-type": "application/json" },
         body: JSON.stringify(sheetBody([{ id: medications[0].id }])),
       })
     );

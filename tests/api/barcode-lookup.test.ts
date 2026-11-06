@@ -4,6 +4,9 @@
 // The Scan tab and /kiosk treat HTTP 404 from this route as "this barcode is not in the inventory" and then CREATE a new
 // unnamed item. A 404 sent for any other reason (database down, key rejected, a policy problem) would therefore create
 // a duplicate item for a barcode that already exists, so: 404 only when there is genuinely no row.
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Category, Medication } from "@/lib/db";
 import { bodyRecord, errorTextOf, ID_SHAPES, itemNamed, snapshotDb } from "../helpers/api-test-kit";
@@ -78,19 +81,37 @@ describe.each(ID_SHAPES)("GET /api/medications/barcode/[code] on the $label", ({
       }
     });
 
-    it("finds an item whose barcode was sent double-encoded (Next decoded it once, the route decodes the fallback)", async () => {
+    it("looks up exactly the barcode it receives and decodes nothing further: 'AB%2F12' is a different barcode from 'AB/12'", async () => {
+      // Next has already URL-decoded the path parameter once. A second decode would turn a barcode that really contains
+      // "%2F" into another one, so a code that arrives as "AB%2F12" is looked up as "AB%2F12" and nothing else.
       fake.seedMedications([{ id: 901, barcode: "AB/12", name: "Slash item" }]);
-      const res = await api.lookup("AB%2F12");
-      expect(res.status).toBe(200);
-      expect((await bodyRecord(res)).id).toBe(901);
+      expect((await api.lookup("AB%2F12")).status).toBe(404);
+      expect((await bodyRecord(await api.lookup("AB/12"))).id).toBe(901);
     });
 
-    it("prefers the exact barcode over a decoded variant when both exist", async () => {
+    it("finds a barcode that really contains a percent escape by itself, and never confuses it with the decoded text ('A%41' is not 'AA')", async () => {
       fake.seedMedications([
-        { id: 902, barcode: "AB%2F12", name: "Literal percent code" },
-        { id: 903, barcode: "AB/12", name: "Slash code" },
+        { id: 902, barcode: "A%41", name: "Literal percent code" },
+        { id: 903, barcode: "AA", name: "Different item" },
       ]);
-      expect((await bodyRecord(await api.lookup("AB%2F12"))).id).toBe(902);
+      expect((await bodyRecord(await api.lookup("A%41"))).id).toBe(902);
+      expect((await bodyRecord(await api.lookup("AA"))).id).toBe(903);
+    });
+
+    it("answers 404 for an ABSENT barcode that looks like a percent escape instead of returning a different item (a scan would have changed the wrong item's stock)", async () => {
+      fake.seedMedications([{ id: 903, barcode: "AA", name: "Different item" }]);
+      const res = await api.lookup("A%41");
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "Medication not found" });
+    });
+
+    it("asks the database for the received barcode once, and only for that barcode", async () => {
+      fake.seedMedications([{ id: 903, barcode: "AA", name: "Different item" }]);
+      fake.clearCalls();
+      await api.lookup("A%41");
+      const selects = fake.callsFor("medications").filter((call) => call.op === "select");
+      expect(selects).toHaveLength(1);
+      expect(selects[0].filters.map((filter) => [filter.column, filter.value])).toEqual([["barcode", "A%41"]]);
     });
 
     it("treats the barcode as an exact match: wildcard characters match nothing special", async () => {
@@ -140,10 +161,10 @@ describe.each(ID_SHAPES)("GET /api/medications/barcode/[code] on the $label", ({
   describe("a failing database is never reported as 'not found'", () => {
     it.each([
       { label: "the database can't be reached", error: { code: "", message: "TypeError: fetch failed" }, status: 503, message: /can.t reach the database/i },
-      { label: "the database rejects the app's key", error: { code: "PGRST301", message: "JWT expired" }, status: 500, message: /API key/i },
-      { label: "the database user lacks the privilege", error: { code: "42501", message: "permission denied for table medications" }, status: 403, message: /permission denied/i },
-      { label: "a row-level-security error is raised", error: { code: "42501", message: 'new row violates row-level security policy for table "medications"' }, status: 403, message: /row-level security/i },
-      { label: "an unexpected database error happens", error: { code: "XX000", message: "internal error" }, status: 500, message: /unexpected database error/i },
+      { label: "the database rejects the app's key", error: { code: "PGRST301", message: "JWT expired" }, status: 500, message: /connection to the database was refused/i },
+      { label: "the database user lacks the privilege", error: { code: "42501", message: "permission denied for table medications" }, status: 403, message: /does not have permission to read/i },
+      { label: "a row-level-security error is raised", error: { code: "42501", message: 'new row violates row-level security policy for table "medications"' }, status: 403, message: /did not allow the app to read/i },
+      { label: "an unexpected database error happens", error: { code: "XX000", message: "internal error" }, status: 500, message: /something went wrong while reading/i },
       { label: "the request times out", error: { code: "", message: "ETIMEDOUT" }, status: 503, message: /can.t reach the database/i },
     ])("answers with $status and a message, never 404, when $label", async ({ error, status, message }) => {
       const item = itemNamed(medications, "Acetaminophen 500 mg");
@@ -166,18 +187,6 @@ describe.each(ID_SHAPES)("GET /api/medications/barcode/[code] on the $label", ({
       });
       const res = await api.lookup(medications[0].barcode);
       expect(res.status).toBe(500);
-    });
-
-    it("answers a failure on the double-decode retry as a failure too", async () => {
-      fake.seedMedications([{ id: 901, barcode: "AB/12", name: "Slash item" }]);
-      let selects = 0;
-      fake.onCall((call) => {
-        if (call.op === "select" && call.table === "medications" && ++selects === 2) {
-          fake.failNext({ code: "", message: "TypeError: fetch failed" }, { table: "medications" });
-        }
-      });
-      const res = await api.lookup("AB%2F12");
-      expect(res.status).toBe(503);
     });
 
     it("never writes anything while looking up, so an outage during a scan creates no item", async () => {
@@ -236,5 +245,39 @@ describe("barcode lookup on the live database as deployed today (no supplier col
     const res = await api.lookup(item.barcode);
     expect(res.status).toBe(200);
     expect(await bodyRecord(res)).toMatchObject({ id: item.id, supplier_order_number: null, category_id: item.category_id });
+  });
+});
+
+describe("every in-repo caller encodes the barcode exactly once", () => {
+  // The route looks up the path parameter exactly as Next hands it over (decoded once). A caller that encoded twice would
+  // therefore search for the wrong text, and one that did not encode would break on "/" or "%". So every URL built from
+  // /api/medications/barcode/ in the browser code must end in a single encodeURIComponent(...).
+  const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+  function sourceFiles(dir: string): string[] {
+    const found: string[] = [];
+    for (const entry of readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      if (statSync(full).isDirectory()) found.push(...sourceFiles(full));
+      else if (/\.(ts|tsx)$/.test(entry)) found.push(full);
+    }
+    return found;
+  }
+
+  const callers = sourceFiles(path.join(REPO_ROOT, "app"))
+    .filter((file) => !path.relative(path.join(REPO_ROOT, "app"), file).startsWith(`api${path.sep}`))
+    .flatMap((file) => {
+      const text = readFileSync(file, "utf8");
+      const urls = [...text.matchAll(/`\/api\/medications\/barcode\/([^`]*)`/g)].map((match) => match[1]);
+      return urls.length === 0 ? [] : [{ file: path.relative(REPO_ROOT, file), urls }];
+    });
+
+  it("finds the scanner callers (the Scan tab and the kiosk)", () => {
+    expect(callers.map((caller) => caller.file).sort()).toEqual(["app/kiosk/page.tsx", "app/page.tsx"]);
+  });
+
+  it.each(callers)("$file builds every lookup URL with one encodeURIComponent and nothing else", ({ urls }) => {
+    expect(urls.length).toBeGreaterThan(0);
+    for (const url of urls) expect(url).toMatch(/^\$\{encodeURIComponent\([A-Za-z0-9_.]+\)\}$/);
   });
 });

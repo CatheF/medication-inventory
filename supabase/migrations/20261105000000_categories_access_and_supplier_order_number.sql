@@ -39,7 +39,10 @@
 -- SAFE TO RE-RUN
 --   Additive and idempotent. The column uses ADD COLUMN IF NOT EXISTS and each
 --   policy is created only when a policy with that name does not exist yet, so
---   a second run changes nothing (it only prints a "skipping" notice).
+--   a second run changes nothing. It prints exactly one notice, and PostgreSQL
+--   itself prints it (ADD COLUMN IF NOT EXISTS: column "supplier_order_number"
+--   of relation "medications" already exists, skipping): nothing in this file
+--   raises a notice of its own.
 --   A column of that name that already exists must already be text. Any other
 --   type (an integer column would turn '0092' into 92) stops the migration with
 --   an error before anything is changed: the migration never alters a column,

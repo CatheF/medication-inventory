@@ -1308,7 +1308,7 @@ export default function AdminPage() {
       {n.subject && <p className="font-semibold [overflow-wrap:anywhere]">{n.subject}</p>}
       <p className={`[overflow-wrap:anywhere] ${n.subject ? "mt-0.5" : ""}`}>{n.message}</p>
       {n.hint && <p className="mt-1 [overflow-wrap:anywhere]">{n.hint}</p>}
-      {n.detail && <p className={`mt-1.5 ${MONO} text-xs break-words opacity-90`}>Details: {n.detail}</p>}
+      {n.detail && <p className={`mt-1.5 ${MONO} text-xs break-words opacity-90`}>Technical details: {n.detail}</p>}
     </Notice>
   );
 
@@ -1656,7 +1656,7 @@ export default function AdminPage() {
                     <div id="admin-category-error-box" className="mt-3">
                       <Notice tone="error" data-testid="category-error">
                         <p className="[overflow-wrap:anywhere]">{catError.message}</p>
-                        {catError.detail && <p className={`mt-1.5 ${MONO} text-xs break-words opacity-90`}>Details: {catError.detail}</p>}
+                        {catError.detail && <p className={`mt-1.5 ${MONO} text-xs break-words opacity-90`}>Technical details: {catError.detail}</p>}
                       </Notice>
                     </div>
                   )}

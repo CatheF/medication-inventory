@@ -24,7 +24,8 @@ function create(name: unknown): Promise<Response> {
 }
 
 function rawPost(body: string): Promise<Response> {
-  return POST(new NextRequest("http://localhost/api/categories", { method: "POST", body }));
+  // The body is the test's own (not necessarily JSON), but the request is declared as JSON like every call from the app.
+  return POST(new NextRequest("http://localhost/api/categories", { method: "POST", headers: { "content-type": "application/json" }, body }));
 }
 
 beforeEach(() => {
@@ -232,7 +233,10 @@ describe.each(ID_SHAPES)("GET and POST /api/categories on the $label", ({ option
       fake.failNext({ code: "PGRST301", message: "JWT expired" }, { table: "categories" });
       const res = await GET();
       expect(res.status).toBe(500);
-      expect(errorTextOf(await res.json())).toMatch(/API key/i);
+      const body = await bodyRecord(res);
+      expect(errorTextOf(body)).toMatch(/connection to the database was refused/i);
+      expect(errorTextOf(body)).not.toMatch(/API key|JWT/i); // plain words for staff
+      expect(body.technical).toMatch(/API key/); // the cause, for whoever looks after the app
     });
 
     it("answers a list request with 500 and the database error code for an unexpected error", async () => {
@@ -240,7 +244,7 @@ describe.each(ID_SHAPES)("GET and POST /api/categories on the $label", ({ option
       const res = await GET();
       expect(res.status).toBe(500);
       const body = await bodyRecord(res);
-      expect(body.error).toBe("Unexpected database error.");
+      expect(body.error).toMatch(/^Something went wrong while reading from the database\./);
       expect(body.code).toBe("XX000");
     });
 
@@ -329,15 +333,30 @@ describe.each(ID_SHAPES)("the live categories defect (RLS on, no policy) with $l
     fake = installFake({ ...LIVE_BEFORE_MIGRATION, categoryIdType: shape });
   });
 
-  it("refuses to create a category with 403 and a message naming row-level security and the migration, and stores nothing", async () => {
+  it("refuses to create a category with 403 and a plain message, keeping the technical cause in a separate field, and stores nothing", async () => {
     const res = await create("Antibiotics");
     expect(res.status).toBe(403);
     const body = await bodyRecord(res);
+    // What staff read: plain words, who to ask, and that the item can still be saved.
+    expect(errorTextOf(body)).toBe(
+      "Categories cannot be saved yet. This needs a one-time database update by whoever looks after this app. You can still save the item without a category."
+    );
+    expect(errorTextOf(body)).not.toMatch(/row-level|migration|42501|supabase/i);
+    // What the person who looks after the app needs: the code, and the cause in database terms.
     expect(body.code).toBe("42501");
-    expect(errorTextOf(body)).toMatch(/row-level security/i);
-    expect(errorTextOf(body)).toMatch(/migration/i);
+    expect(String(body.technical)).toMatch(/row-level security/i);
+    expect(String(body.technical)).toContain("supabase/migrations/");
     expect(body).not.toHaveProperty("id");
     expect(fake.dump("categories")).toEqual([]);
+  });
+
+  it("logs the technical cause for whoever looks after the app, next to the code", async () => {
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    await create("Antibiotics");
+    const line = log.mock.calls.map((call) => String(call[0])).join("\n");
+    expect(line).toMatch(/403 42501/);
+    expect(line).toMatch(/row-level security/i);
+    expect(line).toContain("supabase/migrations/");
   });
 
   it("never reports success for the refused create: not 200, not 201, and no category appears in a later list", async () => {
@@ -362,7 +381,7 @@ describe.each(ID_SHAPES)("the live categories defect (RLS on, no policy) with $l
     fake.setRls("categories", { select: false, insert: true, update: false, delete: false });
     const res = await create("Antibiotics");
     expect(res.status).toBe(403);
-    expect(errorTextOf(await res.json())).toMatch(/row-level security/i);
+    expect(errorTextOf(await res.json())).toMatch(/^Categories cannot be saved yet\./);
     expect(fake.dump("categories")).toEqual([]);
   });
 
@@ -378,8 +397,11 @@ describe.each(ID_SHAPES)("the live categories defect (RLS on, no policy) with $l
     fake.setRls("categories", true);
     const res = await create("Antibiotics");
     expect(res.status).toBe(403);
-    const text = errorTextOf(asRecord(await res.json()));
-    expect(text).toMatch(/permission denied/i);
-    expect(text).toMatch(/will not fix/i);
+    const body = asRecord(await res.json());
+    const text = errorTextOf(body);
+    expect(text).toMatch(/does not have permission to add to the category list/i);
+    expect(text).not.toMatch(/one-time database update/i); // a one-time update would not help here
+    expect(String(body.technical)).toMatch(/will not fix/i);
+    expect(String(body.technical)).toMatch(/permission denied/i);
   });
 });

@@ -427,8 +427,14 @@ describe.each(ID_SHAPES)("deploy-order independence: the database does NOT have 
     expect(res.status).toBe(409);
     const body = await bodyRecord(res);
     expect(body.field).toBe("supplier_order_number");
-    expect(errorTextOf(body)).toMatch(/supplier_order_number/);
-    expect(errorTextOf(body)).toMatch(/migration/i);
+    // Plain words for staff. "Nothing was changed on this item" is true: the database refuses the whole update, so the stock
+    // that was sent with the supplier number is not saved either (the snapshot check below proves it).
+    expect(errorTextOf(body)).toBe(
+      "Supplier order numbers cannot be saved yet. This needs a one-time database update by whoever looks after this app. Nothing was changed on this item."
+    );
+    expect(errorTextOf(body)).not.toMatch(/supplier_order_number|migration|column/i);
+    expect(String(body.technical)).toMatch(/supplier_order_number column/);
+    expect(String(body.technical)).toContain("supabase/migrations/");
     expect(snapshotDb(fake)).toEqual(before);
   });
 
@@ -438,7 +444,10 @@ describe.each(ID_SHAPES)("deploy-order independence: the database does NOT have 
     expect(res.status).toBe(409);
     const body = await bodyRecord(res);
     expect(body.field).toBe("supplier_order_number");
-    expect(errorTextOf(body)).toMatch(/migration/i);
+    expect(errorTextOf(body)).toBe(
+      "Supplier order numbers cannot be saved yet. This needs a one-time database update by whoever looks after this app. The item was not created."
+    );
+    expect(String(body.technical)).toContain("supabase/migrations/");
     expect(res.ok).toBe(false);
     expect(snapshotDb(fake)).toEqual(before);
   });

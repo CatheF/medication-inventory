@@ -171,7 +171,9 @@ describe.each(ID_SHAPES)("POST /api/medications on the $label", ({ options }) =>
 
     it("treats real __proto__ and constructor keys in the body as ordinary, ignored keys", async () => {
       const raw = '{"barcode":"PROTO-1","__proto__":{"evil":1},"constructor":{"x":1},"toString":"nope","hasOwnProperty":1}';
-      const res = await postRaw(new Request("http://localhost/api/medications", { method: "POST", body: raw }) as unknown as Parameters<typeof postRaw>[0]);
+      const res = await postRaw(
+        new Request("http://localhost/api/medications", { method: "POST", headers: { "content-type": "application/json" }, body: raw }) as unknown as Parameters<typeof postRaw>[0]
+      );
       expect(res.status).toBe(201);
       expect(({} as Record<string, unknown>).evil).toBeUndefined();
       const insert = fake.writes().find((c) => c.op === "insert" && c.table === "medications");
@@ -217,11 +219,11 @@ describe.each(ID_SHAPES)("POST /api/medications on the $label", ({ options }) =>
       expect(snapshotDb(fake)).toEqual(before);
     });
 
-    it("accepts a 128-character barcode and rejects 129 characters", async () => {
-      expect((await api.createItem({ barcode: "9".repeat(128) })).status).toBe(201);
-      const res = await api.createItem({ barcode: "9".repeat(129) });
+    it("accepts a 1024-character barcode (the original stored any length) and rejects 1025 characters", async () => {
+      expect((await api.createItem({ barcode: "9".repeat(1024) })).status).toBe(201);
+      const res = await api.createItem({ barcode: "9".repeat(1025) });
       expect(res.status).toBe(400);
-      expect(errorTextOf(await res.json())).toMatch(/128/);
+      expect(errorTextOf(await res.json())).toMatch(/1024/);
     });
 
     it("rejects a barcode containing a NUL character (the database cannot store it)", async () => {
@@ -296,7 +298,7 @@ describe.each(ID_SHAPES)("POST /api/medications on the $label", ({ options }) =>
       ["a bare number", "42"],
     ])("rejects %s with 400 and writes nothing", async (_label, raw) => {
       const res = await postRaw(
-        new Request("http://localhost/api/medications", { method: "POST", body: raw }) as unknown as Parameters<typeof postRaw>[0]
+        new Request("http://localhost/api/medications", { method: "POST", headers: { "content-type": "application/json" }, body: raw }) as unknown as Parameters<typeof postRaw>[0]
       );
       expect(res.status).toBe(400);
       expect(errorTextOf(await res.json())).toMatch(/JSON/);
@@ -321,13 +323,15 @@ describe.each(ID_SHAPES)("POST /api/medications on the $label", ({ options }) =>
   });
 
   describe("database failures are failures", () => {
-    it("answers 403 with a row-level-security message, and stores nothing, when the database refuses the insert", async () => {
+    it("answers 403 with a plain message (technical cause in its own field), and stores nothing, when the database refuses the insert", async () => {
       fake.setRls("medications", { select: true, insert: false, update: true, delete: true });
       const before = snapshotDb(fake);
       const res = await api.createItem({ barcode: "RLS-1", name: "Blocked" });
       expect(res.status).toBe(403);
       const body = await bodyRecord(res);
-      expect(errorTextOf(body)).toMatch(/row-level security/i);
+      expect(errorTextOf(body)).toMatch(/^The database did not allow this change, so nothing was saved\./);
+      expect(errorTextOf(body)).not.toMatch(/row-level/i);
+      expect(String(body.technical)).toMatch(/row-level security/i);
       expect(body).not.toHaveProperty("id");
       expect(snapshotDb(fake)).toEqual(before);
     });
@@ -355,7 +359,7 @@ describe.each(ID_SHAPES)("POST /api/medications on the $label", ({ options }) =>
       fake.failNext({ code: "XX000", message: "internal error" }, { table: "medications", op: "insert" });
       const res = await api.createItem({ barcode: "ERR-1" });
       expect(res.status).toBe(500);
-      expect(await bodyRecord(res)).toMatchObject({ error: "Unexpected database error.", code: "XX000" });
+      expect(await bodyRecord(res)).toMatchObject({ error: expect.stringMatching(/^Something went wrong in the database\./) as unknown, code: "XX000" });
     });
 
     it("answers 400 (not 500) when a not-null column would be violated", async () => {

@@ -1,5 +1,6 @@
 // Existing behavior that must have been PRESERVED (TASK.md section 8): the full-screen Kiosk page (/kiosk).
-// Its own source file is unchanged; what could break is everything around it (top bar, global styles, shared
+// Its source file changed in one place only: a barcode that could not be saved no longer gets the "Saved for staff review"
+// card (see the tests on failed saves below). What could break is everything around it (top bar, global styles, shared
 // data helpers), so it is exercised end to end here with a handheld scanner (keystrokes) against the mocked API.
 //
 // Headless Chromium has no camera: without one the kiosk writes `console.error("Camera:", ...)` BY DESIGN each
@@ -245,21 +246,99 @@ test.describe("Kiosk page", () => {
     expect(watch.problems()).toEqual([]);
   });
 
-  test("when an unknown barcode cannot be saved, the kiosk shows 'Unknown Barcode' with the code and returns to Ready", async ({
-    page,
-  }) => {
+  // The save of an unknown barcode can fail three ways: the server refuses it (400, for instance a barcode over the size
+  // limit), the server fails (500), or the server cannot be reached. Nothing is saved in any of them. The kiosk used to show
+  // "Unknown Barcode / Saved for staff review in Admin" for the first two, which was false: staff would wait for an item
+  // that was never created.
+  for (const failure of [
+    {
+      name: "the server refuses the barcode (400)",
+      spec: { status: 400, body: { error: "Barcode is too long (maximum 1024 characters).", field: "barcode" } },
+    },
+    { name: "the server fails (500)", spec: { status: 500, body: { error: "Unexpected database error." } } },
+    { name: "the server cannot be reached", spec: { networkError: true } },
+  ] as const) {
+    test(`when an unknown barcode cannot be saved because ${failure.name}, the kiosk says it could not save it (never that it was saved) and returns to Ready`, async ({
+      page,
+    }) => {
+      const code = "6660001112223";
+      const { mock, watch } = await bootKiosk(page, {
+        ...NO_CAMERA_LOG,
+        failedLoads: [/\/api\/medications\/barcode\/6660001112223$/, MEDICATIONS_LIST],
+      });
+      mock.failNext({ method: "POST", path: MEDICATIONS_LIST, ...failure.spec });
+
+      await scanWithKeyboard(page, code);
+
+      await expect(page.getByText(`Could not save barcode ${code}`, { exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "Try Again" })).toBeVisible();
+      await expect(page.getByText(/saved for staff review/i)).toHaveCount(0);
+      await expect(page.getByText("Unknown Barcode")).toHaveCount(0);
+      expect(mock.requestsTo("POST", MEDICATIONS_LIST)).toHaveLength(1);
+      expect(mock.medications.some((m) => m.barcode === code)).toBe(false);
+      expect(mock.requestsTo("POST", TRANSACTIONS)).toHaveLength(0);
+
+      await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+      await expect(page.getByText(/Could not save barcode/)).toHaveCount(0);
+      expect(watch.problems()).toEqual([]);
+    });
+  }
+
+  test("after a failed save the kiosk is ready again: scanning the same code saves it and opens it as a new barcode", async ({ page }) => {
+    const code = "6660001112224";
     const { mock, watch } = await bootKiosk(page, {
       ...NO_CAMERA_LOG,
-      failedLoads: [/\/api\/medications\/barcode\/6660001112223$/, MEDICATIONS_LIST],
+      failedLoads: [/\/api\/medications\/barcode\/6660001112224$/, MEDICATIONS_LIST],
     });
     mock.failNext({ method: "POST", path: MEDICATIONS_LIST, status: 500, body: { error: "Unexpected database error." } });
 
-    await scanWithKeyboard(page, "6660001112223");
-
-    await expect(page.getByText("Unknown Barcode", { exact: true })).toBeVisible();
-    await expect(page.getByText("6660001112223", { exact: true })).toBeVisible();
-    await expect(page.getByText("Saved for staff review in Admin")).toBeVisible();
+    await scanWithKeyboard(page, code);
+    await expect(page.getByText(`Could not save barcode ${code}`, { exact: true })).toBeVisible();
     await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+
+    await scanWithKeyboard(page, code);
+    await expect(page.getByText("New barcode — saved for staff review in Admin")).toBeVisible();
+    expect(mock.requestsTo("POST", MEDICATIONS_LIST)).toHaveLength(2);
+    expect(mock.medications.find((m) => m.barcode === code)).toMatchObject({ is_unnamed: true, stock: 0 });
+    expect(watch.problems()).toEqual([]);
+  });
+
+  test("when another scan created the same unknown barcode first (409), the kiosk opens that item and claims nothing about saving", async ({
+    page,
+  }) => {
+    // The first lookup answers 404 and the save answers 409 on purpose; the second lookup is the mock's real answer, and the
+    // item exists, so the kiosk opens it exactly as for any known barcode.
+    const { mock, watch } = await bootKiosk(page, { ...NO_CAMERA_LOG, failedLoads: [BARCODE_LOOKUP, MEDICATIONS_LIST] });
+    const ibuprofen = itemByName(mock.medications, ITEM.ibuprofen);
+    mock.failNext({ method: "GET", path: BARCODE_LOOKUP, status: 404, body: { error: "Medication not found" } });
+    mock.failNext({ method: "POST", path: MEDICATIONS_LIST, status: 409, body: { error: "Barcode already exists" } });
+
+    await scanWithKeyboard(page, ibuprofen.barcode);
+
+    await expect(page.getByText(ITEM.ibuprofen, { exact: true })).toBeVisible();
+    await expect(page.getByText(/^Stock:\s*18\s*→\s*17/)).toBeVisible();
+    await expect(page.getByText(/saved for staff review/i)).toHaveCount(0);
+    await expect(page.getByText(/Could not save/)).toHaveCount(0);
+    expect(mock.requestsTo("GET", BARCODE_LOOKUP)).toHaveLength(2);
+    expect(mock.requestsTo("POST", MEDICATIONS_LIST)).toHaveLength(1);
+    expect(watch.problems()).toEqual([]);
+  });
+
+  test("when the save says the barcode exists (409) but the item cannot be opened afterwards, the kiosk says it could not save it and returns to Ready", async ({
+    page,
+  }) => {
+    const code = "6660001112225";
+    const { mock, watch } = await bootKiosk(page, { ...NO_CAMERA_LOG, failedLoads: [BARCODE_LOOKUP, MEDICATIONS_LIST] });
+    mock.failNext({ method: "GET", path: BARCODE_LOOKUP, status: 404, body: { error: "Medication not found" } });
+    mock.failNext({ method: "POST", path: MEDICATIONS_LIST, status: 409, body: { error: "Barcode already exists" } });
+    mock.failNext({ method: "GET", path: BARCODE_LOOKUP, status: 500, body: { error: "Unexpected database error." } });
+
+    await scanWithKeyboard(page, code);
+
+    await expect(page.getByText(`Could not save barcode ${code}`, { exact: true })).toBeVisible();
+    await expect(page.getByText(/saved for staff review/i)).toHaveCount(0);
+    await expect(page.getByText("Ready", { exact: true })).toBeVisible();
+    expect(mock.medications.some((m) => m.barcode === code)).toBe(false);
     expect(watch.problems()).toEqual([]);
   });
 

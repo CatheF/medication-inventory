@@ -26,16 +26,27 @@
 # broken copies of the migration and runs it from a path that contains spaces.
 #
 # Usage       bash supabase/tests/run.sh
-# Settings    TEST_PGHOST   (default 127.0.0.1)   must be a local address
+# Settings    TEST_PGHOST   (default 127.0.0.1)   must be a local address: a numeric
+#                                                 loopback address (127.x.y.z), localhost, ::1,
+#                                                 or the directory of a unix socket (a path that
+#                                                 starts with /). A DNS name that merely starts
+#                                                 with "127." (127.attacker.example) is refused.
 #             TEST_PGPORT   (default 54329)
 #             TEST_PGUSER   (default postgres)    must be a superuser; a password,
 #                                                 if needed, comes from PGPASSWORD
 #             TEST_QUIET=1  print failures and the summary only
+#             TEST_REQUIRE_DB=1  a run that cannot happen (no psql, no local server, a
+#                           server that is too old) is a failure, not a skip: it prints
+#                           the usual SKIPPED lines, then exits 2 instead of 0. Use it
+#                           where "the SQL tests passed" must be true (CI, a release
+#                           check); without it a machine that has no PostgreSQL skips
+#                           the suite quietly. Default: off.
 #             TEST_MIGRATION_FILE=<path>  test another file instead of the real
 #                           migration (selftest.sh uses it to confirm the suite
 #                           can fail)
 # Needs       psql, and a PostgreSQL 13+ server. If either is missing or the
-#             server cannot be reached, it prints SKIPPED and exits 0.
+#             server cannot be reached, it prints SKIPPED and exits 0 (exits 2
+#             when TEST_REQUIRE_DB=1).
 # Side effects  The standard Supabase roles anon, authenticated and service_role
 #             are created if missing and left in place (they are cluster-wide).
 #             Only databases whose names start with medinv_test_ are ever
@@ -46,7 +57,8 @@
 #               psql -h 127.0.0.1 -p 54329 -U postgres -d postgres -Atc \
 #                 "select 'drop database \"'||datname||'\";' from pg_database where datname like 'medinv\_test\_%'"
 # Exit code   0 every check passed (or SKIPPED), 1 a check failed or a script
-#             errored, 2 refused to run (non-local host, not a superuser).
+#             errored, 2 refused to run (non-local host, not a superuser) or
+#             could not run with TEST_REQUIRE_DB=1.
 
 set -u -o pipefail
 
@@ -68,24 +80,49 @@ unset PGDATABASE PGSERVICE PGSERVICEFILE PGOPTIONS PGHOSTADDR
 export PGCONNECT_TIMEOUT=5
 
 # ── Safety: never anything but a local server ────────────────────────────────
-case "$HOST" in
-  127.*|localhost|::1|/*) ;;
-  *)
-    echo "REFUSED: TEST_PGHOST=$HOST is not a local address." >&2
-    echo "This suite creates and drops databases and roles. It must only run against a throwaway local PostgreSQL, never a real Supabase project." >&2
-    exit 2 ;;
-esac
+# Only a numeric loopback address, localhost, ::1 or a unix socket directory. A glob such as 127.* would also let through DNS
+# names like 127.attacker.example, which can point anywhere.
+is_local_host() {
+  local h="$1" octet
+  if [[ "$h" =~ ^127(\.[0-9]{1,3}){3}$ ]]; then
+    for octet in ${h//./ }; do
+      [ "$((10#$octet))" -le 255 ] || return 1
+    done
+    return 0
+  fi
+  case "$h" in
+    localhost|::1|/*) return 0 ;;
+  esac
+  return 1
+}
+
+if ! is_local_host "$HOST"; then
+  echo "REFUSED: TEST_PGHOST=$HOST is not a local address." >&2
+  echo "This suite creates and drops databases and roles. It must only run against a throwaway local PostgreSQL, never a real Supabase project." >&2
+  echo "Allowed: a numeric 127.x.y.z address, localhost, ::1, or the directory of a unix socket (a path starting with /)." >&2
+  exit 2
+fi
 
 # ── Skip cleanly when the tooling or server is not there ─────────────────────
+# Every "cannot run here" exit goes through skip_exit: a clean exit 0 by default, so a machine without PostgreSQL does not fail
+# a check that has nothing to check; exit 2 when TEST_REQUIRE_DB=1, because a suite that did not run has not passed.
+skip_exit() {
+  if [ "${TEST_REQUIRE_DB:-0}" = 1 ]; then
+    echo "REQUIRED: TEST_REQUIRE_DB=1 is set, so not being able to run the SQL tests is a failure here (exit 2)." >&2
+    exit 2
+  fi
+  exit 0
+}
+
 if ! command -v psql >/dev/null 2>&1; then
   echo "SKIPPED: psql was not found on PATH. Install the PostgreSQL client to run the SQL tests."
-  exit 0
+  skip_exit
 fi
 
 psql_major="$(psql --version 2>/dev/null | sed -E 's/[^0-9]*([0-9]+).*/\1/')"
 if [ "${psql_major:-0}" -lt 13 ] 2>/dev/null; then
   echo "SKIPPED: the psql client is version ${psql_major:-unknown}; the SQL test files need psql 13 or newer (\\if and :{?variable})."
-  exit 0
+  skip_exit
 fi
 
 ADMIN_DB=""
@@ -98,7 +135,7 @@ done
 if [ -z "$ADMIN_DB" ]; then
   echo "SKIPPED: no PostgreSQL server reachable at $HOST:$PORT as $DBUSER (set TEST_PGHOST / TEST_PGPORT / TEST_PGUSER)."
   echo "         psql said: $(printf '%s' "$conn_err" | head -n 2 | tr '\n' ' ')"
-  exit 0
+  skip_exit
 fi
 
 psql_admin() { psql -X -q -At -v ON_ERROR_STOP=1 -h "$HOST" -p "$PORT" -U "$DBUSER" -d "$ADMIN_DB" "$@"; }
@@ -108,7 +145,7 @@ server_version_num="$(psql_admin -c 'show server_version_num' 2>/dev/null || ech
 server_version="$(psql_admin -c 'show server_version' 2>/dev/null || echo unknown)"
 if [ "${server_version_num:-0}" -lt 130000 ] 2>/dev/null; then
   echo "SKIPPED: PostgreSQL $server_version is too old; the suite needs 13 or newer."
-  exit 0
+  skip_exit
 fi
 if [ "$(psql_admin -c "select rolsuper from pg_roles where rolname = current_user" 2>/dev/null)" != "t" ]; then
   echo "REFUSED: $DBUSER is not a superuser. The suite needs CREATE DATABASE, CREATE ROLE and SET ROLE." >&2

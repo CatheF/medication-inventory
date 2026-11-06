@@ -1156,8 +1156,9 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     const error = page.getByTestId("category-error");
     await expect(error).toBeVisible();
     await expect(error).toHaveAttribute("role", "alert");
-    await expect(error).toContainText("row-level security"); // what went wrong
-    await expect(error).toContainText("migration"); // what to do about it
+    await expect(error).toContainText("Categories cannot be saved yet"); // what went wrong
+    await expect(error).toContainText("whoever looks after this app"); // what to do about it
+    await expect(error).not.toContainText("row-level security"); // the technical cause is not in the red text
     await expect(page.getByTestId("category-note")).toHaveCount(0); // never "created and selected"
     await expect(page.getByTestId("admin-success")).toHaveCount(0);
     await expect(page.getByTestId("new-category-input")).toHaveValue("Vaccines"); // the typed name is kept
@@ -1165,8 +1166,9 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     expect(api.categories.some((c) => c.name === "Vaccines")).toBe(false);
     expect(api.requestsTo("POST", /\/api\/categories$/)).toHaveLength(1);
 
-    // The help under the field now says the item can still be saved without a category. Prove that claim.
-    await expect(page.getByText(/You can still save the item without a category/)).toBeVisible();
+    // The help under the field now says the item can still be saved without a category (the server's message says it too,
+    // which is why this looks at the help text itself). Prove that claim.
+    await expect(page.locator("#admin-category-help")).toContainText("You can still save the item without a category");
     await page.getByTestId("new-category-cancel").click();
     await fillItemForm(page, { name: "Saved without a category", barcode: "0099001126" });
     await saveItem(page);
@@ -1306,8 +1308,8 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await fillItemForm(page, { notes: "Second edit", supplier: "00417-B" });
     await saveItem(page);
     const alert = page.getByTestId("admin-error");
-    await expect(alert).toContainText("Supplier order numbers aren’t available yet");
-    await expect(alert).toContainText("Apply the latest migration");
+    await expect(alert).toContainText("Supplier order numbers cannot be saved yet");
+    await expect(alert).toContainText("Nothing was changed on this item");
     await expect(alert).toBeFocused();
     await expect(page.getByTestId("admin-success")).toHaveCount(0);
     await expect(page.getByTestId("supplier-order-number-input")).toHaveValue("00417-B");
@@ -1335,7 +1337,7 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await openNewItemForm(page);
     await fillItemForm(page, { name: "Needs the column", barcode: "0077002", supplier: "X-1" });
     await saveItem(page);
-    await expect(page.getByTestId("admin-error")).toContainText("Apply the latest migration");
+    await expect(page.getByTestId("admin-error")).toContainText("The item was not created");
     await expect(page.getByTestId("admin-success")).toHaveCount(0);
     expect(api.medications.some((m) => m.barcode === "0077002")).toBe(false);
     expect(api.medications).toHaveLength(before + 1);

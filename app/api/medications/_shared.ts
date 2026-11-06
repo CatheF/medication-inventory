@@ -8,9 +8,19 @@
 import { NextResponse } from "next/server";
 import { mapSupabaseError, type ErrorContext } from "@/lib/api-errors";
 import { parseCategoryId } from "@/lib/ids";
+import {
+  BARCODE_MAX_LENGTH,
+  NAME_MAX_LENGTH,
+  NOTES_MAX_LENGTH,
+  PHOTO_URL_MAX_LENGTH,
+  UNIT_MAX_LENGTH,
+  VENDOR_URL_MAX_LENGTH,
+  exceedsLength,
+} from "@/lib/limits";
+import { isHttpUrlText, isVendorLinkText } from "@/lib/safe-url";
 import { parseSupplierOrderNumber } from "@/lib/supplier-order-number";
+import { readJsonBody } from "../_guard";
 
-export const BARCODE_MAX_LENGTH = 128;
 /** Largest value a Postgres INTEGER column (stock, threshold) can hold. */
 const INT4_MAX = 2_147_483_647;
 /** Postgres text cannot store NUL; PostgREST would answer with an opaque error, so reject it up front. */
@@ -23,11 +33,17 @@ export function json(body: unknown, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });
 }
 
-/** Maps a Supabase/PostgREST error (or a thrown exception) to the shared error response. */
+/**
+ * Maps a Supabase/PostgREST error (or a thrown exception) to the shared error response. The plain message goes to the
+ * browser; the log line also carries the technical facts (code, the database's own message, what to fix) for whoever looks
+ * after the app.
+ */
 export function errorResponse(err: unknown, ctx: ErrorContext, label: string): NextResponse {
   const { status, body } = mapSupabaseError(err, ctx);
   if (status >= 500 || status === 403) {
-    console.error(`[${label}] ${status}${body.code ? ` ${body.code}` : ""}${body.detail ? ` ${body.detail}` : ""}`);
+    console.error(
+      `[${label}] ${status}${body.code ? ` ${body.code}` : ""}${body.detail ? ` ${body.detail}` : ""}${body.technical ? ` | ${body.technical}` : ""}`
+    );
   }
   return json(body, status);
 }
@@ -40,17 +56,23 @@ export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+export const REQUEST_TOO_LARGE = "The request is too large.";
+
+/**
+ * Reads the JSON object a POST or PUT sends. `status` is 413 for a body over the size limit (refused before it is read when
+ * the declared Content-Length already says so) and 400 for anything that is not a JSON object.
+ */
 export async function readJsonObject(
   request: Request
-): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; error: string }> {
-  let raw: unknown;
-  try {
-    raw = await request.json();
-  } catch {
-    return { ok: false, error: "Request body must be valid JSON." };
+): Promise<{ ok: true; body: Record<string, unknown> } | { ok: false; status: 400 | 413; error: string }> {
+  const read = await readJsonBody(request);
+  if (!read.ok) {
+    return read.reason === "too-large"
+      ? { ok: false, status: 413, error: REQUEST_TOO_LARGE }
+      : { ok: false, status: 400, error: "Request body must be valid JSON." };
   }
-  if (!isRecord(raw)) return { ok: false, error: "Request body must be a JSON object." };
-  return { ok: true, body: raw };
+  if (!isRecord(read.value)) return { ok: false, status: 400, error: "Request body must be a JSON object." };
+  return { ok: true, body: read.value };
 }
 
 // ── Field validation ────────────────────────────────────────────────────────────────────────────
@@ -97,14 +119,52 @@ function provided(body: Record<string, unknown>, key: string): boolean {
   return Object.prototype.hasOwnProperty.call(body, key) && body[key] !== undefined;
 }
 
-/** Nullable text column: null or blank clears it; anything that is not a string is rejected rather than coerced. */
-function parseOptionalText(v: unknown, label: string, field: string, trim: boolean): Parsed<string | null> {
+/** How a nullable text column is read: what it is called in messages, its size limit and whether it must be a web address. */
+type TextRule = {
+  /** Start of the message: "Name" reads "Name is too long", "Notes" reads "Notes are too long". */
+  label: string;
+  verb: "is" | "are";
+  field: string;
+  max: number;
+  /** Trim the ends before storing (false keeps the person's own spacing and line breaks, as notes do). */
+  trim: boolean;
+  /**
+   * "address": must be an absolute http:// or https:// address (the photo address, which the browser requests as it is).
+   * "link": the same, or a bare "shop.example.com/reorder" that every screen already shows as an https link (the vendor link).
+   */
+  url: false | "address" | "link";
+};
+
+/**
+ * Nullable text column: null or blank clears it; anything that is not a string is rejected rather than coerced, and so is
+ * text that is too long (counted in characters, on the value that will be stored) or, for an address, text that is not a
+ * real http or https address.
+ */
+function parseOptionalText(v: unknown, rule: TextRule): Parsed<string | null> {
   if (v === null) return { ok: true, value: null };
-  if (typeof v !== "string") return fail(`${label} must be text.`, field);
-  if (v.includes(NUL)) return fail(`${label} can’t contain null characters.`, field);
+  if (typeof v !== "string") return fail(`${rule.label} must be text.`, rule.field);
+  if (v.includes(NUL)) return fail(`${rule.label} can’t contain null characters.`, rule.field);
   if (v.trim() === "") return { ok: true, value: null };
-  return { ok: true, value: trim ? v.trim() : v };
+  const value = rule.trim ? v.trim() : v;
+  if (exceedsLength(value, rule.max)) return fail(tooLong(rule.label, rule.verb, rule.max), rule.field);
+  if (rule.url === "address" && !isHttpUrlText(value)) {
+    return fail(`${rule.label} must be a web address that starts with http:// or https://.`, rule.field);
+  }
+  if (rule.url === "link" && !isVendorLinkText(value)) {
+    return fail(`${rule.label} must be a web address, for example https://shop.example.com/reorder.`, rule.field);
+  }
+  return { ok: true, value };
 }
+
+function tooLong(label: string, verb: "is" | "are", max: number): string {
+  return `${label} ${verb} too long (maximum ${max} characters).`;
+}
+
+const NAME_RULE: TextRule = { label: "Name", verb: "is", field: "name", max: NAME_MAX_LENGTH, trim: true, url: false };
+const PHOTO_URL_RULE: TextRule = { label: "Photo URL", verb: "is", field: "photo_url", max: PHOTO_URL_MAX_LENGTH, trim: true, url: "address" };
+const VENDOR_URL_RULE: TextRule = { label: "Vendor URL", verb: "is", field: "vendor_url", max: VENDOR_URL_MAX_LENGTH, trim: true, url: "link" };
+// Notes keep their own line breaks and spacing; only an all-blank value is treated as "no notes".
+const NOTES_RULE: TextRule = { label: "Notes", verb: "are", field: "notes", max: NOTES_MAX_LENGTH, trim: false, url: false };
 
 function parseBarcode(v: unknown): Parsed<string> {
   if (v === null || v === undefined) return fail("Barcode is required", "barcode");
@@ -112,9 +172,7 @@ function parseBarcode(v: unknown): Parsed<string> {
   const s = v.trim();
   if (s === "") return fail("Barcode is required", "barcode");
   if (s.includes(NUL)) return fail("Barcode can’t contain null characters.", "barcode");
-  if ([...s].length > BARCODE_MAX_LENGTH) {
-    return fail(`Barcode is too long (maximum ${BARCODE_MAX_LENGTH} characters).`, "barcode");
-  }
+  if (exceedsLength(s, BARCODE_MAX_LENGTH)) return fail(tooLong("Barcode", "is", BARCODE_MAX_LENGTH), "barcode");
   return { ok: true, value: s };
 }
 
@@ -129,7 +187,9 @@ function parseUnit(v: unknown): Parsed<string> {
   if (v === null) return { ok: true, value: "units" };
   if (typeof v !== "string") return fail("Unit must be text.", "unit");
   if (v.includes(NUL)) return fail("Unit can’t contain null characters.", "unit");
-  return { ok: true, value: v.trim() || "units" };
+  const unit = v.trim();
+  if (exceedsLength(unit, UNIT_MAX_LENGTH)) return fail(tooLong("Unit", "is", UNIT_MAX_LENGTH), "unit");
+  return { ok: true, value: unit || "units" };
 }
 
 /**
@@ -140,7 +200,7 @@ export function readMedicationFields(body: Record<string, unknown>): { ok: true;
   const patch: MedicationPatch = {};
 
   if (provided(body, "name")) {
-    const r = parseOptionalText(body.name, "Name", "name", true);
+    const r = parseOptionalText(body.name, NAME_RULE);
     if (!r.ok) return r;
     patch.name = r.value;
   }
@@ -150,7 +210,7 @@ export function readMedicationFields(body: Record<string, unknown>): { ok: true;
     patch.barcode = r.value;
   }
   if (provided(body, "photo_url")) {
-    const r = parseOptionalText(body.photo_url, "Photo URL", "photo_url", true);
+    const r = parseOptionalText(body.photo_url, PHOTO_URL_RULE);
     if (!r.ok) return r;
     patch.photo_url = r.value;
   }
@@ -165,7 +225,7 @@ export function readMedicationFields(body: Record<string, unknown>): { ok: true;
     patch.threshold = r.value;
   }
   if (provided(body, "vendor_url")) {
-    const r = parseOptionalText(body.vendor_url, "Vendor URL", "vendor_url", true);
+    const r = parseOptionalText(body.vendor_url, VENDOR_URL_RULE);
     if (!r.ok) return r;
     patch.vendor_url = r.value;
   }
@@ -175,8 +235,7 @@ export function readMedicationFields(body: Record<string, unknown>): { ok: true;
     patch.unit = r.value;
   }
   if (provided(body, "notes")) {
-    // Notes keep their own line breaks and spacing; only an all-blank value is treated as "no notes".
-    const r = parseOptionalText(body.notes, "Notes", "notes", false);
+    const r = parseOptionalText(body.notes, NOTES_RULE);
     if (!r.ok) return r;
     patch.notes = r.value;
   }

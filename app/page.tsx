@@ -806,7 +806,7 @@ export default function MainPage() {
                       </span>
                     </div>
                   )}
-                  {/* min-w-0 on the text column and break-all on the barcode: a barcode of up to 128 characters has no spaces
+                  {/* min-w-0 on the text column and break-all on the barcode: a long barcode (up to 1024 characters) has no spaces
                       to wrap at, and would otherwise push the card (and the page) sideways. */}
                   <div className="flex items-start gap-3 mb-4">
                     {phase.medication.photo_url ? (

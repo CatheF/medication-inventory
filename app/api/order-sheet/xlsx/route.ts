@@ -9,6 +9,7 @@ import { MAX_SHEET_YEAR, MIN_SHEET_YEAR, isValidISODate } from "@/lib/order-shee
 import { ORDER_SHEET_LIMITS } from "@/lib/order-sheet/types";
 import type { SheetOptions, SheetRowInput } from "@/lib/order-sheet/types";
 import { buildOrderSheetXlsx } from "@/lib/order-sheet/xlsx";
+import { readJsonBody, rejectUnsafeRequest } from "../../_guard";
 
 // POST /api/order-sheet/xlsx
 //
@@ -19,8 +20,11 @@ import { buildOrderSheetXlsx } from "@/lib/order-sheet/xlsx";
 export const runtime = "nodejs";
 
 const XLSX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-/** A legitimate request is a few tens of KB (500 rows). Refuse anything much larger before parsing it. */
-const MAX_BODY_CHARS = 262144;
+/**
+ * A legitimate request is a few tens of KB (500 rows). Anything larger is refused: before the body is read when the declared
+ * Content-Length is already over this, and after reading it when no Content-Length was sent (counted in bytes).
+ */
+const MAX_BODY_BYTES = 262144;
 /** Ids per `.in("id", …)` read, to keep the request URL short. */
 const READ_CHUNK_SIZE = 200;
 /** Said when the date is not a real day, or is outside the years the order sheet accepts (the same range the page saves). */
@@ -177,14 +181,17 @@ async function readMedications(ids: number[]): Promise<Medication[] | NextRespon
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  let body: unknown;
-  try {
-    const text = await request.text();
-    if (text.length > MAX_BODY_CHARS) return jsonError(413, "The order sheet is too large to export.");
-    body = JSON.parse(text);
-  } catch {
-    return jsonError(400, "The request body must be valid JSON.");
+  // A web page on another site must not be able to start an export with a "simple" POST: see app/api/_guard.ts.
+  const refused = rejectUnsafeRequest(request);
+  if (refused) return refused;
+
+  const read = await readJsonBody(request, MAX_BODY_BYTES);
+  if (!read.ok) {
+    return read.reason === "too-large"
+      ? jsonError(413, "The order sheet is too large to export.")
+      : jsonError(400, "The request body must be valid JSON.");
   }
+  const body = read.value;
 
   const parsed = validateRequest(body);
   if (!parsed.ok) return jsonError(400, parsed.error, parsed.field);

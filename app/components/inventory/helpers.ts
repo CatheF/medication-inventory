@@ -6,6 +6,7 @@
 import type { Category, Medication } from "@/lib/db";
 import { categoryTitles, idKey } from "@/lib/filter-chips";
 import { naturalCompare, type ItemGroup } from "@/lib/inventory-view";
+import { safeHttpUrl } from "@/lib/safe-url";
 
 export type StockStatus = "out" | "low" | "ok";
 
@@ -35,6 +36,10 @@ export function ignoreHeldEnter(event: { key: string; repeat: boolean; preventDe
 // The comparison key for a category id (trimmed, lower-cased, blank = null) is defined once, in lib/filter-chips.ts, because the
 // filter chips on both screens need it too. It is re-exported so the Inventory components keep importing it from here.
 export { idKey };
+
+// The link guard (http and https only) moved to lib/safe-url.ts, because the API now applies the same rule when it stores a
+// vendor link or a photo address. The Inventory components keep importing it from here.
+export { safeHttpUrl };
 
 export type CategoryOption = { id: string; key: string; title: string };
 
@@ -79,28 +84,4 @@ export function displayName(item: Pick<Medication, "name">): string | null {
  */
 export function rememberedName(item: Pick<Medication, "name" | "barcode">): string {
   return displayName(item) ?? `Unnamed item (barcode ${item.barcode})`;
-}
-
-/**
- * A link target that is safe to put in href: only http(s). A bare "shop.example.com/reorder" is read as https.
- * Anything else (javascript:, mailto:, plain text) yields null and the row shows no link.
- */
-export function safeHttpUrl(raw: string | null | undefined): string | null {
-  if (typeof raw !== "string") return null;
-  const text = raw.trim();
-  if (text === "") return null;
-  try {
-    const url = new URL(text);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.toString() : null;
-  } catch {
-    // not an absolute URL; try the bare-domain form below
-  }
-  if (/^[\w-]+(\.[\w-]+)+(\/\S*)?$/.test(text)) {
-    try {
-      return new URL(`https://${text}`).toString();
-    } catch {
-      return null;
-    }
-  }
-  return null;
 }

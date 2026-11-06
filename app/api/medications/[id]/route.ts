@@ -1,5 +1,6 @@
 import { NextRequest } from "next/server";
 import { supabase } from "@/lib/db";
+import { ITEM_NOT_FOUND_MESSAGE } from "@/lib/api-errors";
 import { parseMedicationId } from "@/lib/ids";
 import { normalizeMedication } from "@/lib/normalize";
 import { errorResponse, invalidIdResponse, json, readJsonObject, readMedicationFields } from "../_shared";
@@ -9,7 +10,7 @@ export const dynamic = "force-dynamic";
 
 type Params = { params: Promise<{ id: string }> };
 
-const NOT_FOUND = "Item not found. It may have been deleted.";
+const NOT_FOUND = ITEM_NOT_FOUND_MESSAGE;
 
 export async function GET(_request: NextRequest, { params }: Params) {
   try {
@@ -36,7 +37,7 @@ export async function PUT(request: NextRequest, { params }: Params) {
     if (id === null) return invalidIdResponse();
 
     const parsedBody = await readJsonObject(request);
-    if (!parsedBody.ok) return json({ error: parsedBody.error }, 400);
+    if (!parsedBody.ok) return json({ error: parsedBody.error }, parsedBody.status);
 
     const fields = readMedicationFields(parsedBody.body);
     if (!fields.ok) return json({ error: fields.error, field: fields.field }, 400);

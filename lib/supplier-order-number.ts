@@ -6,9 +6,12 @@
 // characters, direction marks and bidi embeddings/overrides/isolates, ...) are rejected: a code containing them reads
 // differently on screen and on the printed sheet, so a human could never match it. See lib/text-safety.ts for the
 // exact rule.
+import { SUPPLIER_ORDER_NUMBER_MAX_LENGTH, exceedsLength } from "./limits";
 import { hasInvisibleOrControlCharacter } from "./text-safety";
 
-export const SUPPLIER_ORDER_NUMBER_MAX_LENGTH = 64;
+// The limit lives with the other size limits in lib/limits.ts; it is re-exported because the Admin form and the tests import
+// it from here.
+export { SUPPLIER_ORDER_NUMBER_MAX_LENGTH };
 
 /**
  * The reason given when a code contains invisible or control characters. Exported so the Admin page can recognise this
@@ -39,7 +42,7 @@ export function parseSupplierOrderNumber(input: unknown): ParsedSupplierOrderNum
       reason: SUPPLIER_ORDER_NUMBER_INVISIBLE_REASON,
     };
   }
-  if ([...trimmed].length > SUPPLIER_ORDER_NUMBER_MAX_LENGTH) {
+  if (exceedsLength(trimmed, SUPPLIER_ORDER_NUMBER_MAX_LENGTH)) {
     return {
       ok: false,
       reason: `Supplier order number is too long (maximum ${SUPPLIER_ORDER_NUMBER_MAX_LENGTH} characters).`,

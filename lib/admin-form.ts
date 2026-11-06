@@ -17,6 +17,7 @@ import {
   type CategoryCounts,
   type CategoryFilter,
 } from "./inventory-view";
+import { CATEGORY_NAME_MAX_LENGTH, UNIT_MAX_LENGTH } from "./limits";
 import { normalizeCategory, normalizeMedication } from "./normalize";
 import {
   SUPPLIER_ORDER_NUMBER_INVISIBLE_REASON,
@@ -249,8 +250,8 @@ export function findNotStored(saved: Medication, sent: SavePayload): string[] {
 // nothing is saved until it fits. Lengths are counted the way the server counts them: characters (code points) of the text
 // without the spaces around it, so an emoji is one character, not two.
 
-export const CATEGORY_NAME_MAX_LENGTH = 60;
-export const UNIT_MAX_LENGTH = 40;
+// The numbers are the server's (lib/limits.ts); they are re-exported here because the form and its tests speak of them.
+export { CATEGORY_NAME_MAX_LENGTH, UNIT_MAX_LENGTH };
 
 export type FieldProblem = {
   /** Plain words for the person, shown next to the field. */

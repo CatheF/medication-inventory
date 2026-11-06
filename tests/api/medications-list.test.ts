@@ -365,18 +365,20 @@ describe.each(ID_SHAPES)("GET /api/medications is complete and honest on the $la
       expect(Array.isArray(await res.json())).toBe(false);
     });
 
-    it("answers 500 with the API-key message when the database rejects the app's key", async () => {
+    it("answers 500 with a plain message about the app's connection when the database rejects the app's key", async () => {
       installFake(options).failNext({ code: "PGRST301", message: "JWT expired" }, { table: "medications" });
       const res = await api.listItems();
       expect(res.status).toBe(500);
-      expect(errorTextOf(await res.json())).toMatch(/API key/i);
+      const body = await bodyRecord(res);
+      expect(errorTextOf(body)).toMatch(/connection to the database was refused/i);
+      expect(String(body.technical)).toMatch(/API key/); // the jargon is in its own field
     });
 
     it("answers 403 with a plain permission message when the database user lacks the privilege to read", async () => {
       installFake(options).failNext({ code: "42501", message: "permission denied for table medications" }, { table: "medications" });
       const res = await api.listItems();
       expect(res.status).toBe(403);
-      expect(errorTextOf(await res.json())).toMatch(/permission denied/i);
+      expect(errorTextOf(await res.json())).toMatch(/does not have permission to read this data/i);
     });
 
     it("answers 500 with the error code for an unexpected database error", async () => {
@@ -384,7 +386,7 @@ describe.each(ID_SHAPES)("GET /api/medications is complete and honest on the $la
       const res = await api.listItems();
       expect(res.status).toBe(500);
       const body = await bodyRecord(res);
-      expect(body.error).toBe("Unexpected database error.");
+      expect(body.error).toMatch(/^Something went wrong while reading from the database\./);
       expect(body.code).toBe("XX000");
     });
 
@@ -393,7 +395,7 @@ describe.each(ID_SHAPES)("GET /api/medications is complete and honest on the $la
       const res = await api.listItems();
       expect(res.status).toBe(500);
       const body = await bodyRecord(res);
-      for (const key of Object.keys(body)) expect(["error", "code", "detail", "field"]).toContain(key);
+      for (const key of Object.keys(body)) expect(["error", "code", "detail", "technical", "field"]).toContain(key);
       expect(typeof body.detail).toBe("string");
       expect((body.detail as string).length).toBeLessThanOrEqual(300);
       expect(JSON.stringify(body)).not.toMatch(/\bat\s+\S+\s+\(.*:\d+:\d+\)/); // no "at fn (file:line:col)" stack lines

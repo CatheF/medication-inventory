@@ -309,13 +309,16 @@ describe.each(ID_SHAPES)("GET, PUT and DELETE /api/medications/[id] on the $labe
       expect(errorTextOf(await res.json())).toMatch(/not found/i);
     });
 
-    it("answers 403 with a row-level-security message when the database refuses the update with an error", async () => {
+    it("answers 403 with a plain message (technical cause in its own field) when the database refuses the update with an error", async () => {
       const item = itemNamed(medications, "Naproxen 220 mg");
       const before = snapshotDb(fake);
       fake.failNext({ code: "42501", message: 'new row violates row-level security policy for table "medications"' }, { table: "medications", op: "update" });
       const res = await api.updateItem(item.id, { stock: 1 });
       expect(res.status).toBe(403);
-      expect(errorTextOf(await res.json())).toMatch(/row-level security/i);
+      const body = await bodyRecord(res);
+      expect(errorTextOf(body)).toMatch(/^The database did not allow this change, so nothing was saved\./);
+      expect(errorTextOf(body)).not.toMatch(/row-level/i);
+      expect(String(body.technical)).toMatch(/row-level security/i);
       expect(snapshotDb(fake)).toEqual(before);
     });
 
@@ -355,7 +358,7 @@ describe.each(ID_SHAPES)("GET, PUT and DELETE /api/medications/[id] on the $labe
       fake.failNext({ code: "XX000", message: "internal error" }, { table: "medications", op: "update" });
       const res = await api.updateItem(item.id, { stock: 1 });
       expect(res.status).toBe(500);
-      expect(await bodyRecord(res)).toMatchObject({ error: "Unexpected database error.", code: "XX000" });
+      expect(await bodyRecord(res)).toMatchObject({ error: expect.stringMatching(/^Something went wrong in the database\./) as unknown, code: "XX000" });
       expect(snapshotDb(fake)).toEqual(before);
     });
   });

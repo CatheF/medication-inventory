@@ -553,7 +553,7 @@ describe.each(ID_SHAPES)("failed category saves, on the $label", ({ options }) =
     const res = await api.updateItem(item.id, { stock: 99, category_id: absentCategoryId(options.categoryIdType ?? "uuid") });
     expect(res.status).toBe(400);
     const body = await bodyRecord(res);
-    expect(errorTextOf(body)).toBe("That category no longer exists. Reload and choose another.");
+    expect(errorTextOf(body)).toBe("That category no longer exists, so nothing was saved. Reload the page and choose another category.");
     expect(body.field).toBe("category_id");
     expect(snapshotDb(fake)).toEqual(before);
   });

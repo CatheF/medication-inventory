@@ -420,15 +420,24 @@ const SEED_UNNAMED_COUNT = SEED.filter((m) => m.is_unnamed).length;
 const SEED_UNCATEGORIZED_COUNT = SEED.filter((m) => m.category_id === null).length;
 const inSeedCategory = (id: string, shape: IdShape = "uuid"): number => buildMedications({ shape }).filter((m) => m.category_id === id).length;
 
-// Messages pinned by SPEC 2.5 (the UI and the E2E mock replicate them).
+// What staff read (plain words; the technical facts are in the separate `technical` field, see tests/unit/api-errors.test.ts).
+// The E2E mock replicates the first two.
 const RLS_CREATE_CATEGORY =
-  "Couldn’t create the category: the database refused the change (row-level security). " +
-  "The categories access migration hasn’t been applied yet — see supabase/migrations/.";
-const SUPPLIER_COLUMN_MISSING =
-  "Supplier order numbers aren’t available yet: the database is missing the supplier_order_number column. Apply the latest migration.";
-const UNREACHABLE = "Can’t reach the database. Check the connection, and that the Supabase project isn’t paused.";
-const NOT_FOUND = "Item not found. It may have been deleted.";
-const NO_SUCH_CATEGORY = "That category no longer exists. Reload and choose another.";
+  "Categories cannot be saved yet. This needs a one-time database update by whoever looks after this app. You can still save the item without a category.";
+const SUPPLIER_UPDATE =
+  "Supplier order numbers cannot be saved yet. This needs a one-time database update by whoever looks after this app. Nothing was changed on this item.";
+const SUPPLIER_CREATE =
+  "Supplier order numbers cannot be saved yet. This needs a one-time database update by whoever looks after this app. The item was not created.";
+const UNREACHABLE_READ =
+  "Can’t reach the database. Check the internet connection and try again in a minute. If this keeps happening, ask whoever looks after this app: the database may be paused.";
+const UNREACHABLE_WRITE =
+  "Can’t reach the database. Check the internet connection, then look at the list to see whether your change was saved before you try again. If this keeps happening, ask whoever looks after this app: the database may be paused.";
+const UNEXPECTED_READ = "Something went wrong while reading from the database. Try again. If this keeps happening, ask whoever looks after this app.";
+const BAD_API_KEY_READ =
+  "The app’s connection to the database was refused, so the app cannot read anything right now. This needs a fix by whoever looks after this app.";
+const DUPLICATE_BARCODE = "Barcode already exists: another item uses it, so nothing was saved. Search for that item, or use a different barcode.";
+const NOT_FOUND = "Item not found. It may have been deleted by someone else. Reload the list to see what is there.";
+const NO_SUCH_CATEGORY = "That category no longer exists, so nothing was saved. Reload the page and choose another category.";
 
 beforeEach(() => {
   holder.client = null;
@@ -491,7 +500,7 @@ describe("GET /api/categories", () => {
     expect(res.status).toBe(503);
     const body = await readJson(res);
     expect(Array.isArray(body)).toBe(false);
-    expect(body.error).toBe(UNREACHABLE);
+    expect(body.error).toBe(UNREACHABLE_READ);
     expect(res.headers.get("cache-control")).toBe("no-store");
   });
 
@@ -500,7 +509,7 @@ describe("GET /api/categories", () => {
     db.failOn("categories", "select", pg("XX000", "boom"));
     const res = await categoriesRoute.GET();
     expect(res.status).toBe(500);
-    expect(await readJson(res)).toMatchObject({ error: "Unexpected database error.", code: "XX000" });
+    expect(await readJson(res)).toMatchObject({ error: UNEXPECTED_READ, code: "XX000" });
   });
 });
 
@@ -902,7 +911,7 @@ describe("GET /api/medications", () => {
       expect(res.status).toBe(503);
       const body = await readJson(res);
       expect(Array.isArray(body)).toBe(false);
-      expect(body.error).toBe(UNREACHABLE);
+      expect(body.error).toBe(UNREACHABLE_READ);
     });
 
     it("unexpected error -> 500 with the code", async () => {
@@ -910,7 +919,7 @@ describe("GET /api/medications", () => {
       db.failOn("medications", "select", pg("XX000", "boom"));
       const res = await medicationsRoute.GET(req("GET", "/api/medications"));
       expect(res.status).toBe(500);
-      expect(await readJson(res)).toMatchObject({ error: "Unexpected database error.", code: "XX000" });
+      expect(await readJson(res)).toMatchObject({ error: UNEXPECTED_READ, code: "XX000" });
     });
 
     it("a failure on the SECOND page returns the error, not the first page as if it were everything", async () => {
@@ -926,7 +935,7 @@ describe("GET /api/medications", () => {
       db.failOn("medications", "select", pg("PGRST301", "JWSError JWSInvalidSignature"));
       const res = await medicationsRoute.GET(req("GET", "/api/medications"));
       expect(res.status).toBe(500);
-      expect((await readJson(res)).error).toBe("The database rejected the app’s API key.");
+      expect((await readJson(res)).error).toBe(BAD_API_KEY_READ);
     });
   });
 
@@ -1165,7 +1174,7 @@ describe("POST /api/medications", () => {
     const db = install({ supplierColumn: false });
     const res = await medicationsRoute.POST(req("POST", "/api/medications", { barcode: "PRE-2", supplier_order_number: "0092" }));
     expect(res.status).toBe(409);
-    expect(await readJson(res)).toMatchObject({ error: SUPPLIER_COLUMN_MISSING, field: "supplier_order_number" });
+    expect(await readJson(res)).toMatchObject({ error: SUPPLIER_CREATE, field: "supplier_order_number" });
     expect(db.tables.medications.some((m) => m.barcode === "PRE-2")).toBe(false);
   });
 
@@ -1192,9 +1201,9 @@ describe("POST /api/medications", () => {
     expect(({} as Record<string, unknown>).evil).toBeUndefined();
   });
 
-  it("accepts a 128 character barcode", async () => {
+  it("accepts a 1024 character barcode", async () => {
     install();
-    const res = await medicationsRoute.POST(req("POST", "/api/medications", { barcode: "9".repeat(128) }));
+    const res = await medicationsRoute.POST(req("POST", "/api/medications", { barcode: "9".repeat(1024) }));
     expect(res.status).toBe(201);
   });
 
@@ -1203,7 +1212,7 @@ describe("POST /api/medications", () => {
     ["null barcode", { barcode: null }, "barcode"],
     ["blank barcode", { barcode: "   " }, "barcode"],
     ["numeric barcode (leading zeros would be lost)", { barcode: 12345 }, "barcode"],
-    ["129 character barcode", { barcode: "9".repeat(129) }, "barcode"],
+    ["1025 character barcode", { barcode: "9".repeat(1025) }, "barcode"],
     ["NUL in barcode", { barcode: `12${cp(0)}34` }, "barcode"],
     ["negative stock", { barcode: "1", stock: -1 }, "stock"],
     ["fractional stock", { barcode: "1", stock: 1.5 }, "stock"],
@@ -1266,7 +1275,7 @@ describe("POST /api/medications", () => {
     const existing = db.tables.medications[0].barcode as string;
     const res = await medicationsRoute.POST(req("POST", "/api/medications", { barcode: existing, is_unnamed: true }));
     expect(res.status).toBe(409);
-    expect((await readJson(res)).error).toBe("Barcode already exists");
+    expect((await readJson(res)).error).toBe(DUPLICATE_BARCODE);
   });
 
   it("a category that no longer exists -> 400 with a message staff can act on", async () => {
@@ -1281,7 +1290,10 @@ describe("POST /api/medications", () => {
     db.failOn("medications", "insert", RLS_ERROR);
     const res = await medicationsRoute.POST(req("POST", "/api/medications", { barcode: "RLS-1" }));
     expect(res.status).toBe(403);
-    expect(await readJson(res)).toMatchObject({ error: "The database refused this change (row-level security).", code: "42501" });
+    expect(await readJson(res)).toMatchObject({
+      error: "The database did not allow this change, so nothing was saved. This is a database setting, not something you typed. Ask whoever looks after this app to check it.",
+      code: "42501",
+    });
   });
 
   it("unreachable database -> 503; unexpected error -> 500", async () => {
@@ -1514,7 +1526,7 @@ describe("PUT /api/medications/[id] (partial update)", () => {
       const db = install({ supplierColumn: false });
       const res = await medicationRoute.PUT(req("PUT", `/api/medications/${ID}`, { name: "Should not save", supplier_order_number: value }), idParams(String(ID)));
       expect(res.status).toBe(409);
-      expect(await readJson(res)).toMatchObject({ error: SUPPLIER_COLUMN_MISSING, field: "supplier_order_number" });
+      expect(await readJson(res)).toMatchObject({ error: SUPPLIER_UPDATE, field: "supplier_order_number" });
       expect(dbRow(db, ID).name).toBe("Ibuprofen 200 mg, tablets");
     });
   });
@@ -1608,7 +1620,7 @@ describe("PUT /api/medications/[id] (partial update)", () => {
       ["null barcode", { barcode: null }, "barcode"],
       ["blank barcode", { barcode: "  " }, "barcode"],
       ["numeric barcode", { barcode: 123 }, "barcode"],
-      ["129 character barcode", { barcode: "9".repeat(129) }, "barcode"],
+      ["1025 character barcode", { barcode: "9".repeat(1025) }, "barcode"],
       ["numeric name", { name: 5 }, "name"],
     ])("rejects %s with 400 and leaves the row untouched", async (_label, body, field) => {
       const db = install();
@@ -1625,7 +1637,7 @@ describe("PUT /api/medications/[id] (partial update)", () => {
       const other = db.tables.medications[5].barcode as string;
       const res = await medicationRoute.PUT(req("PUT", `/api/medications/${ID}`, { barcode: other }), idParams(String(ID)));
       expect(res.status).toBe(409);
-      expect((await readJson(res)).error).toBe("Barcode already exists");
+      expect((await readJson(res)).error).toBe(DUPLICATE_BARCODE);
     });
 
     it("re-saving an item with its own barcode is not a conflict", async () => {
@@ -1687,7 +1699,7 @@ describe("PUT /api/medications/[id] (partial update)", () => {
       db.failOn("medications", "update", NETWORK_ERROR);
       const res = await medicationRoute.PUT(req("PUT", `/api/medications/${ID}`, { name: "N" }), idParams(String(ID)));
       expect(res.status).toBe(503);
-      expect((await readJson(res)).error).toBe(UNREACHABLE);
+      expect((await readJson(res)).error).toBe(UNREACHABLE_WRITE);
     });
 
     it("unexpected error -> 500 with the code", async () => {
@@ -1819,7 +1831,7 @@ describe("GET /api/medications/barcode/[code]", () => {
       db.failOn("medications", "select", NETWORK_ERROR);
       const res = await barcodeRoute.GET(req("GET", "/api/medications/barcode/x"), codeParams("0049000028911"));
       expect(res.status).toBe(503);
-      expect((await readJson(res)).error).toBe(UNREACHABLE);
+      expect((await readJson(res)).error).toBe(UNREACHABLE_READ);
     });
 
     it("unexpected error -> 500", async () => {
@@ -1862,12 +1874,19 @@ describe("GET /api/medications/barcode/[code]", () => {
       expect(db.callsTo("medications", "select")).toHaveLength(1);
     });
 
-    it("falls back to one extra decode for a caller that encoded twice", async () => {
+    it("never decodes a second time: a caller that encoded twice finds nothing, and the lookup asks the database once", async () => {
       const db = install();
       db.tables.medications.push({ ...dbRow(db, 101), id: 5004, barcode: "AB 12" });
       const res = await barcodeRoute.GET(req("GET", "/api/medications/barcode/x"), codeParams("AB%2012"));
-      expect(res.status).toBe(200);
-      expect((await readJson<Medication>(res)).id).toBe(5004);
+      expect(res.status).toBe(404);
+      expect(db.callsTo("medications", "select")).toHaveLength(1);
+    });
+
+    it("an absent barcode that looks like a percent escape ('A%41') never returns the item whose barcode is the decoded text ('AA')", async () => {
+      const db = install();
+      db.tables.medications.push({ ...dbRow(db, 101), id: 5005, barcode: "AA" });
+      const res = await barcodeRoute.GET(req("GET", "/api/medications/barcode/x"), codeParams("A%41"));
+      expect(res.status).toBe(404);
     });
 
     it.each(["%", "%E0%A4%A", "%zz", "a%", "%%%%", "A".repeat(20_000)])("never throws for %j (404 for an unknown code)", async (code) => {

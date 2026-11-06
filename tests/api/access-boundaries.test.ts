@@ -158,7 +158,11 @@ describe("anonymous callers can use every route (documentation: this is how the 
     expect((await importRoute.POST(csvRequest(forged))).status).toBe(200);
     expect((await uploadRoute.POST(photoRequest(forged))).status).toBe(200);
     const forgedExport = await exportRoute.POST(
-      new NextRequest("http://localhost/api/order-sheet/xlsx", { method: "POST", body: JSON.stringify({ date: "2026-11-05", rows: [{ id: 100 }] }), headers: forged })
+      new NextRequest("http://localhost/api/order-sheet/xlsx", {
+        method: "POST",
+        body: JSON.stringify({ date: "2026-11-05", rows: [{ id: 100 }] }),
+        headers: { ...forged, "content-type": "application/json" },
+      })
     );
     expect(forgedExport.status).toBe(200);
   });
@@ -268,7 +272,7 @@ describe("limitations that follow from how row-level security answers (documenta
     fake.failNext({ code: "42501", message: "permission denied for table medications" }, { table: "medications" });
     const res = await api.listItems();
     expect(res.status).toBe(403);
-    expect(errorTextOf(await res.json())).toMatch(/permission denied/i);
+    expect(errorTextOf(await res.json())).toMatch(/does not have permission to read/i);
     expect(Array.isArray(await (await api.listItems()).json())).toBe(true); // the next, healthy request lists items again
   });
 });

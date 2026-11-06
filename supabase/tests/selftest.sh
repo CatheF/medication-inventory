@@ -13,11 +13,18 @@
 #              pass, with the same number of checks as the control
 #   mutants    copies of the migration with ONE deliberate defect each: the
 #              suite must exit 1 and print the failure that names that defect
+#   guard      the two safety rules at the top of run.sh, which need no database:
+#              a host that is not local is REFUSED (exit 2) before anything is
+#              contacted, including DNS names that merely start with "127."
+#              such as 127.attacker.example; and "cannot run here" is a SKIPPED
+#              exit 0 by default but exit 2 when TEST_REQUIRE_DB=1
 #
 # Usage       bash supabase/tests/selftest.sh   (about 30 s: the cases run in parallel)
-# Settings    TEST_PGHOST / TEST_PGPORT / TEST_PGUSER, as for run.sh
+# Settings    TEST_PGHOST / TEST_PGPORT / TEST_PGUSER / TEST_REQUIRE_DB, as for run.sh
+#             (the guard cases set their own TEST_PGHOST, TEST_PGPORT and TEST_REQUIRE_DB)
 # Exit code   0 every case behaved as expected (or SKIPPED: no local PostgreSQL),
-#             1 a case did not, 2 the files it needs are missing or run.sh refused.
+#             1 a case did not, 2 the files it needs are missing or run.sh refused
+#             (or, with TEST_REQUIRE_DB=1, there was no local PostgreSQL to test against).
 
 set -u -o pipefail
 
@@ -113,6 +120,38 @@ GOOD=0
 good() { GOOD=$((GOOD + 1)); echo "  ok    $1"; }
 bad()  { BAD=$((BAD + 1));  echo "  BAD   $1"; }
 
+# ── The guard cases: they need no database ───────────────────────────────────
+# Port 1 has no server, so a host that run.sh lets through ends in SKIPPED (exit 0) at the connection step, which shows it was
+# accepted without anything being contacted. A host it refuses never gets that far: REFUSED, exit 2.
+guard_expect() { # label wanted-exit wanted-line-start [VAR=value ...]
+  local label="$1" want_rc="$2" want_start="$3" out rc
+  shift 3
+  out="$(cd /tmp && env TEST_QUIET=1 TEST_PGPORT=1 TEST_REQUIRE_DB=0 "$@" bash "$RUNNER" 2>&1)"
+  rc=$?
+  if [ "$rc" = "$want_rc" ] && printf '%s\n' "$out" | grep -q "^$want_start"; then
+    good "$label"
+  else
+    bad "$label: wanted exit $want_rc and a line starting with $want_start, got exit $rc: $(printf '%s' "$out" | head -n 2 | tr '\n' ' ')"
+  fi
+}
+
+guard_section() {
+  local h
+  echo
+  echo "guard: only a numeric loopback address, localhost, ::1 or a unix socket directory may be used"
+  for h in 127.attacker.example 127.0.0.1.attacker.example 127.1 127.256.0.1 localhost.attacker.example 10.0.0.5 example.com 127.0.0.1:5432; do
+    guard_expect "TEST_PGHOST=$h is refused" 2 REFUSED TEST_PGHOST="$h"
+  done
+  for h in 127.0.0.1 127.1.2.3 localhost ::1 /var/run/postgresql; do
+    guard_expect "TEST_PGHOST=$h is let through to the connection step" 0 SKIPPED TEST_PGHOST="$h"
+  done
+  echo
+  echo "guard: a run that cannot happen is a skip by default and a failure with TEST_REQUIRE_DB=1"
+  guard_expect "no server, default: SKIPPED, exit 0" 0 SKIPPED TEST_PGHOST=127.0.0.1
+  guard_expect "no server, TEST_REQUIRE_DB=1: SKIPPED then REQUIRED, exit 2" 2 REQUIRED TEST_PGHOST=127.0.0.1 TEST_REQUIRE_DB=1
+  guard_expect "no server, TEST_REQUIRE_DB=1: the SKIPPED reason is still printed" 2 SKIPPED TEST_PGHOST=127.0.0.1 TEST_REQUIRE_DB=1
+}
+
 mkdir -p "$WORK/mutants"
 for m in $MUTANTS; do
   "mk_$m" > "$WORK/mutants/$m.sql"
@@ -139,7 +178,13 @@ wait
 # ── Judge ────────────────────────────────────────────────────────────────────
 if grep -q '^SKIPPED' "$WORK/control.log" 2>/dev/null; then
   grep '^SKIPPED' "$WORK/control.log"
-  echo "SKIPPED: the suite itself could not run here, so there is nothing to self-test."
+  echo "SKIPPED: the suite itself could not run here, so the database cases (control, relocated, mutants) were not run."
+  guard_section
+  if [ "$BAD" -ne 0 ]; then
+    echo "SELFTEST: FAIL ($BAD of $((GOOD + BAD)) cases)"
+    exit 1
+  fi
+  [ "${TEST_REQUIRE_DB:-0}" = 1 ] && exit 2
   exit 0
 fi
 if grep -q '^REFUSED' "$WORK/control.log" 2>/dev/null; then
@@ -194,6 +239,8 @@ EOF
     grep 'FAIL' "$log" | head -n 4 | sed 's/^/        /'
   fi
 done
+
+guard_section
 
 echo
 if [ "$BAD" -eq 0 ]; then
