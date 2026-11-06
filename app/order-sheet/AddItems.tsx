@@ -88,7 +88,7 @@ export function AddItems({ items, categories, isOnSheet, onAdd, status, searchRe
             setQuery("");
           }}
           aria-describedby={helpId}
-          className={`${INPUT} pl-10`}
+          className={`${INPUT} pl-10 text-ellipsis`}
         />
       </div>
       <p id={helpId} className={HELP}>

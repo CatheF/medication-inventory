@@ -96,7 +96,7 @@ export function InventoryToolbar({ view, categories, counts, onChange, searchRef
               autoComplete="off"
               spellCheck={false}
               maxLength={SEARCH_MAX_LENGTH}
-              className={`${CONTROL} pr-3 pl-10 placeholder:text-gray-500`}
+              className={`${CONTROL} pr-3 pl-10 text-ellipsis placeholder:text-gray-500`}
             />
           </div>
         </div>

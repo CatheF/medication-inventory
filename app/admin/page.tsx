@@ -1850,7 +1850,7 @@ export default function AdminPage() {
                       autoComplete="off"
                       spellCheck={false}
                       maxLength={200}
-                      className={`${CONTROL} pr-3 pl-10`}
+                      className={`${CONTROL} pr-3 pl-10 text-ellipsis`}
                     />
                   </div>
                 </div>
