@@ -11,13 +11,13 @@
 //                    (javascript:, data:, file:, mailto:, ...) is refused.
 // Existing stored values are never rewritten by any of them.
 
+// "shop.example.com" or "shop.example.com/reorder?item=1": dotted host names, then an optional path. No scheme, no colon.
+const BARE_ADDRESS = /^[\w-]+(\.[\w-]+)+(\/\S*)?$/;
+
 /**
  * A link target that is safe to put in href: only http(s). A bare "shop.example.com/reorder" is read as https.
  * Anything else (javascript:, mailto:, plain text) yields null and the row shows no link.
  */
-// "shop.example.com" or "shop.example.com/reorder?item=1": dotted host names, then an optional path. No scheme, no colon.
-const BARE_ADDRESS = /^[\w-]+(\.[\w-]+)+(\/\S*)?$/;
-
 export function safeHttpUrl(raw: string | null | undefined): string | null {
   if (typeof raw !== "string") return null;
   const text = raw.trim();

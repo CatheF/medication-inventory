@@ -80,7 +80,7 @@ unset PGDATABASE PGSERVICE PGSERVICEFILE PGOPTIONS PGHOSTADDR
 export PGCONNECT_TIMEOUT=5
 
 # ── Safety: never anything but a local server ────────────────────────────────
-# Only a numeric loopback address, localhost, ::1 or a unix socket directory. A glob such as 127.* would also let through DNS
+# Only a numeric loopback address, localhost, ::1 or a unix socket directory (one value, never a comma-separated list). A glob such as 127.* would also let through DNS
 # names like 127.attacker.example, which can point anywhere.
 is_local_host() {
   local h="$1" octet
@@ -90,7 +90,9 @@ is_local_host() {
     done
     return 0
   fi
+  # A value with a comma is a LIST for libpq, which tries each entry in turn: "/nonexistent,10.1.2.3" would reach the second one.
   case "$h" in
+    *,*) return 1 ;;
     localhost|::1|/*) return 0 ;;
   esac
   return 1

@@ -411,7 +411,7 @@ export default function KioskPage() {
 
         {phase.kind === "error" && (
           <div className="bg-gray-800 border border-red-700 rounded-2xl p-6 text-center">
-            <p className="text-red-400 text-xl mb-4">{phase.message}</p>
+            <p className="text-red-400 text-xl mb-4 [overflow-wrap:anywhere]">{phase.message}</p>
             <button
               onClick={handleCancel}
               className="px-6 py-3 bg-gray-700 hover:bg-gray-600 rounded-xl font-medium"

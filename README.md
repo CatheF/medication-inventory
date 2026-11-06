@@ -49,7 +49,7 @@ Item photos are stored in a Supabase Storage bucket named `medication-photos` (p
 
 What it does (and nothing else): adds the nullable text column `medications.supplier_order_number`, and adds two policies on `categories` for the `anon` role (SELECT and INSERT) so the app can list and create categories where row-level security is on but no policy exists. It is idempotent, runs in one transaction with a 5 second lock timeout, refuses a wrongly typed pre-existing column, and ends with a documented rollback block. The file header contains a read-only **pre-check** query to run first and the exact apply and rollback steps.
 
-**Status: not applied to any project.** Applying it to a real project needs the owner's explicit decision. The app works before and after it: until it is applied, categories still cannot be created or read, and saving a supplier order number answers with a clear "apply the latest migration" message.
+**Status: not applied to any project.** Applying it to a real project needs the owner's explicit decision. The app works before and after it: until it is applied, categories still cannot be created or read, and saving a supplier order number says in plain words that it cannot be saved yet and who to ask (the technical cause is in the line under it).
 
 ## Using the order sheet
 

@@ -139,7 +139,7 @@ guard_section() {
   local h
   echo
   echo "guard: only a numeric loopback address, localhost, ::1 or a unix socket directory may be used"
-  for h in 127.attacker.example 127.0.0.1.attacker.example 127.1 127.256.0.1 localhost.attacker.example 10.0.0.5 example.com 127.0.0.1:5432; do
+  for h in 127.attacker.example 127.0.0.1.attacker.example 127.1 127.256.0.1 localhost.attacker.example 10.0.0.5 example.com 127.0.0.1:5432 /nonexistent,10.1.2.3 /tmp,evil.example 127.0.0.1,10.0.0.5; do
     guard_expect "TEST_PGHOST=$h is refused" 2 REFUSED TEST_PGHOST="$h"
   done
   for h in 127.0.0.1 127.1.2.3 localhost ::1 /var/run/postgresql; do
