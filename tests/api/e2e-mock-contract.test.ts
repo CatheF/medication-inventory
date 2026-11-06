@@ -3,7 +3,7 @@
 // the real text changes and the mock does not, those specs would keep passing while testing words nobody will ever see.
 import { describe, expect, it } from "vitest";
 import { ITEM_NOT_FOUND_MESSAGE, mapSupabaseError } from "@/lib/api-errors";
-import { MOCK_ERROR_TEXT } from "../e2e/helpers/mock-api";
+import { MOCK_ERROR_BODIES, MOCK_ERROR_TEXT } from "../e2e/helpers/mock-api";
 
 describe("the browser tests' mock API says what the real routes say", () => {
   it("a category that cannot be created before the migration (error text and technical field)", () => {
@@ -13,6 +13,8 @@ describe("the browser tests' mock API says what the real routes say", () => {
     ).body;
     expect(MOCK_ERROR_TEXT.categoriesBlocked).toBe(real.error);
     expect(MOCK_ERROR_TEXT.categoriesBlockedTechnical).toBe(real.technical);
+    // The WHOLE answer, field by field: what the Admin page prints under the plain sentence is `detail` and `code`.
+    expect(MOCK_ERROR_BODIES.categoriesBlocked).toEqual(real);
   });
 
   it("a supplier order number before the migration: an edit and a create each say what really happened", () => {
@@ -22,6 +24,8 @@ describe("the browser tests' mock API says what the real routes say", () => {
     expect(MOCK_ERROR_TEXT.supplierMissingOnUpdate).toBe(update.error);
     expect(MOCK_ERROR_TEXT.supplierMissingOnCreate).toBe(create.error);
     expect(MOCK_ERROR_TEXT.supplierMissingTechnical).toBe(update.technical);
+    expect(MOCK_ERROR_BODIES.supplierMissingOnUpdate).toEqual({ ...update, field: "supplier_order_number" });
+    expect(MOCK_ERROR_BODIES.supplierMissingOnCreate).toEqual({ ...create, field: "supplier_order_number" });
   });
 
   it("a category that no longer exists, an item that is gone, and a barcode that is taken", () => {

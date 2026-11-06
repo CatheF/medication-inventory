@@ -1191,7 +1191,11 @@ test.describe("Admin: honest feedback when a save does not work", () => {
     await expect(error).toHaveAttribute("role", "alert");
     await expect(error).toContainText("Categories cannot be saved yet"); // what went wrong
     await expect(error).toContainText("whoever looks after this app"); // what to do about it
-    await expect(error).not.toContainText("row-level security"); // the technical cause is not in the red text
+    // The sentence staff read has no database words; the database's own words are in the small line under it, for whoever looks after the app.
+    await expect(error.locator("p").first()).not.toContainText("row-level security");
+    await expect(error.locator("p").first()).not.toContainText("42501");
+    await expect(error).toContainText("Technical details:");
+    await expect(error).toContainText("row-level security");
     await expect(page.getByTestId("category-note")).toHaveCount(0); // never "created and selected"
     await expect(page.getByTestId("admin-success")).toHaveCount(0);
     await expect(page.getByTestId("new-category-input")).toHaveValue("Vaccines"); // the typed name is kept

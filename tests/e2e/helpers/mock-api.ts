@@ -67,9 +67,33 @@ const SUPPLIER_MISSING_ON_CREATE_MESSAGE =
   "The item was not created.";
 const SUPPLIER_MISSING_TECHNICAL =
   "The medications table has no supplier_order_number column (code PGRST204). Apply the latest migration in supabase/migrations/.";
+// The database's own words, which the real routes put in `detail` beside the plain `error` (lib/api-errors.ts). The Admin page
+// prints them in its small "Technical details" line, so the mock must send them too, or a test could say "no database words on
+// screen" while the real server shows some.
+const CATEGORIES_BLOCKED_DETAIL = 'new row violates row-level security policy for table "categories"';
+const SUPPLIER_MISSING_DETAIL = "Could not find the 'supplier_order_number' column of 'medications' in the schema cache";
 const NO_CATEGORY_MESSAGE = "That category no longer exists, so nothing was saved. Reload the page and choose another category.";
 const ITEM_NOT_FOUND_MESSAGE = "Item not found. It may have been deleted by someone else. Reload the list to see what is there.";
 const DUPLICATE_BARCODE_MESSAGE = "Barcode already exists: another item uses it, so nothing was saved. Search for that item, or use a different barcode.";
+
+/** Whole answer bodies, exactly as the real routes send them; tests/api/e2e-mock-contract.test.ts compares each with the real mapping. */
+export const MOCK_ERROR_BODIES = {
+  categoriesBlocked: { error: CATEGORIES_BLOCKED_MESSAGE, code: "42501", detail: CATEGORIES_BLOCKED_DETAIL, technical: CATEGORIES_BLOCKED_TECHNICAL },
+  supplierMissingOnUpdate: {
+    error: SUPPLIER_MISSING_MESSAGE,
+    code: "PGRST204",
+    detail: SUPPLIER_MISSING_DETAIL,
+    technical: SUPPLIER_MISSING_TECHNICAL,
+    field: "supplier_order_number",
+  },
+  supplierMissingOnCreate: {
+    error: SUPPLIER_MISSING_ON_CREATE_MESSAGE,
+    code: "PGRST204",
+    detail: SUPPLIER_MISSING_DETAIL,
+    technical: SUPPLIER_MISSING_TECHNICAL,
+    field: "supplier_order_number",
+  },
+} as const;
 
 /** The mock's fixed answers, exported so a unit test can hold them against the real routes' wording. */
 export const MOCK_ERROR_TEXT = {
@@ -191,12 +215,7 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
           if (flags.supplierColumnMissing && (parsed.value !== null || !isCreate)) {
             return {
               status: 409,
-              body: {
-                error: isCreate ? SUPPLIER_MISSING_ON_CREATE_MESSAGE : SUPPLIER_MISSING_MESSAGE,
-                code: "PGRST204",
-                technical: SUPPLIER_MISSING_TECHNICAL,
-                field: key,
-              },
+              body: { ...(isCreate ? MOCK_ERROR_BODIES.supplierMissingOnCreate : MOCK_ERROR_BODIES.supplierMissingOnUpdate) },
             };
           }
           target.supplier_order_number = parsed.value;
@@ -249,7 +268,7 @@ export async function installMockApi(page: Page, options: MockApiOptions = {}): 
         const name = isDict(body) && typeof body.name === "string" ? body.name.trim() : "";
         if (!name || name.length > 60) return json(route, 400, { error: "Category name is required (1–60 characters)." });
         if (flags.categoriesBlocked) {
-          return json(route, 403, { error: CATEGORIES_BLOCKED_MESSAGE, code: "42501", technical: CATEGORIES_BLOCKED_TECHNICAL });
+          return json(route, 403, { ...MOCK_ERROR_BODIES.categoriesBlocked });
         }
         const existing = categories.find((c) => c.name.toLowerCase() === name.toLowerCase());
         if (existing) return json(route, 200, existing);
