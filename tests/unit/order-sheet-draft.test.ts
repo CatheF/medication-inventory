@@ -219,7 +219,7 @@ describe("parseDraft never throws on garbage", () => {
     expect(stored("999999999999")).toBe("999999999999");
     expect(stored("0".repeat(30) + "12")).toBe("0".repeat(30) + "12");
     expect(stored("9".repeat(500))).toBe("9".repeat(ORDER_SHEET_LIMITS.qtyTyped));
-    expect(ORDER_SHEET_LIMITS.qtyTyped).toBeGreaterThan(ORDER_SHEET_LIMITS.qtyInput);
+    expect(ORDER_SHEET_LIMITS.qtyTyped).toBeGreaterThan(ORDER_SHEET_LIMITS.qtyDigits);
   });
 
   it("survives a huge (but under the size guard) string field", () => {

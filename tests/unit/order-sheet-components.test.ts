@@ -343,7 +343,8 @@ describe("AddItems and SheetDetails: wording", () => {
     const html = addItems();
     expect(html).toContain('placeholder="Name, barcode or supplier order no."');
     const text = textOf(html);
-    expect(text).toContain("When only one item matches (for example after scanning its barcode), press Enter to add it.");
+    expect(text).toContain("When only one item matches (for example after scanning its barcode), press Enter to add it;");
+    expect(text).toContain("if several match, Enter adds the one whose barcode is exactly what you typed.");
     expect(text).toContain("An item that is already on the sheet is marked and is never added twice.");
     expect(html).toMatch(/<input[^>]*data-testid="add-search"[^>]*aria-describedby="[^"]+"/);
   });

@@ -19,9 +19,22 @@ const MAX_RESULTS = 8;
 
 const HELP_TEXT =
   "Type to find an item, then press Add. When only one item matches (for example after scanning its barcode), press Enter to " +
-  "add it. An item that is already on the sheet is marked and is never added twice.";
+  "add it; if several match, Enter adds the one whose barcode is exactly what you typed. An item that is already on the sheet " +
+  "is marked and is never added twice.";
 
 export type Announcement = { text: string; tick: number };
+
+/**
+ * The item an Enter means, or null when nothing should happen. Exactly one item listed: it is the one that was meant. Several
+ * listed: one of them may still be the one meant when its barcode is exactly the typed text (a scanned code that is also the
+ * beginning of another item's longer code: scanning 7000 lists 7000 and 70001, and Enter adds the item with barcode 7000).
+ * Zero, or several without such an exact match: nothing happens, the query and the list stay.
+ */
+function theOneMeant(matches: readonly Medication[], typed: string): Medication | null {
+  if (matches.length === 1) return matches[0];
+  const exact = matches.filter((item) => item.barcode === typed);
+  return exact.length === 1 ? exact[0] : null;
+}
 
 type AddItemsProps = {
   items: readonly Medication[];
@@ -75,10 +88,10 @@ export function AddItems({ items, categories, isOnSheet, onAdd, status, searchRe
             if (event.key !== "Enter") return;
             // Whatever surrounds the box, Enter here never submits anything.
             event.preventDefault();
-            // The Enter that confirms a text composition (IME), or a key that is held down, is not a scan.
-            if (event.nativeEvent.isComposing || event.repeat) return;
-            // Exactly one item is listed: it is the one that was meant. Zero or several: nothing happens, the query and the list stay.
-            const only = matches.length === 1 ? matches[0] : null;
+            // The Enter that confirms a text composition (IME), or a key that is held down, is not a scan. (Safari reports the
+            // confirming Enter with isComposing false and keyCode 229.)
+            if (event.nativeEvent.isComposing || event.repeat || event.nativeEvent.keyCode === 229) return;
+            const only = theOneMeant(matches, trimmed);
             if (only === null) return;
             onAdd(only);
             // An item that is already on the sheet makes the page jump to its row. The box takes the keyboard back at once, so

@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Category, Medication } from "@/lib/db";
 import { todayISO } from "@/lib/order-sheet/draft";
+import { isTimeoutError, timeLimit } from "./request-limit";
 
 /** `loadedAt` is when the data was read from the server (milliseconds since 1970): the page says "as of 2:41 PM". */
 export type Loaded<T> = { status: "loading" } | { status: "error"; message: string } | { status: "ready"; data: T; loadedAt: number };
@@ -19,28 +20,10 @@ export const STALE_AFTER_MS = 30_000;
 const NETWORK_MESSAGE = "Can’t reach the server. Check your internet connection and try again.";
 const UNEXPECTED_MESSAGE = "The server sent data this page doesn’t understand. Try again.";
 
-/**
- * How long a read may take before the page gives up and shows the error with Retry: the same 30 seconds the Home page and Admin
- * use. A paused or half-reachable database is the case where a request is accepted and then never answered; without a limit the
- * page would say "Loading the inventory…" for ever, with no way out.
- */
-const REQUEST_TIMEOUT_MS = 30_000;
-
 type FetchOutcome = { ok: true; data: unknown } | { ok: false; message: string };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** A fresh time limit for ONE request (never shared: a limit that has run out stays out). Undefined where the browser has none. */
-function timeLimit(): AbortSignal | undefined {
-  return typeof AbortSignal !== "undefined" && "timeout" in AbortSignal ? AbortSignal.timeout(REQUEST_TIMEOUT_MS) : undefined;
-}
-
-/** True for what a request fails with when its time limit runs out (TimeoutError) or the browser stops it (AbortError). */
-function isTimeoutError(error: unknown): boolean {
-  const name = typeof error === "object" && error !== null && "name" in error ? error.name : null;
-  return name === "TimeoutError" || name === "AbortError";
 }
 
 /**

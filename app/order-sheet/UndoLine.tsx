@@ -35,7 +35,14 @@ export function UndoLine({ text, tick, canUndo, canDismiss, rootRef, onUndo, onD
   };
 
   return (
-    <div ref={rootRef} className={shown ? "mt-2 flex scroll-mb-10 flex-wrap items-center gap-x-3 gap-y-1" : undefined}>
+    <div
+      ref={rootRef}
+      className={
+        shown
+          ? "sticky bottom-3 z-20 mt-4 flex scroll-mb-10 flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-gray-300 bg-white px-3 py-1.5 shadow-lg"
+          : undefined
+      }
+    >
       {/* Always mounted, so screen readers announce the text when it appears; invisible until there is a message. */}
       <p
         role="status"

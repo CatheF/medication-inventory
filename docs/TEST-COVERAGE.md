@@ -4,6 +4,8 @@ Each test package was written by an independent author directly from the owner's
 
 Source column: **Request N** is section N of the owner's original task description (1 repair categories, 2 browse by category, 3 supplier order number, 4 ordering sheet, 5 printing and export, 6 usability, 7 missing-inventory investigation, 8 preserve existing behaviour and security, 9 verification). **Design x.y** is a section of the design notes written before the code; those notes are not kept in the repository, so the requirement text next to it is the thing to read.
 
+Tests written after that review, in answer to what six independent reviewers and the second round of checks found (the stale-form category overwrite, text cut off silently, the Order sheet's Undo, time limits, accent-insensitive search, the cross-site and size limits of the API, the scanner and kiosk fixes, ...), are not in the tables below: they sit next to the code they test (tests/unit/admin-form.test.ts, tests/api/admin-payload-roundtrip.test.ts, tests/api/input-limits.test.ts, tests/api/request-guard.test.ts, tests/api/url-validation.test.ts, tests/unit/search-text.test.ts, tests/e2e/existing-scan-manual-box.spec.ts and the later blocks of tests/e2e/order-sheet.spec.ts and tests/e2e/admin.spec.ts). Each was written to fail on the code as it was before the fix.
+
 Status legend: **covered** = a test asserts it; **partially-covered** = some of it is asserted, see the note; **not-testable-here** = needs something this environment does not have (real Excel, a real Supabase project, a real printer, screen readers, ...).
 
 | Package | Where | Requirements considered | Covered | Partially | Not testable here |

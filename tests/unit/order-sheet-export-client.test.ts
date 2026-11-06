@@ -209,3 +209,61 @@ describe("what staff are told when it fails (and nothing is saved)", () => {
     expect((await failWith(response(200, { type: XLSX_TYPE, blob: "throws" }))).message).toBe("The Excel file did not finish downloading. Check your connection and try again.");
   });
 });
+
+// A paused or half-reachable database accepts a request and never answers it. Without a limit the page said "Creating the Excel
+// file..." for ever, with the button off and no way out; now the request has the same 30-second limit as the inventory read
+// (app/order-sheet/request-limit.ts) and ends in the page's usual export error, which has Retry.
+describe("a request nobody answers", () => {
+  const TOO_SLOW = "The server took too long to answer while creating the Excel file. Try again, or use Print / Save as PDF instead.";
+  const sheet = buildSheet(items, [{ id: 100, qty: "5", unit: "box" }], OPTIONS);
+
+  async function outcomeOf(answer: () => Promise<FakeResponse>) {
+    installBrowser(answer);
+    const outcome = await downloadWorkbook(sheet);
+    expect(saved, "no file is saved for a failure").toHaveLength(0);
+    expect(outcome.ok).toBe(false);
+    return outcome as { ok: false; message: string; inventoryChanged: boolean };
+  }
+
+  it("gives every request a fresh 30-second limit", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      await downloadWorkbook(sheet);
+      await downloadWorkbook(sheet);
+      expect(timeout).toHaveBeenCalledTimes(2);
+      expect(timeout).toHaveBeenNthCalledWith(1, 30_000);
+      expect(timeout).toHaveBeenNthCalledWith(2, 30_000);
+      const first = (fetchMock.mock.calls[0][1] as RequestInit).signal;
+      const second = (fetchMock.mock.calls[1][1] as RequestInit).signal;
+      expect(first).toBeInstanceOf(AbortSignal);
+      expect(second).toBeInstanceOf(AbortSignal);
+      expect(first, "a limit that has run out must not be reused by the next request").not.toBe(second);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("a request that runs out of time is 'too slow', not 'can't reach the server'", async () => {
+    const outcome = await outcomeOf(async () => {
+      throw new DOMException("The operation timed out.", "TimeoutError");
+    });
+    expect(outcome.message).toBe(TOO_SLOW);
+    expect(outcome.inventoryChanged).toBe(false);
+  });
+
+  it("a request the browser aborted is the same", async () => {
+    const outcome = await outcomeOf(async () => {
+      throw new DOMException("The user aborted a request.", "AbortError");
+    });
+    expect(outcome.message).toBe(TOO_SLOW);
+  });
+
+  it("a file that stops arriving before the limit is 'too slow' too, while a broken connection keeps its own message", async () => {
+    const stalled = { ...response(200, { type: XLSX_TYPE }), blob: async (): Promise<Blob> => { throw new DOMException("The operation timed out.", "TimeoutError"); } };
+    expect((await outcomeOf(async () => stalled)).message).toBe(TOO_SLOW);
+    expect((await outcomeOf(async () => response(200, { type: XLSX_TYPE, blob: "throws" }))).message).toBe(
+      "The Excel file did not finish downloading. Check your connection and try again."
+    );
+    expect((await outcomeOf(async () => { throw new TypeError("Failed to fetch"); })).message).toBe("Can’t reach the server. Check your internet connection and try again.");
+  });
+});

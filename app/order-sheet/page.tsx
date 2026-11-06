@@ -55,8 +55,9 @@ type UndoStep =
 /**
  * The message under "Add all low-stock items" and whether it carries Undo / Dismiss. The rules for when Undo stops being offered are
  * the Inventory tab's: it ends when it is used, dismissed or replaced by a newer action, when the sheet is cleared and when an item
- * is added by hand; typing a quantity does not end it and there is no timer. `reveal` scrolls the message into view (an "Add all"
- * inserts its rows ABOVE the button, so the message would otherwise be far below the screen).
+ * is added by hand; typing a quantity or unit in a row that "Add all" added ends it too (its Undo would delete the typed values),
+ * typing in any other row does not, and there is no timer. `reveal` scrolls the message into view (an "Add all" inserts its rows
+ * ABOVE the button, so the message would otherwise be far below the screen).
  */
 type StatusLine = { text: string; tick: number; undo: UndoStep | null; dismissable: boolean; reveal: boolean };
 const NO_LINE: StatusLine = { text: "", tick: 0, undo: null, dismissable: false, reveal: false };
@@ -417,8 +418,30 @@ export default function OrderSheetPage() {
     setStatusLine(null);
   };
 
-  const handleQty = useCallback((id: number, qty: string) => update((d) => updateRow(d, id, { qty })), [update]);
-  const handleUnit = useCallback((id: number, unit: string) => update((d) => updateRow(d, id, { unit })), [update]);
+  // Typing in a row that "Add all" put on the sheet means the person has started working on what that action added. The Undo
+  // would delete those rows together with everything typed in them, so the offer ends here (the rows stay). Rows that were on
+  // the sheet before the action are not touched by its Undo, so typing in them does not end it.
+  const endAddAllUndoFor = useCallback(
+    (id: number) => {
+      const step = lineRef.current.undo;
+      if (step !== null && step.kind === "added" && step.ids.includes(id)) setStatusLine(null);
+    },
+    [setStatusLine]
+  );
+  const handleQty = useCallback(
+    (id: number, qty: string) => {
+      update((d) => updateRow(d, id, { qty }));
+      endAddAllUndoFor(id);
+    },
+    [update, endAddAllUndoFor]
+  );
+  const handleUnit = useCallback(
+    (id: number, unit: string) => {
+      update((d) => updateRow(d, id, { unit }));
+      endAddAllUndoFor(id);
+    },
+    [update, endAddAllUndoFor]
+  );
 
   const askToClear = () => {
     setConfirmingClear(true);
@@ -601,17 +624,6 @@ export default function OrderSheetPage() {
                     <PlusIcon className="h-4 w-4" />
                     Add all low-stock items
                   </button>
-                  {/* The result of the latest "Add all" or Remove, with Undo and Dismiss. The message is a live region that is always
-                      in the page; it is invisible until there is a result. */}
-                  <UndoLine
-                    text={line.text}
-                    tick={line.tick}
-                    canUndo={line.undo !== null}
-                    canDismiss={line.dismissable}
-                    rootRef={statusRef}
-                    onUndo={handleUndo}
-                    onDismiss={handleDismissLine}
-                  />
                   <p className={HELP}>
                     Optional shortcut. Adds every item at or below its low-stock level (including out of stock) that is not already
                     on the sheet. Nothing is added unless you press this button.
@@ -657,6 +669,20 @@ export default function OrderSheetPage() {
                   </div>
                 </div>
               ) : null}
+
+              {/* The result of the latest "Add all" or Remove, with Undo and Dismiss. It is the last thing in this card and sticks to
+                  the bottom of the screen while the list above it is longer than the screen, so the Undo is in sight right where
+                  the person pressed Remove, without the page having to jump. The message is a live region that is always in the
+                  page; it is invisible until there is a result. */}
+              <UndoLine
+                text={line.text}
+                tick={line.tick}
+                canUndo={line.undo !== null}
+                canDismiss={line.dismissable}
+                rootRef={statusRef}
+                onUndo={handleUndo}
+                onDismiss={handleDismissLine}
+              />
             </section>
 
             <SheetDetails draft={draft} resolvedDate={resolvedDate} today={today} update={update} />

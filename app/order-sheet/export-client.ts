@@ -3,6 +3,7 @@
 // Nothing here places an order or changes stock: the endpoint only reads the inventory.
 
 import type { BuiltSheet } from "@/lib/order-sheet/types";
+import { isTimeoutError, timeLimit } from "./request-limit";
 
 const XLSX_CONTENT_TYPE_PART = "spreadsheetml.sheet";
 
@@ -16,6 +17,9 @@ export type ExportOutcome =
     };
 
 const GENERIC_FAILURE = "The Excel file could not be created. Try again, or use Print / Save as PDF instead.";
+// Said when the server took longer than the time limit (see request-limit.ts): a request nobody answers must end in an error
+// with Retry, not in "Creating the Excel file..." for ever.
+const TOO_SLOW = "The server took too long to answer while creating the Excel file. Try again, or use Print / Save as PDF instead.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -103,9 +107,10 @@ export async function downloadWorkbook(sheet: BuiltSheet): Promise<ExportOutcome
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
+      signal: timeLimit(),
     });
-  } catch {
-    return failure("Can’t reach the server. Check your internet connection and try again.");
+  } catch (error) {
+    return isTimeoutError(error) ? failure(TOO_SLOW) : failure("Can’t reach the server. Check your internet connection and try again.");
   }
 
   // Check the status and the content type BEFORE reading the body as a file: an error page must never be saved as .xlsx.
@@ -118,8 +123,9 @@ export async function downloadWorkbook(sheet: BuiltSheet): Promise<ExportOutcome
   let blob: Blob;
   try {
     blob = await response.blob();
-  } catch {
-    return failure("The Excel file did not finish downloading. Check your connection and try again.");
+  } catch (error) {
+    // The same limit covers receiving the file: one that stops arriving is "too slow", not a connection that is gone.
+    return isTimeoutError(error) ? failure(TOO_SLOW) : failure("The Excel file did not finish downloading. Check your connection and try again.");
   }
   if (blob.size === 0) return failure("The server sent an empty file. Try again.");
 

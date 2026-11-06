@@ -399,20 +399,20 @@ describe("buildSheet", () => {
 });
 
 // ── One limit, written once ───────────────────────────────────────────────────────────────────────────────────────
-// The largest order quantity used to exist in three forms: an unused MAX_ORDER_QTY constant, ORDER_SHEET_LIMITS.qtyInput (its
+// The largest order quantity used to exist in three forms: an unused MAX_ORDER_QTY constant, ORDER_SHEET_LIMITS.qtyDigits (its
 // number of digits) and the text "999,999,999" typed into the error message. The digit count is now the only source; every
 // text that names the limit is derived from it, so changing it can never leave a message that disagrees with the rule.
 describe("the order quantity limit is written once", () => {
   const WORDS = "Order quantity must be a whole number from 1 to 999,999,999 (digits only), or left blank.";
 
-  it("MAX_ORDER_QTY (no users anywhere) is gone; the limit is the digit count ORDER_SHEET_LIMITS.qtyInput", () => {
+  it("MAX_ORDER_QTY (no users anywhere) is gone; the limit is the digit count ORDER_SHEET_LIMITS.qtyDigits", () => {
     expect(Object.keys(limits)).not.toContain("MAX_ORDER_QTY");
-    expect(limits.ORDER_SHEET_LIMITS.qtyInput).toBe(9);
+    expect(limits.ORDER_SHEET_LIMITS.qtyDigits).toBe(9);
   });
 
   it("the limit as people read it is derived from the digit count", () => {
     expect(MAX_QTY_TEXT).toBe("999,999,999");
-    expect(MAX_QTY_TEXT.replace(/,/g, "")).toBe("9".repeat(limits.ORDER_SHEET_LIMITS.qtyInput));
+    expect(MAX_QTY_TEXT.replace(/,/g, "")).toBe("9".repeat(limits.ORDER_SHEET_LIMITS.qtyDigits));
   });
 
   it("every rejection says exactly what it said before", () => {

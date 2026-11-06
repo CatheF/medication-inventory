@@ -41,7 +41,7 @@ export type NormalizedQty = { ok: true; value: string } | { ok: false; reason: s
  * The largest order quantity as people read it (nine 9s with thousands separators). Built from the number of digits in
  * ORDER_SHEET_LIMITS (the one place the limit is defined), so no message can ever name a different limit than the rule enforces.
  */
-export const MAX_QTY_TEXT: string = "9".repeat(ORDER_SHEET_LIMITS.qtyInput).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+export const MAX_QTY_TEXT: string = "9".repeat(ORDER_SHEET_LIMITS.qtyDigits).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 
 const QTY_REASON = `Order quantity must be a whole number from 1 to ${MAX_QTY_TEXT} (digits only), or left blank.`;
 const DIGITS_ONLY = /^[0-9]+$/;
@@ -58,7 +58,7 @@ function withoutLeadingZeros(digits: string): string {
 export function isQtyTooLarge(input: string): boolean {
   if (typeof input !== "string") return false;
   const trimmed = input.trim();
-  return DIGITS_ONLY.test(trimmed) && withoutLeadingZeros(trimmed).length > ORDER_SHEET_LIMITS.qtyInput;
+  return DIGITS_ONLY.test(trimmed) && withoutLeadingZeros(trimmed).length > ORDER_SHEET_LIMITS.qtyDigits;
 }
 
 /**
@@ -74,7 +74,7 @@ export function normalizeQty(input: string): NormalizedQty {
   if (!DIGITS_ONLY.test(trimmed)) return { ok: false, reason: QTY_REASON };
   const stripped = withoutLeadingZeros(trimmed);
   // "" means the value was zero. More digits than the largest quantity has is above the maximum (checked by length, never by Number()).
-  if (stripped === "" || stripped.length > ORDER_SHEET_LIMITS.qtyInput) return { ok: false, reason: QTY_REASON };
+  if (stripped === "" || stripped.length > ORDER_SHEET_LIMITS.qtyDigits) return { ok: false, reason: QTY_REASON };
   return { ok: true, value: stripped };
 }
 

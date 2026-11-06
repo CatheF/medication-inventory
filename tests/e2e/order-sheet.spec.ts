@@ -2138,7 +2138,11 @@ test.describe("Order sheet: Undo for 'Add all low-stock items' and for Remove", 
       await page.keyboard.press("Enter");
       await expect(status(page)).toContainText("Added 3 low-stock items");
 
-      await page.keyboard.press("Tab"); // the message is not a stop; the next control is Undo
+      // The message sits at the end of the card (it sticks to the bottom of the screen while the list is long), so it comes after
+      // "Clear sheet" in the tab order; the message itself is not a stop, the next control after it is Undo.
+      await page.keyboard.press("Tab");
+      await expect(page.getByTestId("clear-sheet")).toBeFocused();
+      await page.keyboard.press("Tab");
       await expect(undo(page)).toBeFocused();
       await page.keyboard.down("Enter");
       await page.keyboard.down("Enter"); // the key is held: the repeat must not press the button focus has just moved to
@@ -2737,3 +2741,178 @@ test.describe("Order sheet: no box cuts typed text off without saying so", () =>
     }
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+// Follow-ups found by checking the Undo work in a real browser.
+test.describe("Order sheet: the Undo message stays in sight and an Undo never throws typed work away", () => {
+  const LONG = Array.from({ length: 26 }, (_, index) => mk(7800 + index, `Long sheet item ${String(index + 1).padStart(2, "0")}`, { stock: 100, threshold: 10 }));
+  const LOW = [
+    mk(7850, "Low item A", { stock: 1, threshold: 10 }),
+    mk(7851, "Low item B", { stock: 2, threshold: 10 }),
+    mk(7852, "Low item C", { stock: 3, threshold: 10 }),
+    mk(7853, "Plenty item", { stock: 90, threshold: 10 }),
+  ];
+  const undo = (page: Page): Locator => page.getByTestId("bulk-undo");
+  const status = (page: Page): Locator => page.getByTestId("low-stock-status");
+
+  for (const size of [
+    { name: "desktop", width: 1280, height: 720 },
+    { name: "phone", width: 360, height: 740 },
+  ]) {
+    test(`after Remove on a long sheet the message with its Undo is on screen at once, without the page moving (${size.name})`, async ({ page }) => {
+      await page.setViewportSize({ width: size.width, height: size.height });
+      await installMockApi(page, { medications: LONG });
+      await seedDraft(page, LONG.map((item) => ({ id: item.id, qty: "5", unit: "box" })));
+      await openSheet(page);
+      const target = page.getByTestId(`remove-row-${LONG[1].id}`);
+      await target.scrollIntoViewIfNeeded();
+      const scrollBefore = await page.evaluate(() => window.scrollY);
+      await target.click();
+      await expect(status(page)).toContainText(`Removed ${nameOf(LONG[1])}. 25 items left.`);
+      await expect(undo(page), "Undo is on screen where the person is working, not screens below").toBeInViewport();
+      await expect(status(page)).toBeInViewport();
+      // the page did not jump to the message: the person keeps their place in the list
+      const scrollAfter = await page.evaluate(() => window.scrollY);
+      expect(Math.abs(scrollAfter - scrollBefore)).toBeLessThan(40);
+      await undo(page).click();
+      expect(await sheetRowIds(page)).toContain(LONG[1].id);
+    });
+  }
+
+  test("typing a quantity in a row that 'Add all' added ends the Undo offer, so an Undo can never delete typed quantities; the rows stay", async ({ page }) => {
+    await installMockApi(page, { medications: LOW });
+    await seedDraft(page, []);
+    await openSheet(page);
+    await page.getByTestId("add-low-stock").click();
+    await expect(undo(page)).toBeVisible();
+    expect(await sheetRowIds(page)).toEqual([7850, 7851, 7852]);
+
+    await page.getByTestId("qty-input-7851").fill("7");
+    await expect(undo(page), "the person has started working on the added rows").toHaveCount(0);
+    await expect(status(page)).toHaveText("");
+    expect(await typedRows(page)).toEqual([
+      { id: 7850, qty: "", unit: "" },
+      { id: 7851, qty: "7", unit: "" },
+      { id: 7852, qty: "", unit: "" },
+    ]);
+    await expectScreenMatchesDraft(page);
+  });
+
+  test("typing a unit in a row that 'Add all' added ends the Undo offer too", async ({ page }) => {
+    await installMockApi(page, { medications: LOW });
+    await seedDraft(page, []);
+    await openSheet(page);
+    await page.getByTestId("add-low-stock").click();
+    await expect(undo(page)).toBeVisible();
+    await page.getByTestId("unit-input-7852").fill("boxes");
+    await expect(undo(page)).toHaveCount(0);
+    expect(await sheetRowIds(page)).toEqual([7850, 7851, 7852]);
+  });
+
+  test("typing in a row that was already on the sheet does not end the offer (it has nothing to do with the action)", async ({ page }) => {
+    await installMockApi(page, { medications: LOW });
+    await seedDraft(page, [{ id: 7853, qty: "3", unit: "cases" }]);
+    await openSheet(page);
+    await page.getByTestId("add-low-stock").click();
+    await expect(undo(page)).toBeVisible();
+    await page.getByTestId("qty-input-7853").fill("9");
+    await expect(undo(page)).toBeVisible();
+    await undo(page).click();
+    expect(await typedRows(page)).toEqual([{ id: 7853, qty: "9", unit: "cases" }]);
+  });
+});
+
+test.describe("Order sheet: Enter prefers the item whose barcode is exactly what was typed", () => {
+  const SHORT = mk(7901, "Short code item", { barcode: "7000" });
+  const LONGER = mk(7902, "Longer code item", { barcode: "70001" });
+  const OTHER = mk(7903, "Another item", { barcode: "70002" });
+  const search = (page: Page): Locator => page.getByTestId("add-search");
+
+  test("the code of one item is also the beginning of another's: Enter adds the exact one, empties the box, and the next scan is not glued on", async ({ page }) => {
+    await installMockApi(page, { medications: [SHORT, LONGER, OTHER] });
+    await seedDraft(page, []);
+    await openSheet(page);
+    await search(page).focus();
+    await page.keyboard.type("7000");
+    await expect(page.locator('[data-testid^="add-result-"]')).toHaveCount(3); // 7000, 70001 and 70002 all contain it
+    await page.keyboard.press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([SHORT.id]);
+    await expect(search(page)).toHaveValue("");
+
+    await page.keyboard.type("70002");
+    await page.keyboard.press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([SHORT.id, OTHER.id]);
+  });
+
+  test("several matches and none has exactly that barcode: Enter still does nothing and keeps what was typed", async ({ page }) => {
+    await installMockApi(page, { medications: [SHORT, LONGER, OTHER] });
+    await seedDraft(page, []);
+    await openSheet(page);
+    await search(page).fill("70");
+    await expect(page.locator('[data-testid^="add-result-"]')).toHaveCount(3);
+    await search(page).press("Enter");
+    await settle(page);
+    expect(await sheetRowIds(page)).toEqual([]);
+    await expect(search(page)).toHaveValue("70");
+  });
+
+  test("the exact barcode of an item that is already on the sheet is handled like any single match: it says so and adds no second row", async ({ page }) => {
+    await installMockApi(page, { medications: [SHORT, LONGER, OTHER] });
+    await seedDraft(page, [{ id: SHORT.id, qty: "2", unit: "box" }]);
+    await openSheet(page);
+    await search(page).fill("7000");
+    await search(page).press("Enter");
+    await expect(page.getByTestId("add-status")).toHaveText(`Already on the sheet: ${nameOf(SHORT)}.`);
+    expect(await sheetRowIds(page)).toEqual([SHORT.id]);
+    await expect(search(page)).toHaveValue("");
+  });
+
+  test("the Enter that confirms a text composition on Safari (keyCode 229, isComposing false) is not an add", async ({ page }) => {
+    await installMockApi(page, { medications: [SHORT, LONGER, OTHER] });
+    await seedDraft(page, []);
+    await openSheet(page);
+    await search(page).fill("70002");
+    await search(page).evaluate((input) => {
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", keyCode: 229, isComposing: false, bubbles: true, cancelable: true }));
+    });
+    await settle(page);
+    expect(await sheetRowIds(page)).toEqual([]);
+    await search(page).press("Enter");
+    await expect.poll(() => sheetRowIds(page)).toEqual([OTHER.id]);
+  });
+});
+
+test.describe("Order sheet: an Excel download that nobody answers", () => {
+  async function shortenRequestLimit(page: Page, ms = 600): Promise<void> {
+    await page.addInitScript((short: number) => {
+      const original = AbortSignal.timeout.bind(AbortSignal);
+      AbortSignal.timeout = (asked: number) => original(asked === 30_000 ? short : asked);
+    }, ms);
+  }
+
+  test("ends in the same export error with Retry instead of 'Creating the Excel file...' for ever; the sheet is untouched; Retry downloads it once the server answers", async ({ page }) => {
+    await shortenRequestLimit(page);
+    await installMockApi(page);
+    await seedDraft(page, [{ id: IBUPROFEN.id, qty: "4", unit: "box" }]);
+    await openSheet(page);
+    const gate = await holdAnswers(page, "**/api/order-sheet/xlsx");
+    try {
+      await page.getByTestId("export-xlsx").click();
+      await expect(page.getByText("Creating the Excel file…")).toBeVisible();
+      const error = page.getByTestId("export-error");
+      await expect(error, "the page gave up waiting and said so").toBeVisible({ timeout: 10_000 });
+      await expect(error).toContainText("The server took too long to answer while creating the Excel file.");
+      await expect(error).not.toContainText("Can’t reach the server");
+      await expect(page.getByTestId("export-xlsx")).toBeEnabled();
+      await expect(page.getByTestId(`qty-input-${IBUPROFEN.id}`)).toHaveValue("4");
+
+      gate.release();
+      const [download] = await Promise.all([page.waitForEvent("download"), error.getByRole("button", { name: "Retry" }).click()]);
+      expect(download.suggestedFilename()).toMatch(/\.xlsx$/);
+      await expect(page.getByTestId("export-success")).toBeVisible();
+    } finally {
+      gate.release();
+    }
+  });
+});
+

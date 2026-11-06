@@ -72,9 +72,9 @@ export const ORDER_SHEET_LIMITS = {
    * How many digits the largest valid order quantity has (it is that many 9s). This is the ONLY definition of that limit: the
    * words that name it (MAX_QTY_TEXT in ./build) and the check in normalizeQty are both derived from it.
    */
-  qtyInput: 9,
+  qtyDigits: 9,
   /**
-   * The most characters the draft keeps of a typed quantity. Deliberately far above qtyInput: a longer number is a mistake that
+   * The most characters the draft keeps of a typed quantity. Deliberately far above qtyDigits: a longer number is a mistake that
    * the page explains next to the box, and cutting it down to a valid-looking number would silently change what was meant. This
    * only stops an absurd paste from filling the stored draft.
    */
