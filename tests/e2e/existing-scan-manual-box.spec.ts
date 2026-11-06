@@ -7,6 +7,9 @@
 // scan lock stayed on while a result card was open, so such a lookup was silently ignored; the scan lock now covers the request
 // only, so that a second scan shows the second item). The fix keeps the looked-up code visible in the box but selects it, so what
 // is typed or scanned next replaces it, while editing it by hand still works.
+// The box also selects its text whenever it is entered (click or keyboard): a code can be in it without a lookup having just been
+// made from it (a scan made elsewhere on the page puts its code there), and clicking into the box afterwards must not glue the
+// next scan onto it either.
 //
 // Expected results:
 //   * against the current app (E2E_BASE_URL=http://127.0.0.1:3100): every test passes;
@@ -21,12 +24,14 @@ import {
   MEDICATIONS_LIST,
   createsIn,
   currentStock,
+  dropFocus,
   inventoryFixture,
   itemByName,
   lookupsIn,
   manualBarcodeBox,
   openHome,
   recordPageFetches,
+  scanWithKeyboard,
   statValue,
   watchPage,
   type ExpectedNoise,
@@ -118,6 +123,74 @@ test.describe("a scanner used while the manual box has focus and still shows the
     await page.keyboard.type("7");
 
     await expect(box).toHaveValue(`${ibuprofen.barcode}7`);
+    expect(watch.problems()).toEqual([]);
+  });
+
+  test("a scan made elsewhere on the page puts its code in the box; clicking into the box and scanning again replaces it", async ({ page }) => {
+    const fetches = await recordPageFetches(page, /\/api\/medications/);
+    const { mock, watch } = await boot(page);
+    const ibuprofen = itemByName(mock.medications, ITEM.ibuprofen);
+    const aspirin = itemByName(mock.medications, ITEM.aspirin);
+    const before = mock.medications.length;
+    const box = manualBarcodeBox(page);
+
+    await scanWithKeyboard(page, ibuprofen.barcode); // nothing is focused: the page-wide scanner handler takes it
+    await expect(currentStock(page)).toHaveText("Current stock: 18 units");
+    await expect(box, "the scanned code is shown in the box").toHaveValue(ibuprofen.barcode);
+
+    await box.click();
+    await page.keyboard.type(aspirin.barcode);
+    await page.keyboard.press("Enter");
+
+    await expect(currentStock(page)).toHaveText("Current stock: 60 units");
+    await expect(box).toHaveValue(aspirin.barcode);
+    const log = await fetches();
+    expect(lookupsIn(log)).toEqual([lookupLine(ibuprofen), lookupLine(aspirin)]);
+    expect(createsIn(log)).toEqual([]);
+    expect(mock.medications).toHaveLength(before);
+    expect(watch.problems()).toEqual([]);
+  });
+
+  test("a code typed and looked up, then focus moved away and back into the box: the next scan replaces it", async ({ page }) => {
+    const fetches = await recordPageFetches(page, /\/api\/medications/);
+    const { mock, watch } = await boot(page);
+    const ibuprofen = itemByName(mock.medications, ITEM.ibuprofen);
+    const aspirin = itemByName(mock.medications, ITEM.aspirin);
+    const before = mock.medications.length;
+    const box = manualBarcodeBox(page);
+
+    await box.fill(ibuprofen.barcode);
+    await box.press("Enter");
+    await expect(currentStock(page)).toHaveText("Current stock: 18 units");
+    await page.getByText("Total Items", { exact: true }).click(); // a real click elsewhere takes focus away
+    await expect(box).not.toBeFocused();
+
+    // A click lands anywhere in the box, also inside the text, where it would put the caret and end the selection.
+    await box.click({ position: { x: 12, y: 10 } });
+    await page.keyboard.type(aspirin.barcode);
+    await page.keyboard.press("Enter");
+
+    await expect(currentStock(page)).toHaveText("Current stock: 60 units");
+    const log = await fetches();
+    expect(lookupsIn(log)).toEqual([lookupLine(ibuprofen), lookupLine(aspirin)]);
+    expect(createsIn(log)).toEqual([]);
+    expect(mock.medications).toHaveLength(before);
+    expect(watch.problems()).toEqual([]);
+  });
+
+  test("entering the box from the keyboard selects its text too", async ({ page }) => {
+    const { mock, watch } = await boot(page);
+    const ibuprofen = itemByName(mock.medications, ITEM.ibuprofen);
+    const aspirin = itemByName(mock.medications, ITEM.aspirin);
+    const box = manualBarcodeBox(page);
+
+    await scanWithKeyboard(page, ibuprofen.barcode);
+    await expect(currentStock(page)).toHaveText("Current stock: 18 units");
+    await dropFocus(page);
+    await box.focus(); // what Tab does: no mouse involved
+
+    await page.keyboard.type(aspirin.barcode);
+    await expect(box).toHaveValue(aspirin.barcode);
     expect(watch.problems()).toEqual([]);
   });
 

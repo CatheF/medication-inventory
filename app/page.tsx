@@ -170,6 +170,10 @@ export default function MainPage() {
   const [processing, setProcessing] = useState(false);
   const [toast, setToast] = useState<Toast | null>(null);
   const manualInputRef = useRef<HTMLInputElement>(null);
+  // A click that is about to focus the manual box (set on mouse down, which runs before focus), and whether the focus it caused
+  // selected the text. Used only to keep that selection through the mouse-up of the same click.
+  const manualMouseDownRef = useRef(false);
+  const manualKeepSelectionRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Inventory state ─────────────────────────────────────────────
@@ -742,6 +746,23 @@ export default function MainPage() {
                   type="text"
                   value={manualBarcode}
                   onChange={(e) => setManualBarcode(e.target.value)}
+                  // Entering the box selects what is in it, so a code typed or scanned next replaces it. The box can still hold an
+                  // earlier code (a lookup leaves it there, and a scan made elsewhere on the page puts its code there), and a
+                  // handheld scanner types like a keyboard: without this its digits were added to the END of the old code, and
+                  // the lookup was for two barcodes glued together, which no item has, so it was saved as a junk "unknown" item.
+                  onMouseDown={() => {
+                    manualMouseDownRef.current = true;
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.select();
+                    manualKeepSelectionRef.current = manualMouseDownRef.current;
+                  }}
+                  onMouseUp={(e) => {
+                    // Some browsers drop the selection again when the click that focused the box is released.
+                    if (manualKeepSelectionRef.current) e.preventDefault();
+                    manualMouseDownRef.current = false;
+                    manualKeepSelectionRef.current = false;
+                  }}
                   placeholder="Enter barcode manually..."
                   aria-label="Barcode"
                   className="flex-1 min-w-0 min-h-11 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-600 text-gray-900"
